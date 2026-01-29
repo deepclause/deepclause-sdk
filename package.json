@@ -1,0 +1,65 @@
+{
+  "name": "deepclause-sdk",
+  "version": "0.1.0",
+  "description": "DeepClause SDK - Neurosymbolic AI with simplified DML language",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint src --ext .ts",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build",
+    "example": "tsx examples/quick-start.ts",
+    "examples": "tsx examples/basic-usage.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^1.0.0",
+    "@ai-sdk/google": "^1.0.0",
+    "@ai-sdk/openai": "^1.0.0",
+    "ai": "^4.0.0",
+    "swipl-wasm": "file:../vendor/swipl-wasm",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "@vitest/coverage-v8": "^2.0.0",
+    "eslint": "^8.57.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist",
+    "src/prolog-src"
+  ],
+  "keywords": [
+    "deepclause",
+    "dml",
+    "prolog",
+    "neurosymbolic",
+    "ai",
+    "llm",
+    "agent"
+  ],
+  "author": "DeepClause",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/deepclause/deepclause-desktop"
+  }
+}

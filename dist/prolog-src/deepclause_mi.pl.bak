@@ -1,0 +1,570 @@
+/**
+ * deepclause_mi.pl - Meta-interpreter for DeepClause SDK
+ * 
+ * The simplified meta-interpreter that handles:
+ * - task/1 and task/N predicates (agent loops)
+ * - exec/2 predicate (external tool calls)
+ * - Memory predicates (system, user, push_context, pop_context)
+ * - Output predicates (answer, yield, log)
+ * - Parameter handling
+ * 
+ * Key design decisions:
+ * - No @-predicates - all LLM interaction via task()
+ * - Cooperative execution via engine yields
+ * - Backtrackable memory via push_context/pop_context
+ */
+
+:- module(deepclause_mi, [
+    parse_dml/4,
+    create_engine/4,
+    step_engine/4,
+    destroy_engine/1,
+    post_agent_result/3,
+    post_exec_result/3,
+    provide_input/2,
+    mi/4
+]).
+
+:- use_module(deepclause_memory).
+:- use_module(deepclause_strings).
+
+%% Dynamic predicates for session state
+:- dynamic session_engine/2.       % session_engine(SessionId, Engine)
+:- dynamic session_memory/2.       % session_memory(SessionId, MemoryId)
+:- dynamic session_params/2.       % session_params(SessionId, ParamsDict)
+:- dynamic session_user_tools/2.   % session_user_tools(SessionId, ToolName)
+:- dynamic session_user_tool_schema/3. % session_user_tool_schema(SessionId, ToolName, Schema)
+:- dynamic session_pending_input/2. % session_pending_input(SessionId, Input)
+:- dynamic session_agent_result/2. % session_agent_result(SessionId, Result)
+:- dynamic session_exec_result/2.  % session_exec_result(SessionId, Result)
+
+%% ============================================================
+%% DML Parsing
+%% ============================================================
+
+%% parse_dml(+FilePath, +SessionId, +MemoryId, -Error)
+%% Parse a DML file and load its clauses into the session module
+parse_dml(FilePath, SessionId, MemoryId, Error) :-
+    catch(
+        (
+            read_file_to_string(FilePath, Code, []),
+            parse_dml_string(Code, SessionId, MemoryId),
+            Error = none
+        ),
+        ParseError,
+        format(atom(Error), '~w', [ParseError])
+    ).
+
+%% parse_dml_string(+Code, +SessionId, +MemoryId)
+%% Parse DML code from a string
+parse_dml_string(Code, SessionId, MemoryId) :-
+    open_string(Code, Stream),
+    parse_clauses(Stream, SessionId, MemoryId),
+    close(Stream).
+
+%% parse_clauses(+Stream, +SessionId, +MemoryId)
+%% Read and process all clauses from a stream
+parse_clauses(Stream, SessionId, MemoryId) :-
+    read_term(Stream, Term, [module(SessionId)]),
+    (   Term == end_of_file
+    ->  true
+    ;   process_clause(Term, SessionId, MemoryId),
+        parse_clauses(Stream, SessionId, MemoryId)
+    ).
+
+%% process_clause(+Term, +SessionId, +MemoryId)
+%% Process a single clause and add to session
+process_clause((:- Directive), SessionId, _MemoryId) :-
+    !,
+    process_directive(Directive, SessionId).
+
+%% Handle tool/2 with description: tool(Head, Description) :- Body
+process_clause((tool(ToolHead, Description) :- Body), SessionId, _MemoryId) :-
+    !,
+    extract_tool_schema(ToolHead, Description, ToolName, Schema),
+    assertz(session_user_tools(SessionId, ToolName)),
+    assertz(session_user_tool_schema(SessionId, ToolName, Schema)),
+    % Store the source code for the tool description
+    format(string(SourceCode), "tool(~w, ~q) :-~n    ~w.", [ToolHead, Description, Body]),
+    assertz(SessionId:tool_source(ToolName, SourceCode)),
+    % Assert the tool implementation (use just ToolHead for execution)
+    assertz(SessionId:(tool(ToolHead) :- Body)).
+
+%% Handle tool/1 without description: tool(Head) :- Body
+process_clause((tool(ToolHead) :- Body), SessionId, _MemoryId) :-
+    !,
+    extract_tool_schema(ToolHead, none, ToolName, Schema),
+    assertz(session_user_tools(SessionId, ToolName)),
+    assertz(session_user_tool_schema(SessionId, ToolName, Schema)),
+    % Store the source code for the tool description
+    format(string(SourceCode), "tool(~w) :-~n    ~w.", [ToolHead, Body]),
+    assertz(SessionId:tool_source(ToolName, SourceCode)),
+    % Assert the tool implementation
+    assertz(SessionId:(tool(ToolHead) :- Body)).
+
+process_clause((Head :- Body), SessionId, _MemoryId) :-
+    !,
+    % Regular clause - assert it
+    assertz(SessionId:(Head :- Body)).
+
+process_clause(Fact, SessionId, _MemoryId) :-
+    % Simple fact
+    assertz(SessionId:Fact).
+
+%% ============================================================
+%% Tool Schema Extraction
+%% ============================================================
+
+%% extract_tool_schema(+ToolHead, +Description, -ToolName, -Schema)
+%% Parse tool head to extract schema information
+%% Schema = schema{name, description, inputs, outputs}
+%% Each param = param{name, type, direction}
+extract_tool_schema(ToolHead, Description, ToolName, Schema) :-
+    ToolHead =.. [ToolName|Args],
+    length(Args, Arity),
+    extract_params(Args, 1, Arity, Inputs, Outputs),
+    (Description == none -> Desc = "" ; Desc = Description),
+    Schema = schema{
+        name: ToolName,
+        description: Desc,
+        inputs: Inputs,
+        outputs: Outputs
+    }.
+
+%% extract_params(+Args, +Index, +Arity, -Inputs, -Outputs)
+%% Extract input and output parameters from argument list
+%% Uses positional inference: first N-1 args are inputs, last arg is output
+%% Parameter names are generic: arg1, arg2, etc.
+extract_params([], _, _, [], []) :- !.
+extract_params([_Arg|Rest], Index, Arity, Inputs, Outputs) :-
+    format(atom(Name), 'arg~w', [Index]),
+    Type = string,  % Default type
+    NextIndex is Index + 1,
+    extract_params(Rest, NextIndex, Arity, RestInputs, RestOutputs),
+    Param = param{name: Name, type: Type},
+    % Last arg is output, all others are inputs
+    (   Index == Arity
+    ->  Inputs = RestInputs, Outputs = [Param|RestOutputs]
+    ;   Inputs = [Param|RestInputs], Outputs = RestOutputs
+    ).
+
+%% process_directive(+Directive, +SessionId)
+%% Handle directives like :- param(...)
+process_directive(param(Key, Desc), SessionId) :-
+    !,
+    assertz(SessionId:param_decl(Key, Desc)).
+process_directive(param(Key, Desc, Default), SessionId) :-
+    !,
+    assertz(SessionId:param_decl(Key, Desc, Default)).
+process_directive(_, _).
+
+%% ============================================================
+%% Engine Management
+%% ============================================================
+
+%% create_engine(+SessionId, +MemoryId, +Params, -Engine)
+%% Create a cooperative execution engine for agent_main
+create_engine(SessionId, MemoryId, Params, Engine) :-
+    assertz(session_memory(SessionId, MemoryId)),
+    assertz(session_params(SessionId, Params)),
+    % Determine goal based on what agent_main arity is defined
+    determine_agent_goal(SessionId, Params, Goal),
+    % Create the engine - pass SessionId to mi/4
+    engine_create(_, 
+        deepclause_mi:mi(Goal, MemoryId, Params, SessionId),
+        Engine),
+    assertz(session_engine(SessionId, Engine)).
+
+%% determine_agent_goal(+SessionId, +Params, -Goal)
+%% Determine the correct agent_main goal to call based on arity
+determine_agent_goal(SessionId, _Params, SessionId:agent_main) :-
+    current_predicate(SessionId:agent_main/0), !.
+determine_agent_goal(SessionId, Params, Goal) :-
+    current_predicate(SessionId:agent_main/1), !,
+    % Get first parameter value from dict
+    dict_pairs(Params, _, Pairs),
+    (   Pairs = [_-V1|_]
+    ->  Goal = SessionId:agent_main(V1)
+    ;   Goal = SessionId:agent_main(_)
+    ).
+determine_agent_goal(SessionId, Params, Goal) :-
+    current_predicate(SessionId:agent_main/2), !,
+    dict_pairs(Params, _, Pairs),
+    (   Pairs = [_-V1, _-V2|_]
+    ->  Goal = SessionId:agent_main(V1, V2)
+    ;   Pairs = [_-V1|_]
+    ->  Goal = SessionId:agent_main(V1, _)
+    ;   Goal = SessionId:agent_main(_, _)
+    ).
+determine_agent_goal(SessionId, _Params, SessionId:agent_main).
+
+%% step_engine(+SessionId, -Status, -Content, -Payload)
+%% Execute one step of the engine and return the result
+step_engine(SessionId, Status, Content, Payload) :-
+    session_engine(SessionId, Engine),
+    (   engine_next(Engine, Result)
+    ->  process_engine_result(Result, Status, Content, Payload)
+    ;   Status = finished,
+        Content = '',
+        Payload = none
+    ).
+
+%% process_engine_result(+Result, -Status, -Content, -Payload)
+process_engine_result(output(Text), output, Text, none) :- !.
+process_engine_result(log(Text), log, Text, none) :- !.
+process_engine_result(answer(Text), answer, Text, none) :- !.
+process_engine_result(request_agent_loop(Desc, Vars, Tools), request_agent_loop, '', 
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools}) :- !.
+process_engine_result(request_exec(Tool, Args), request_exec, '',
+    payload{toolName: Tool, args: Args}) :- !.
+process_engine_result(wait_input(Prompt), wait_input, Prompt, none) :- !.
+process_engine_result(error(Msg), error, Msg, none) :- !.
+process_engine_result(Other, error, Msg, none) :-
+    format(atom(Msg), 'Unknown engine result: ~w', [Other]).
+
+%% destroy_engine(+SessionId)
+%% Clean up engine and session state
+destroy_engine(SessionId) :-
+    (   session_engine(SessionId, Engine)
+    ->  catch(engine_destroy(Engine), _, true)
+    ;   true
+    ),
+    retractall(session_engine(SessionId, _)),
+    retractall(session_memory(SessionId, _)),
+    retractall(session_params(SessionId, _)),
+    retractall(session_user_tools(SessionId, _)),
+    retractall(session_user_tool_schema(SessionId, _, _)),
+    retractall(session_pending_input(SessionId, _)),
+    retractall(session_agent_result(SessionId, _)),
+    retractall(session_exec_result(SessionId, _)),
+    % Clean up session module (if it exists)
+    (   current_module(SessionId)
+    ->  catch(
+            (   findall(Head, 
+                    (current_predicate(SessionId:Name/Arity), 
+                     functor(Head, Name, Arity), 
+                     clause(SessionId:Head, _)),
+                    Heads),
+                forall(member(H, Heads), retractall(SessionId:H))
+            ),
+            _,
+            true
+        )
+    ;   true
+    ).
+
+%% ============================================================
+%% Result Posting (from JavaScript)
+%% ============================================================
+
+%% post_agent_result(+SessionId, +Success, +Variables)
+%% Post the result of an agent loop back to the waiting engine
+post_agent_result(SessionId, Success, Variables) :-
+    assertz(session_agent_result(SessionId, result{success: Success, variables: Variables})),
+    session_engine(SessionId, Engine),
+    engine_post(Engine, agent_done).
+
+%% post_exec_result(+SessionId, +Status, +Result)
+%% Post the result of an exec call back to the waiting engine
+post_exec_result(SessionId, Status, Result) :-
+    assertz(session_exec_result(SessionId, result{status: Status, result: Result})),
+    session_engine(SessionId, Engine),
+    engine_post(Engine, exec_done).
+
+%% provide_input(+SessionId, +Input)
+%% Provide user input to a waiting engine
+provide_input(SessionId, Input) :-
+    assertz(session_pending_input(SessionId, Input)),
+    session_engine(SessionId, Engine),
+    engine_post(Engine, input_provided).
+
+%% ============================================================
+%% Meta-Interpreter Core
+%% ============================================================
+
+%% mi(+Goal, +MemoryId, +Params, +SessionId)
+%% Main meta-interpreter entry point
+mi(Goal, MemoryId, Params, SessionId) :-
+    % Store session ID for use by get_session_id/1
+    nb_setval(current_session_id, SessionId),
+    catch(
+        mi_call(Goal, MemoryId, Params),
+        Error,
+        (   format(atom(ErrMsg), 'Runtime error: ~w', [Error]),
+            engine_yield(error(ErrMsg)),
+            fail
+        )
+    ).
+
+%% ============================================================
+%% Task Handling
+%% ============================================================
+
+%% collect_user_tools(+SessionId, -ToolSchemas)
+%% Collect all user tool schemas for the session
+collect_user_tools(SessionId, ToolSchemas) :-
+    findall(
+        tool_info{name: Name, schema: Schema, source: Source},
+        (
+            session_user_tool_schema(SessionId, Name, Schema),
+            (SessionId:tool_source(Name, Source) -> true ; Source = "")
+        ),
+        ToolSchemas
+    ).
+
+%% mi_call(task(Desc), +MemoryId, +Params)
+%% Handle task/1 - simple task without output variables
+mi_call(task(Desc), MemoryId, Params) :-
+    !,
+    interpolate_desc(Desc, Params, InterpDesc),
+    get_session_id(SessionId),
+    collect_user_tools(SessionId, UserTools),
+    % Yield request to JavaScript with tool schemas
+    engine_yield(request_agent_loop(InterpDesc, [], UserTools)),
+    % Wait for result
+    engine_fetch(_Signal),
+    % Get and process result
+    session_agent_result(SessionId, Result),
+    retract(session_agent_result(SessionId, _)),
+    Result.success == true.
+
+%% mi_call(task(Desc, Var1), +MemoryId, +Params)
+%% Handle task/2 - task with one output variable
+mi_call(task(Desc, Var1), MemoryId, Params) :-
+    !,
+    mi_call_task_n(Desc, [Var1], ['Var1'], MemoryId, Params).
+
+%% mi_call(task(Desc, Var1, Var2), +MemoryId, +Params)
+%% Handle task/3 - task with two output variables
+mi_call(task(Desc, Var1, Var2), MemoryId, Params) :-
+    !,
+    mi_call_task_n(Desc, [Var1, Var2], ['Var1', 'Var2'], MemoryId, Params).
+
+%% mi_call(task(Desc, Var1, Var2, Var3), +MemoryId, +Params)
+%% Handle task/4 - task with three output variables
+mi_call(task(Desc, Var1, Var2, Var3), MemoryId, Params) :-
+    !,
+    mi_call_task_n(Desc, [Var1, Var2, Var3], ['Var1', 'Var2', 'Var3'], MemoryId, Params).
+
+%% mi_call_task_n(+Desc, +Vars, +VarNames, +MemoryId, +Params)
+%% Generic handler for task/N with N-1 output variables
+mi_call_task_n(Desc, Vars, VarNames, _MemoryId, Params) :-
+    interpolate_desc(Desc, Params, InterpDesc),
+    get_session_id(SessionId),
+    collect_user_tools(SessionId, UserTools),
+    % Yield request to JavaScript with tool schemas
+    engine_yield(request_agent_loop(InterpDesc, VarNames, UserTools)),
+    % Wait for result
+    engine_fetch(_Signal),
+    % Get and process result
+    session_agent_result(SessionId, Result),
+    retract(session_agent_result(SessionId, _)),
+    Result.success == true,
+    % Bind output variables
+    bind_task_variables(Result.variables, VarNames, Vars).
+
+%% bind_task_variables(+VarsDict, +Names, -Values)
+bind_task_variables(_, [], []) :- !.
+bind_task_variables(VarsDict, [Name|Names], [Value|Values]) :-
+    (   get_dict(Name, VarsDict, Value)
+    ->  true
+    ;   true  % Leave unbound if not present
+    ),
+    bind_task_variables(VarsDict, Names, Values).
+
+%% ============================================================
+%% Exec Handling
+%% ============================================================
+
+%% mi_call(exec(ToolCall, Output), +MemoryId, +Params)
+%% Handle exec/2 - external tool execution
+mi_call(exec(ToolCall, Output), _MemoryId, _Params) :-
+    !,
+    ToolCall =.. [ToolName|Args],
+    get_session_id(SessionId),
+    % Yield request to JavaScript
+    engine_yield(request_exec(ToolName, Args)),
+    % Wait for result
+    engine_fetch(_Signal),
+    % Get and process result
+    session_exec_result(SessionId, Result),
+    retract(session_exec_result(SessionId, _)),
+    (   Result.status == success
+    ->  Output = Result.result
+    ;   fail
+    ).
+
+%% ============================================================
+%% Memory Predicates
+%% ============================================================
+
+%% mi_call(system(Text), +MemoryId, +Params)
+mi_call(system(Text), MemoryId, Params) :-
+    !,
+    interpolate_desc(Text, Params, InterpText),
+    deepclause_memory:push_memory(MemoryId, message{role: system, content: InterpText}).
+
+%% mi_call(user(Text), +MemoryId, +Params)
+mi_call(user(Text), MemoryId, Params) :-
+    !,
+    interpolate_desc(Text, Params, InterpText),
+    deepclause_memory:push_memory(MemoryId, message{role: user, content: InterpText}).
+
+%% mi_call(push_context, +MemoryId, +Params)
+mi_call(push_context, MemoryId, _Params) :-
+    !,
+    deepclause_memory:push_context(MemoryId).
+
+%% mi_call(pop_context, +MemoryId, +Params)
+mi_call(pop_context, MemoryId, _Params) :-
+    !,
+    deepclause_memory:pop_context(MemoryId).
+
+%% ============================================================
+%% Output Predicates
+%% ============================================================
+
+%% mi_call(answer(Text), +MemoryId, +Params)
+mi_call(answer(Text), _MemoryId, Params) :-
+    !,
+    interpolate_desc(Text, Params, InterpText),
+    engine_yield(answer(InterpText)).
+
+%% mi_call(yield(Text), +MemoryId, +Params)
+mi_call(yield(Text), _MemoryId, Params) :-
+    !,
+    interpolate_desc(Text, Params, InterpText),
+    engine_yield(output(InterpText)).
+
+%% mi_call(log(Text), +MemoryId, +Params)
+mi_call(log(Text), _MemoryId, Params) :-
+    !,
+    interpolate_desc(Text, Params, InterpText),
+    engine_yield(log(InterpText)).
+
+%% ============================================================
+%% Parameter Handling
+%% ============================================================
+
+%% mi_call(param(Key, Desc, Value), +MemoryId, +Params)
+mi_call(param(Key, _Desc, Value), _MemoryId, Params) :-
+    !,
+    (   atom(Key)
+    ->  KeyAtom = Key
+    ;   atom_string(KeyAtom, Key)
+    ),
+    get_dict(KeyAtom, Params, Value).
+
+%% ============================================================
+%% Control Flow
+%% ============================================================
+
+%% mi_call((A, B), +MemoryId, +Params)
+mi_call((A, B), MemoryId, Params) :-
+    !,
+    mi_call(A, MemoryId, Params),
+    mi_call(B, MemoryId, Params).
+
+%% mi_call((A ; B), +MemoryId, +Params)
+mi_call((A ; B), MemoryId, Params) :-
+    !,
+    (   mi_call(A, MemoryId, Params)
+    ;   mi_call(B, MemoryId, Params)
+    ).
+
+%% mi_call((Cond -> Then ; Else), +MemoryId, +Params)
+mi_call((Cond -> Then ; Else), MemoryId, Params) :-
+    !,
+    (   mi_call(Cond, MemoryId, Params)
+    ->  mi_call(Then, MemoryId, Params)
+    ;   mi_call(Else, MemoryId, Params)
+    ).
+
+%% mi_call((Cond -> Then), +MemoryId, +Params)
+mi_call((Cond -> Then), MemoryId, Params) :-
+    !,
+    (   mi_call(Cond, MemoryId, Params)
+    ->  mi_call(Then, MemoryId, Params)
+    ).
+
+%% mi_call(\+(Goal), +MemoryId, +Params)
+mi_call(\+(Goal), MemoryId, Params) :-
+    !,
+    \+ mi_call(Goal, MemoryId, Params).
+
+%% mi_call(!, +MemoryId, +Params)
+mi_call(!, _MemoryId, _Params) :-
+    !.
+
+%% mi_call(true, +MemoryId, +Params)
+mi_call(true, _MemoryId, _Params) :-
+    !.
+
+%% mi_call(fail, +MemoryId, +Params)
+mi_call(fail, _MemoryId, _Params) :-
+    !,
+    fail.
+
+%% mi_call(false, +MemoryId, +Params)
+mi_call(false, _MemoryId, _Params) :-
+    !,
+    fail.
+
+%% ============================================================
+%% Module-Qualified Goals
+%% ============================================================
+
+%% mi_call(Module:Goal, +MemoryId, +Params)
+mi_call(Module:Goal, MemoryId, Params) :-
+    !,
+    (   % Check if it's a user-defined predicate that needs meta-interpretation
+        callable(Module:Goal), clause(Module:Goal, Body),
+        Body \== true
+    ->  mi_call(Body, MemoryId, Params)
+    ;   % Try direct call
+        call(Module:Goal)
+    ).
+
+%% ============================================================
+%% Built-in and User-Defined Predicates
+%% ============================================================
+
+%% mi_call(Goal, +MemoryId, +Params)
+%% Default handler - try built-in first, then user-defined
+mi_call(Goal, MemoryId, Params) :-
+    % Guard: Goal must be callable (not a variable)
+    (   var(Goal)
+    ->  throw(error(instantiation_error, mi_call/3))
+    ;   true
+    ),
+    % Try as built-in
+    (   predicate_property(Goal, built_in)
+    ->  call(Goal)
+    ;   % Try as user-defined with meta-interpretation
+        get_session_id(SessionId),
+        callable(Goal),
+        catch(clause(SessionId:Goal, Body), _, fail)
+    ->  mi_call(Body, MemoryId, Params)
+    ;   % Final fallback - direct call
+        call(Goal)
+    ).
+
+%% ============================================================
+%% Helper Predicates
+%% ============================================================
+
+%% interpolate_desc(+Template, +Params, -Result)
+%% Expand {Variable} patterns using params
+interpolate_desc(Template, Params, Result) :-
+    (   is_dict(Params)
+    ->  dict_pairs(Params, _, Pairs),
+        maplist([K-V, K=V]>>true, Pairs, Bindings),
+        deepclause_strings:interpolate_string(Template, Bindings, Result)
+    ;   Result = Template
+    ).
+
+%% get_session_id(-SessionId)
+%% Extract session ID from current execution context
+get_session_id(SessionId) :-
+    nb_current(current_session_id, SessionId), !.
+get_session_id(default_session).
