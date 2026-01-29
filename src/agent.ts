@@ -5,7 +5,7 @@
 
 import { generateText, streamText, tool as aiTool, type CoreTool, type CoreMessage, jsonSchema } from 'ai';
 import { z } from 'zod';
-import type { ToolDefinition, MemoryMessage, JsonSchema } from './types.js';
+import type { ToolDefinition, MemoryMessage } from './types.js';
 import { createModelProvider } from './prolog/bridge.js';
 
 /**
@@ -131,7 +131,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     // Handle both Zod schemas and JSON Schema
     const params = isZodSchema(tool.parameters)
       ? tool.parameters
-      : jsonSchema(tool.parameters as JsonSchema);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      : jsonSchema(tool.parameters as any);
     
     aiTools[name] = aiTool({
       description: tool.description,

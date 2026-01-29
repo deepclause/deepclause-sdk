@@ -80,6 +80,7 @@ export async function runAgentLoop(options) {
         // Handle both Zod schemas and JSON Schema
         const params = isZodSchema(tool.parameters)
             ? tool.parameters
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             : jsonSchema(tool.parameters);
         aiTools[name] = aiTool({
             description: tool.description,

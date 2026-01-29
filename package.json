@@ -27,7 +27,7 @@
     "@ai-sdk/google": "^1.0.0",
     "@ai-sdk/openai": "^1.0.0",
     "ai": "^4.0.0",
-    "swipl-wasm": "file:../vendor/swipl-wasm",
+    "swipl-wasm": "file:./vendor/swipl-wasm",
     "zod": "^3.23.0"
   },
   "devDependencies": {
@@ -45,7 +45,10 @@
   },
   "files": [
     "dist",
-    "src/prolog-src"
+    "src/prolog-src",
+    "vendor/swipl-wasm/dist",
+    "vendor/swipl-wasm/package.json",
+    "vendor/swipl-wasm/LICENSE.txt"
   ],
   "keywords": [
     "deepclause",
@@ -60,6 +63,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/deepclause/deepclause-desktop"
-  }
+    "url": "https://github.com/deepclause/deepclause-sdk"
+  },
+  "bugs": {
+    "url": "https://github.com/deepclause/deepclause-sdk/issues"
+  },
+  "homepage": "https://github.com/deepclause/deepclause-sdk#readme"
 }
