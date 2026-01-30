@@ -87,9 +87,72 @@ parse_clauses(Stream, SessionId) :-
     read_term(Stream, Term, [module(SessionId), variable_names(Bindings)]),
     (   Term == end_of_file
     ->  true
-    ;   expand_interpolations(Term, Bindings, ExpandedTerm),
+    ;   % First, transform task/N calls to include variable names
+        transform_task_calls(Term, Bindings, TransformedTerm),
+        % Then expand string interpolations
+        expand_interpolations(TransformedTerm, Bindings, ExpandedTerm),
         process_clause(ExpandedTerm, SessionId),
         parse_clauses(Stream, SessionId)
+    ).
+
+%% ============================================================
+%% Task Call Transformation (compile-time)
+%% ============================================================
+
+%% transform_task_calls(+Term, +Bindings, -TransformedTerm)
+%% Transform task(Desc, Var1, ...) to task_named(Desc, [Var1, ...], ['Name1', ...])
+transform_task_calls(Var, _, Var) :- var(Var), !.
+transform_task_calls((Head :- Body), Bindings, (Head :- TransformedBody)) :- !,
+    transform_task_calls(Body, Bindings, TransformedBody).
+transform_task_calls((A, B), Bindings, (TA, TB)) :- !,
+    transform_task_calls(A, Bindings, TA),
+    transform_task_calls(B, Bindings, TB).
+transform_task_calls((A ; B), Bindings, (TA ; TB)) :- !,
+    transform_task_calls(A, Bindings, TA),
+    transform_task_calls(B, Bindings, TB).
+transform_task_calls((A -> B), Bindings, (TA -> TB)) :- !,
+    transform_task_calls(A, Bindings, TA),
+    transform_task_calls(B, Bindings, TB).
+transform_task_calls(\+ A, Bindings, \+ TA) :- !,
+    transform_task_calls(A, Bindings, TA).
+
+%% Transform task/2 to task_named/3
+transform_task_calls(task(Desc, V1), Bindings, task_named(Desc, [V1], Names)) :- !,
+    maplist(var_to_name(Bindings), [V1], Names).
+
+%% Transform task/3 to task_named/3
+transform_task_calls(task(Desc, V1, V2), Bindings, task_named(Desc, [V1, V2], Names)) :- !,
+    maplist(var_to_name(Bindings), [V1, V2], Names).
+
+%% Transform task/4 to task_named/3
+transform_task_calls(task(Desc, V1, V2, V3), Bindings, task_named(Desc, [V1, V2, V3], Names)) :- !,
+    maplist(var_to_name(Bindings), [V1, V2, V3], Names).
+
+%% Transform task/5 to task_named/3
+transform_task_calls(task(Desc, V1, V2, V3, V4), Bindings, task_named(Desc, [V1, V2, V3, V4], Names)) :- !,
+    maplist(var_to_name(Bindings), [V1, V2, V3, V4], Names).
+
+%% Transform prompt/2 to prompt_named/3
+transform_task_calls(prompt(Desc, V1), Bindings, prompt_named(Desc, [V1], Names)) :- !,
+    maplist(var_to_name(Bindings), [V1], Names).
+
+%% Transform prompt/3 to prompt_named/3
+transform_task_calls(prompt(Desc, V1, V2), Bindings, prompt_named(Desc, [V1, V2], Names)) :- !,
+    maplist(var_to_name(Bindings), [V1, V2], Names).
+
+%% Transform prompt/4 to prompt_named/3
+transform_task_calls(prompt(Desc, V1, V2, V3), Bindings, prompt_named(Desc, [V1, V2, V3], Names)) :- !,
+    maplist(var_to_name(Bindings), [V1, V2, V3], Names).
+
+%% Default: no transformation needed
+transform_task_calls(Term, _, Term).
+
+%% var_to_name(+Bindings, +Var, -Name)
+%% Look up a variable's name from the bindings list
+var_to_name(Bindings, Var, Name) :-
+    (   member(N=V, Bindings), V == Var
+    ->  Name = N
+    ;   Name = 'Var'  % Fallback if not found
     ).
 
 %% process_clause(+Term, +SessionId)
@@ -446,20 +509,11 @@ mi_call(task(Desc), StateIn, StateOut) :-
         )
     ).
 
-%% mi_call(task(Desc, Var1), +StateIn, -StateOut)
-mi_call(task(Desc, Var1), StateIn, StateOut) :-
+%% mi_call(task_named(Desc, Vars, VarNames), +StateIn, -StateOut)
+%% New unified handler for task/N with embedded variable names
+mi_call(task_named(Desc, Vars, VarNames), StateIn, StateOut) :-
     !,
-    mi_call_task_n(Desc, [Var1], ['Var1'], StateIn, StateOut).
-
-%% mi_call(task(Desc, Var1, Var2), +StateIn, -StateOut)
-mi_call(task(Desc, Var1, Var2), StateIn, StateOut) :-
-    !,
-    mi_call_task_n(Desc, [Var1, Var2], ['Var1', 'Var2'], StateIn, StateOut).
-
-%% mi_call(task(Desc, Var1, Var2, Var3), +StateIn, -StateOut)
-mi_call(task(Desc, Var1, Var2, Var3), StateIn, StateOut) :-
-    !,
-    mi_call_task_n(Desc, [Var1, Var2, Var3], ['Var1', 'Var2', 'Var3'], StateIn, StateOut).
+    mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut).
 
 %% ============================================================
 %% Prompt Handling - Fresh LLM call without existing memory
@@ -481,20 +535,11 @@ mi_call(prompt(Desc), StateIn, StateIn) :-
     Result.success == true.
     % Don't modify memory - state unchanged
 
-%% mi_call(prompt(Desc, Var1), +StateIn, -StateOut)
-mi_call(prompt(Desc, Var1), StateIn, StateOut) :-
+%% mi_call(prompt_named(Desc, Vars, VarNames), +StateIn, -StateOut)
+%% New unified handler for prompt/N with embedded variable names
+mi_call(prompt_named(Desc, Vars, VarNames), StateIn, StateOut) :-
     !,
-    mi_call_prompt_n(Desc, [Var1], ['Var1'], StateIn, StateOut).
-
-%% mi_call(prompt(Desc, Var1, Var2), +StateIn, -StateOut)
-mi_call(prompt(Desc, Var1, Var2), StateIn, StateOut) :-
-    !,
-    mi_call_prompt_n(Desc, [Var1, Var2], ['Var1', 'Var2'], StateIn, StateOut).
-
-%% mi_call(prompt(Desc, Var1, Var2, Var3), +StateIn, -StateOut)
-mi_call(prompt(Desc, Var1, Var2, Var3), StateIn, StateOut) :-
-    !,
-    mi_call_prompt_n(Desc, [Var1, Var2, Var3], ['Var1', 'Var2', 'Var3'], StateIn, StateOut).
+    mi_call_prompt_n(Desc, Vars, VarNames, StateIn, StateOut).
 
 %% mi_call_prompt_n(+Desc, +Vars, +VarNames, +StateIn, -StateOut)
 %% Like mi_call_task_n but uses empty memory and doesn't update memory
@@ -1378,6 +1423,9 @@ goal_with_string_arg(task(S, V1, V2), task, S, [V1, V2]) :- string(S).
 goal_with_string_arg(task(S, V1, V2), task, S, [V1, V2]) :- atom(S), \+ S = [].
 goal_with_string_arg(task(S, V1, V2, V3), task, S, [V1, V2, V3]) :- string(S).
 goal_with_string_arg(task(S, V1, V2, V3), task, S, [V1, V2, V3]) :- atom(S), \+ S = [].
+%% task_named/3 - transformed form with embedded variable names
+goal_with_string_arg(task_named(S, Vars, Names), task_named, S, [Vars, Names]) :- string(S).
+goal_with_string_arg(task_named(S, Vars, Names), task_named, S, [Vars, Names]) :- atom(S), \+ S = [].
 goal_with_string_arg(prompt(S), prompt, S, []) :- string(S).
 goal_with_string_arg(prompt(S), prompt, S, []) :- atom(S), \+ S = [].
 goal_with_string_arg(prompt(S, V1), prompt, S, [V1]) :- string(S).
@@ -1386,6 +1434,9 @@ goal_with_string_arg(prompt(S, V1, V2), prompt, S, [V1, V2]) :- string(S).
 goal_with_string_arg(prompt(S, V1, V2), prompt, S, [V1, V2]) :- atom(S), \+ S = [].
 goal_with_string_arg(prompt(S, V1, V2, V3), prompt, S, [V1, V2, V3]) :- string(S).
 goal_with_string_arg(prompt(S, V1, V2, V3), prompt, S, [V1, V2, V3]) :- atom(S), \+ S = [].
+%% prompt_named/3 - transformed form with embedded variable names
+goal_with_string_arg(prompt_named(S, Vars, Names), prompt_named, S, [Vars, Names]) :- string(S).
+goal_with_string_arg(prompt_named(S, Vars, Names), prompt_named, S, [Vars, Names]) :- atom(S), \+ S = [].
 
 %% rebuild_goal(+Functor, +StringArg, +RestArgs, -Goal)
 %% Rebuild a goal with the string argument and rest args

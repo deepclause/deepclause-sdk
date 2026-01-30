@@ -49,6 +49,10 @@ export interface AgentLoopResult {
 }
 
 /**
+ * Extract variable names from task description
+ * Looks for patterns like "Store X in VariableName" or "Store it in VariableName"
+ */
+/**
  * Run an agent loop for a task
  */
 export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoopResult> {
@@ -72,6 +76,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       console.log('[AGENT]', ...args);
     }
   };
+  
+  debugLog('Output vars:', outputVars);
 
   const outputs: string[] = [];
   const variables: Record<string, unknown> = {};
@@ -108,8 +114,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   });
 
   // Add store tool for output variables
+  // outputVars now contains actual variable names from Prolog (e.g., "Industry" not "Var1")
   if (outputVars.length > 0) {
     const varList = outputVars.map((v, i) => `"${v}"${i < outputVars.length - 1 ? ',' : ''}`).join(' ');
+    
     aiTools['store'] = aiTool({
       description: `Store a result value in an output variable. You MUST call this tool to return results from the task. Use the exact variable name as specified.`,
       parameters: z.object({
@@ -363,20 +371,28 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     outputs.push('Agent loop reached maximum iterations without completing');
   }
 
-  // For memory persistence between tasks, we only want high-level context:
-  // - The original task (first user message after system)
-  // - A summary of the result (not all the tool call details)
+  // For memory persistence between tasks, keep the conversation flow:
+  // 1. Previous conversation history (from memory)
+  // 2. Current task as user message
+  // 3. Summary of result as assistant message
   // Filter out internal tool call/result messages which are implementation details
   const persistentMessages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
   
-  // Find the original task message (first user message)
-  const taskMessage = messages.find(m => m.role === 'user');
-  if (taskMessage) {
-    persistentMessages.push({
-      role: 'user',
-      content: typeof taskMessage.content === 'string' ? taskMessage.content : JSON.stringify(taskMessage.content),
-    });
+  // Keep previous conversation history
+  for (const m of conversationHistory) {
+    if (m.role === 'user' || m.role === 'assistant') {
+      persistentMessages.push({
+        role: m.role,
+        content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+      });
+    }
   }
+  
+  // Add the current task
+  persistentMessages.push({
+    role: 'user',
+    content: `Task: ${taskDescription}`,
+  });
   
   // Add a summary of the result if we have stored variables
   if (success && Object.keys(variables).length > 0) {
@@ -393,6 +409,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       content: 'Task completed successfully.',
     });
   }
+
+  debugLog('Persistent messages for next task:', persistentMessages.length, 'messages');
 
   return {
     success,
