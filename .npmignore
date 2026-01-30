@@ -1,0 +1,22 @@
+# Source files (dist is included)
+src/
+!src/prolog-src/
+
+# Tests
+tests/
+
+# Development files
+*.md
+!README.md
+.gitignore
+.eslintrc*
+tsconfig.json
+vitest.config.ts
+debug*.json
+debug*.js
+
+# Examples (users can reference GitHub)
+examples/
+
+# Vendor node_modules (not needed at runtime)
+vendor/swipl-wasm/node_modules/

@@ -20,7 +20,8 @@
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run build",
     "example": "tsx examples/quick-start.ts",
-    "examples": "tsx examples/basic-usage.ts"
+    "examples": "tsx examples/basic-usage.ts",
+    "cli": "tsx src/cli/index.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^1.0.0",

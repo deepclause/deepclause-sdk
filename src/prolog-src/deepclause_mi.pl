@@ -1068,13 +1068,17 @@ mi_call(throw(Error), _StateIn, _StateOut) :-
 %% mi_call(Module:Goal, +StateIn, -StateOut)
 %% Module-qualified goals - use clause/2 for backtracking
 mi_call(Module:Goal, StateIn, StateOut) :-
+    predicate_property(Module:Goal, defined),
+    !,  % CUT: If predicate is defined, don't fallback to call/1
+    % Now try clause/2 for rules, allowing backtracking through clauses
     clause(Module:Goal, Body),
-    Body \== true,
-    % NO CUT! This allows backtracking through clause/2
-    mi_call(Body, StateIn, StateOut).
+    (   Body == true
+    ->  true  % Fact - succeed with no body to interpret
+    ;   mi_call(Body, StateIn, StateOut)
+    ).
 
 mi_call(Module:Goal, StateIn, StateIn) :-
-    % Fallback for facts or built-ins
+    % Fallback for built-ins only (predicate is NOT defined in module)
     call(Module:Goal).
 
 %% ============================================================

@@ -335,10 +335,18 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         // If no tool calls were made, prompt the agent to take action
         if (!response.toolCalls || response.toolCalls.length === 0) {
           if (!finished) {
-            messages.push({
-              role: 'user',
-              content: 'Please take action using the available tools, or call finish() when done.',
-            });
+            // Check if the model wrote text that looks like a tool call
+            if (response.text && /called\s+tool|calling\s+tool|finish\s*\(/i.test(response.text)) {
+              messages.push({
+                role: 'user',
+                content: 'ERROR: You wrote text about calling a tool instead of actually invoking it. You must USE the tool by making a proper tool call, not by writing about it. Try again - invoke the tool directly.',
+              });
+            } else {
+              messages.push({
+                role: 'user',
+                content: 'Please take action using the available tools, or call finish() when done.',
+              });
+            }
           }
         }
       }
@@ -355,14 +363,36 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     outputs.push('Agent loop reached maximum iterations without completing');
   }
 
-  // Return only non-system messages for memory persistence
-  // System messages are task-specific and rebuilt for each task
-  const persistentMessages = messages
-    .filter(m => m.role !== 'system')
-    .map(m => ({
-      role: m.role as 'user' | 'assistant',
-      content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
-    }));
+  // For memory persistence between tasks, we only want high-level context:
+  // - The original task (first user message after system)
+  // - A summary of the result (not all the tool call details)
+  // Filter out internal tool call/result messages which are implementation details
+  const persistentMessages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+  
+  // Find the original task message (first user message)
+  const taskMessage = messages.find(m => m.role === 'user');
+  if (taskMessage) {
+    persistentMessages.push({
+      role: 'user',
+      content: typeof taskMessage.content === 'string' ? taskMessage.content : JSON.stringify(taskMessage.content),
+    });
+  }
+  
+  // Add a summary of the result if we have stored variables
+  if (success && Object.keys(variables).length > 0) {
+    const varSummary = Object.entries(variables)
+      .map(([k, v]) => `${k}: ${v}`)
+      .join(', ');
+    persistentMessages.push({
+      role: 'assistant',
+      content: `Task completed. Results: ${varSummary}`,
+    });
+  } else if (success) {
+    persistentMessages.push({
+      role: 'assistant', 
+      content: 'Task completed successfully.',
+    });
+  }
 
   return {
     success,
@@ -387,7 +417,7 @@ function buildSystemPrompt(
     '',
     'Available tools:',
     '',
-    '- finish(success: boolean): Complete the task. Call with true for success, false for failure.',
+    '- finish(success: boolean): Signal task completion. Call finish(true) when done successfully, or finish(false) if the task cannot be completed.',
     '- ask_user(prompt: string): Ask the user for input or clarification.',
   ];
 
@@ -403,23 +433,21 @@ function buildSystemPrompt(
   }
 
   parts.push('');
-  parts.push('Instructions:');
-  parts.push('1. Analyze the task and determine what tools you need to use.');
-  parts.push('2. Execute tools as needed to gather information or perform actions.');
+  parts.push('Workflow:');
+  parts.push('1. Analyze the task and gather any needed information using available tools.');
 
   if (outputVars.length > 0) {
     const varList = outputVars.map(v => `"${v}"`).join(', ');
-    parts.push(
-      `3. IMPORTANT: You MUST use store() to save your results. Call store("VariableName", "your result") for each required variable: ${varList}`
-    );
-    parts.push('4. Call finish(true) ONLY AFTER you have stored all required values.');
+    parts.push(`2. Once you have the answer, call store() for each required variable: ${varList}`);
+    parts.push('3. Immediately after storing, call finish(true) to complete the task.');
   } else {
-    parts.push('3. Call finish(true) when the task is complete.');
+    parts.push('2. Once the task is complete, call finish(true).');
   }
 
-  parts.push(`${outputVars.length > 0 ? '5' : '4'}. Call finish(false) if you cannot complete the task.`);
   parts.push('');
-  parts.push('Be concise and efficient. Take action immediately.');
+  parts.push('If you determine the task cannot be completed, call finish(false) immediately.');
+  parts.push('');
+  parts.push('IMPORTANT: You must invoke tools directly, not write text about calling them. After storing results, call finish() in the same response - do not wait for another turn.');
 
   return parts.join('\n');
 }
