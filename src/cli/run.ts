@@ -7,9 +7,9 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { createDeepClause } from '../sdk.js';
-import type { DMLEvent, ToolDefinition } from '../types.js';
+import type { DMLEvent, ToolDefinition, JsonSchema } from '../types.js';
 import { loadConfig, type Config, type Provider } from './config.js';
-import { resolveTools, getAgentVMTools, type Tool } from './tools.js';
+import { getAgentVMTools, type Tool } from './tools.js';
 import { webSearch, newsSearch } from './search.js';
 import type { MetaFile } from './compile.js';
 
@@ -282,7 +282,7 @@ function parseArgValue(value: string): unknown {
  */
 async function registerTools(
   sdk: { registerTool: (name: string, tool: ToolDefinition) => void },
-  config: Config,
+  _config: Config,
   verbose?: boolean
 ): Promise<void> {
   // Register AgentVM tools (built-in)
@@ -305,9 +305,14 @@ async function registerTools(
  * Create a ToolDefinition from our Tool interface
  */
 function createToolDefinition(tool: Tool): ToolDefinition {
+  const defaultSchema: JsonSchema = { 
+    type: 'object', 
+    properties: {}, 
+    required: [] 
+  };
   return {
     description: tool.description,
-    parameters: tool.schema || { type: 'object', properties: {}, required: [] },
+    parameters: (tool.schema as JsonSchema) || defaultSchema,
     execute: async (args: Record<string, unknown>) => {
       // Handle built-in tools
       switch (tool.name) {

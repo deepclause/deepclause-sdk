@@ -8,6 +8,7 @@ import * as path from 'path';
 import { createDeepClause } from '../sdk.js';
 import { loadConfig } from './config.js';
 import { getAgentVMTools } from './tools.js';
+import { webSearch, newsSearch } from './search.js';
 // =============================================================================
 // Main Run Function
 // =============================================================================
@@ -70,6 +71,7 @@ export async function run(file, args, options = {}) {
         model,
         provider,
         trace: !!options.trace,
+        streaming: options.stream,
         debug: options.verbose
     });
     // Register tools from MCP servers and AgentVM
@@ -82,6 +84,7 @@ export async function run(file, args, options = {}) {
     try {
         for await (const event of sdk.runDML(dmlCode, {
             params,
+            args,
             workspacePath
         })) {
             result.events?.push(event);
@@ -89,13 +92,23 @@ export async function run(file, args, options = {}) {
                 case 'output':
                     if (event.content) {
                         result.output.push(event.content);
-                        if (options.verbose && !options.headless) {
-                            console.log(`[output] ${event.content}`);
+                        if (!options.headless) {
+                            console.log(event.content);
                         }
                     }
                     break;
+                case 'stream':
+                    // Real-time streaming of LLM responses
+                    if (options.stream && !options.headless && event.content) {
+                        process.stdout.write(event.content);
+                    }
+                    // Add newline when stream chunk is done
+                    if (options.stream && !options.headless && event.done) {
+                        process.stdout.write('\n');
+                    }
+                    break;
                 case 'log':
-                    if (options.verbose && event.content) {
+                    if (options.verbose && event.content && !options.headless) {
                         console.log(`[log] ${event.content}`);
                     }
                     break;
@@ -197,7 +210,7 @@ function parseArgValue(value) {
 /**
  * Register tools from MCP servers and AgentVM
  */
-async function registerTools(sdk, config, verbose) {
+async function registerTools(sdk, _config, verbose) {
     // Register AgentVM tools (built-in)
     const agentVmTools = getAgentVMTools();
     for (const tool of agentVmTools) {
@@ -216,13 +229,36 @@ async function registerTools(sdk, config, verbose) {
  * Create a ToolDefinition from our Tool interface
  */
 function createToolDefinition(tool) {
+    const defaultSchema = {
+        type: 'object',
+        properties: {},
+        required: []
+    };
     return {
         description: tool.description,
-        parameters: tool.schema || { type: 'object', properties: {}, required: [] },
+        parameters: tool.schema || defaultSchema,
         execute: async (args) => {
-            // For AgentVM tools, these are handled internally by the runner
-            // This is a placeholder that shouldn't be called directly
-            throw new Error(`Tool ${tool.name} should be handled by the DML runner`);
+            // Handle built-in tools
+            switch (tool.name) {
+                case 'web_search':
+                    return await webSearch({
+                        query: String(args.query || args.arg1 || ''),
+                        count: typeof args.count === 'number' ? args.count : 10,
+                        freshness: typeof args.freshness === 'string' ? args.freshness : undefined,
+                    });
+                case 'news_search':
+                    return await newsSearch({
+                        query: String(args.query || args.arg1 || ''),
+                        count: typeof args.count === 'number' ? args.count : 10,
+                        freshness: typeof args.freshness === 'string' ? args.freshness : undefined,
+                    });
+                case 'execute_code':
+                case 'vm_exec':
+                    // These are handled by external AgentVM service
+                    throw new Error(`Tool ${tool.name} requires AgentVM service connection (not yet implemented)`);
+                default:
+                    throw new Error(`Tool ${tool.name} has no implementation`);
+            }
         }
     };
 }

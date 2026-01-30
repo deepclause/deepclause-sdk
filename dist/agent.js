@@ -17,6 +17,10 @@ function isZodSchema(params) {
         'typeName' in params._def;
 }
 /**
+ * Extract variable names from task description
+ * Looks for patterns like "Store X in VariableName" or "Store it in VariableName"
+ */
+/**
  * Run an agent loop for a task
  */
 export async function runAgentLoop(options) {
@@ -27,6 +31,7 @@ export async function runAgentLoop(options) {
             console.log('[AGENT]', ...args);
         }
     };
+    debugLog('Output vars:', outputVars);
     const outputs = [];
     const variables = {};
     let finished = false;
@@ -58,6 +63,7 @@ export async function runAgentLoop(options) {
         },
     });
     // Add store tool for output variables
+    // outputVars now contains actual variable names from Prolog (e.g., "Industry" not "Var1")
     if (outputVars.length > 0) {
         const varList = outputVars.map((v, i) => `"${v}"${i < outputVars.length - 1 ? ',' : ''}`).join(' ');
         aiTools['store'] = aiTool({
@@ -120,12 +126,12 @@ export async function runAgentLoop(options) {
             role: m.role,
             content: m.content
         })),
-        { role: 'user', content: `Task: ${taskDescription}` },
+        { role: 'user', content: `Subtask: ${taskDescription}` },
     ];
     // Debug: log messages being sent
     debugLog('System prompt:', combinedSystemPrompt);
     debugLog('Conversation history:', conversationHistory);
-    debugLog('Task:', taskDescription);
+    debugLog('Subtask:', taskDescription);
     // Create model provider
     const model = createModelProvider(modelOptions.provider, modelOptions.model, modelOptions.baseUrl);
     // Agent loop
@@ -168,31 +174,62 @@ export async function runAgentLoop(options) {
                 // Get final results - must await these promises
                 const toolCalls = await response.toolCalls;
                 const toolResults = await response.toolResults;
+                // Check if finish was called during tool execution
+                if (finished) {
+                    debugLog('Finish tool was called, exiting loop');
+                    break;
+                }
                 // Debug response
-                debugLog(`Response text: ${fullText?.substring(0, 200)}${fullText && fullText.length > 200 ? '...' : ''}`);
+                debugLog(`Response text: ${fullText || '(empty)'}`);
                 debugLog(`Tool calls: ${toolCalls?.length ?? 0}`);
+                if (toolCalls && toolCalls.length > 0) {
+                    debugLog(`Tool call details:`, toolCalls.map(tc => tc.toolName));
+                }
+                // Log for debugging empty responses
+                if (!fullText && (!toolCalls || toolCalls.length === 0)) {
+                    debugLog(`Empty response - no text and no tool calls`);
+                }
                 // Process the response
                 if (fullText) {
                     outputs.push(fullText);
                     onOutput(fullText);
                     messages.push({ role: 'assistant', content: fullText });
                 }
-                // Process tool calls
+                // Process tool calls - add to message history using proper AI SDK format
                 if (toolCalls && toolCalls.length > 0) {
+                    // Build assistant message with tool calls
+                    const toolCallContents = [];
+                    const toolResultContents = [];
                     for (const toolCall of toolCalls) {
                         debugLog(`Tool call: ${toolCall.toolName}`, JSON.stringify(toolCall.args));
-                        const toolResult = toolResults?.[toolCalls.indexOf(toolCall)];
-                        if (toolResult !== undefined) {
-                            messages.push({
-                                role: 'assistant',
-                                content: `Called tool ${toolCall.toolName} with args: ${JSON.stringify(toolCall.args)}`,
-                            });
-                            messages.push({
-                                role: 'user',
-                                content: `Tool result: ${JSON.stringify(toolResult)}`,
-                            });
-                        }
+                        const toolResultObj = toolResults?.[toolCalls.indexOf(toolCall)];
+                        // Extract the actual result from the tool result object
+                        const toolResult = toolResultObj?.result ?? toolResultObj;
+                        debugLog(`Tool result:`, toolResult !== undefined ? JSON.stringify(toolResult).substring(0, 500) : '(undefined)');
+                        const callId = toolCall.toolCallId || `call_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+                        toolCallContents.push({
+                            type: 'tool-call',
+                            toolCallId: callId,
+                            toolName: toolCall.toolName,
+                            args: toolCall.args,
+                        });
+                        toolResultContents.push({
+                            type: 'tool-result',
+                            toolCallId: callId,
+                            toolName: toolCall.toolName,
+                            result: toolResult ?? 'No result returned',
+                        });
                     }
+                    // Add assistant message with tool calls
+                    messages.push({
+                        role: 'assistant',
+                        content: toolCallContents,
+                    });
+                    // Add tool results
+                    messages.push({
+                        role: 'tool',
+                        content: toolResultContents,
+                    });
                     // Break immediately if finish was called
                     if (finished) {
                         break;
@@ -201,10 +238,19 @@ export async function runAgentLoop(options) {
                 // If no tool calls were made, prompt the agent to take action
                 if (!toolCalls || toolCalls.length === 0) {
                     if (!finished) {
-                        messages.push({
-                            role: 'user',
-                            content: 'Please take action using the available tools, or call finish() when done.',
-                        });
+                        // Check if the model wrote text that looks like a tool call
+                        if (fullText && /called\s+tool|calling\s+tool|finish\s*\(|store\s*\(|TOOL_INVOKED|\[TOOL_/i.test(fullText)) {
+                            messages.push({
+                                role: 'user',
+                                content: 'ERROR: You wrote text about calling a tool instead of actually invoking it. You must USE the tool by making a proper tool call, not by writing about it. Try again - invoke the tool directly.',
+                            });
+                        }
+                        else {
+                            messages.push({
+                                role: 'user',
+                                content: 'Please take action using the available tools, or call finish() when done.',
+                            });
+                        }
                     }
                 }
             }
@@ -219,33 +265,70 @@ export async function runAgentLoop(options) {
                     maxTokens: modelOptions.maxTokens,
                     abortSignal: signal,
                 });
+                // Check if finish was called during tool execution
+                if (finished) {
+                    debugLog('Finish tool was called, exiting loop');
+                    break;
+                }
                 // Debug response
-                debugLog(`Response text: ${response.text?.substring(0, 200)}${response.text && response.text.length > 200 ? '...' : ''}`);
+                debugLog(`Response text: ${response.text || '(empty)'}`);
                 debugLog(`Tool calls: ${response.toolCalls?.length ?? 0}`);
+                if (response.toolCalls && response.toolCalls.length > 0) {
+                    debugLog(`Tool call details:`, response.toolCalls.map(tc => tc.toolName));
+                }
+                // Log full response object for debugging empty responses
+                if (!response.text && (!response.toolCalls || response.toolCalls.length === 0)) {
+                    debugLog(`Empty response - full object:`, JSON.stringify({
+                        text: response.text,
+                        toolCalls: response.toolCalls,
+                        finishReason: response.finishReason,
+                    }, null, 2));
+                }
                 // Process the response
                 if (response.text) {
                     outputs.push(response.text);
                     onOutput(response.text);
                     messages.push({ role: 'assistant', content: response.text });
                 }
-                // Process tool calls
+                // Process tool calls - add to message history using proper AI SDK format
                 if (response.toolCalls && response.toolCalls.length > 0) {
+                    // Build assistant message with tool calls
+                    const toolCallContents = [];
+                    const toolResultContents = [];
                     for (const toolCall of response.toolCalls) {
                         debugLog(`Tool call: ${toolCall.toolName}`, JSON.stringify(toolCall.args));
                         // Find the tool result - toolResults is an array of results
-                        const toolResult = response.toolResults?.[response.toolCalls.indexOf(toolCall)];
-                        if (toolResult !== undefined) {
-                            // Add tool call and result to messages for context
-                            messages.push({
-                                role: 'assistant',
-                                content: `Called tool ${toolCall.toolName} with args: ${JSON.stringify(toolCall.args)}`,
-                            });
-                            messages.push({
-                                role: 'user',
-                                content: `Tool result: ${JSON.stringify(toolResult)}`,
-                            });
-                        }
+                        const toolResultObj = response.toolResults?.[response.toolCalls.indexOf(toolCall)];
+                        debugLog(`Tool result object (full):`, JSON.stringify(toolResultObj));
+                        debugLog(`Tool result object keys:`, toolResultObj ? Object.keys(toolResultObj) : 'null');
+                        // Extract the actual result from the tool result object
+                        // The AI SDK returns {type, toolCallId, toolName, args, result}
+                        const toolResult = toolResultObj?.result ?? toolResultObj;
+                        debugLog(`Tool result (extracted):`, toolResult !== undefined ? JSON.stringify(toolResult).substring(0, 500) : '(undefined)');
+                        const callId = toolCall.toolCallId || `call_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+                        toolCallContents.push({
+                            type: 'tool-call',
+                            toolCallId: callId,
+                            toolName: toolCall.toolName,
+                            args: toolCall.args,
+                        });
+                        toolResultContents.push({
+                            type: 'tool-result',
+                            toolCallId: callId,
+                            toolName: toolCall.toolName,
+                            result: toolResult ?? 'No result returned',
+                        });
                     }
+                    // Add assistant message with tool calls
+                    messages.push({
+                        role: 'assistant',
+                        content: toolCallContents,
+                    });
+                    // Add tool results
+                    messages.push({
+                        role: 'tool',
+                        content: toolResultContents,
+                    });
                     // Break immediately if finish was called
                     if (finished) {
                         break;
@@ -254,10 +337,19 @@ export async function runAgentLoop(options) {
                 // If no tool calls were made, prompt the agent to take action
                 if (!response.toolCalls || response.toolCalls.length === 0) {
                     if (!finished) {
-                        messages.push({
-                            role: 'user',
-                            content: 'Please take action using the available tools, or call finish() when done.',
-                        });
+                        // Check if the model wrote text that looks like a tool call
+                        if (response.text && /called\s+tool|calling\s+tool|finish\s*\(|store\s*\(|TOOL_INVOKED|\[TOOL_/i.test(response.text)) {
+                            messages.push({
+                                role: 'user',
+                                content: 'ERROR: You wrote text about calling a tool instead of actually invoking it. You must USE the tool by making a proper tool call, not by writing about it. Try again - invoke the tool directly.',
+                            });
+                        }
+                        else {
+                            messages.push({
+                                role: 'user',
+                                content: 'Please take action using the available tools, or call finish() when done.',
+                            });
+                        }
                     }
                 }
             }
@@ -273,14 +365,63 @@ export async function runAgentLoop(options) {
         success = false;
         outputs.push('Agent loop reached maximum iterations without completing');
     }
-    // Return only non-system messages for memory persistence
-    // System messages are task-specific and rebuilt for each task
-    const persistentMessages = messages
-        .filter(m => m.role !== 'system')
-        .map(m => ({
-        role: m.role,
-        content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
-    }));
+    // For memory persistence between tasks, keep the conversation flow:
+    // 1. Previous conversation history (from memory)
+    // 2. Current task as user message
+    // 3. Summary of result as assistant message
+    // Filter out internal tool call/result messages which are implementation details
+    const persistentMessages = [];
+    // Keep previous conversation history
+    for (const m of conversationHistory) {
+        if (m.role === 'user' || m.role === 'assistant') {
+            persistentMessages.push({
+                role: m.role,
+                content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+            });
+        }
+    }
+    // Add the current subtask
+    persistentMessages.push({
+        role: 'user',
+        content: `Subtask: ${taskDescription}`,
+    });
+    // Add a summary of the result
+    if (success && Object.keys(variables).length > 0) {
+        // If we have stored variables, include them
+        const varSummary = Object.entries(variables)
+            .map(([k, v]) => `${k}: ${v}`)
+            .join(', ');
+        persistentMessages.push({
+            role: 'assistant',
+            content: `Task completed. Results: ${varSummary}`,
+        });
+    }
+    else if (success && outputs.length > 0) {
+        // For task/1 without variables, include the actual LLM output
+        // Filter out error messages and take the last meaningful output
+        const meaningfulOutputs = outputs.filter(o => !o.startsWith('Error:') &&
+            !o.includes('maximum iterations') &&
+            o.trim().length > 0);
+        if (meaningfulOutputs.length > 0) {
+            persistentMessages.push({
+                role: 'assistant',
+                content: meaningfulOutputs.join('\n'),
+            });
+        }
+        else {
+            persistentMessages.push({
+                role: 'assistant',
+                content: 'Task completed successfully.',
+            });
+        }
+    }
+    else if (success) {
+        persistentMessages.push({
+            role: 'assistant',
+            content: 'Task completed successfully.',
+        });
+    }
+    debugLog('Persistent messages for next task:', persistentMessages.length, 'messages');
     return {
         success,
         outputs,
@@ -293,13 +434,13 @@ export async function runAgentLoop(options) {
  */
 function buildSystemPrompt(taskDescription, outputVars, tools) {
     const parts = [
-        `You are an AI agent executing a task. Your job is to complete the following task:`,
+        `You are an AI agent executing a subtask within a larger workflow. Your job is to complete the following subtask:`,
         '',
-        `Task: ${taskDescription}`,
+        `Subtask: ${taskDescription}`,
         '',
         'Available tools:',
         '',
-        '- finish(success: boolean): Complete the task. Call with true for success, false for failure.',
+        '- finish(success: boolean): Signal task completion. Call finish(true) when done successfully, or finish(false) if the task cannot be completed.',
         '- ask_user(prompt: string): Ask the user for input or clarification.',
     ];
     if (outputVars.length > 0) {
@@ -310,20 +451,20 @@ function buildSystemPrompt(taskDescription, outputVars, tools) {
         parts.push(`- ${name}: ${tool.description}`);
     }
     parts.push('');
-    parts.push('Instructions:');
-    parts.push('1. Analyze the task and determine what tools you need to use.');
-    parts.push('2. Execute tools as needed to gather information or perform actions.');
+    parts.push('Workflow:');
+    parts.push('1. Analyze the task and gather any needed information using available tools.');
     if (outputVars.length > 0) {
         const varList = outputVars.map(v => `"${v}"`).join(', ');
-        parts.push(`3. IMPORTANT: You MUST use store() to save your results. Call store("VariableName", "your result") for each required variable: ${varList}`);
-        parts.push('4. Call finish(true) ONLY AFTER you have stored all required values.');
+        parts.push(`2. Once you have the answer, call store() for each required variable: ${varList}`);
+        parts.push('3. Immediately after storing, call finish(true) to complete the task.');
     }
     else {
-        parts.push('3. Call finish(true) when the task is complete.');
+        parts.push('2. Once the task is complete, call finish(true).');
     }
-    parts.push(`${outputVars.length > 0 ? '5' : '4'}. Call finish(false) if you cannot complete the task.`);
     parts.push('');
-    parts.push('Be concise and efficient. Take action immediately.');
+    parts.push('If you determine the task cannot be completed, call finish(false) immediately.');
+    parts.push('');
+    parts.push('CRITICAL: You MUST actually invoke tools using the tool-calling capability - never write text like "Called tool X" or "I am calling finish()". Use the tool interface to make real tool calls. Writing about tools is NOT the same as using them.');
     return parts.join('\n');
 }
 //# sourceMappingURL=agent.js.map

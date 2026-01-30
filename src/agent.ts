@@ -247,6 +247,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         const toolCalls = await response.toolCalls;
         const toolResults = await response.toolResults;
         
+        // Check if finish was called during tool execution
+        if (finished) {
+          debugLog('Finish tool was called, exiting loop');
+          break;
+        }
+        
         // Debug response
         debugLog(`Response text: ${fullText || '(empty)'}`);
         debugLog(`Tool calls: ${toolCalls?.length ?? 0}`);
@@ -265,36 +271,45 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           messages.push({ role: 'assistant', content: fullText });
         }
 
-        // Process tool calls
+        // Process tool calls - add to message history using proper AI SDK format
         if (toolCalls && toolCalls.length > 0) {
+          // Build assistant message with tool calls
+          const toolCallContents: Array<{ type: 'tool-call'; toolCallId: string; toolName: string; args: unknown }> = [];
+          const toolResultContents: Array<{ type: 'tool-result'; toolCallId: string; toolName: string; result: unknown }> = [];
+          
           for (const toolCall of toolCalls) {
             debugLog(`Tool call: ${toolCall.toolName}`, JSON.stringify(toolCall.args));
             const toolResultObj = toolResults?.[toolCalls.indexOf(toolCall)];
             // Extract the actual result from the tool result object
-            const toolResult = toolResultObj?.result ?? toolResultObj;
+            const toolResult = (toolResultObj as { result?: unknown })?.result ?? toolResultObj;
             debugLog(`Tool result:`, toolResult !== undefined ? JSON.stringify(toolResult).substring(0, 500) : '(undefined)');
 
-            if (toolResult !== undefined) {
-              messages.push({
-                role: 'assistant',
-                content: `Called tool ${toolCall.toolName} with args: ${JSON.stringify(toolCall.args)}`,
-              });
-              messages.push({
-                role: 'user',
-                content: `Tool result: ${JSON.stringify(toolResult)}`,
-              });
-            } else {
-              // Tool returned undefined - still add to messages so LLM knows
-              messages.push({
-                role: 'assistant',
-                content: `Called tool ${toolCall.toolName} with args: ${JSON.stringify(toolCall.args)}`,
-              });
-              messages.push({
-                role: 'user',
-                content: `Tool returned no result. The tool may have failed or returned empty. Try a different approach.`,
-              });
-            }
+            const callId = toolCall.toolCallId || `call_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+            toolCallContents.push({
+              type: 'tool-call',
+              toolCallId: callId,
+              toolName: toolCall.toolName,
+              args: toolCall.args,
+            });
+            toolResultContents.push({
+              type: 'tool-result',
+              toolCallId: callId,
+              toolName: toolCall.toolName,
+              result: toolResult ?? 'No result returned',
+            });
           }
+          
+          // Add assistant message with tool calls
+          messages.push({
+            role: 'assistant',
+            content: toolCallContents,
+          } as CoreMessage);
+          
+          // Add tool results
+          messages.push({
+            role: 'tool',
+            content: toolResultContents,
+          } as CoreMessage);
           
           // Break immediately if finish was called
           if (finished) {
@@ -305,10 +320,18 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         // If no tool calls were made, prompt the agent to take action
         if (!toolCalls || toolCalls.length === 0) {
           if (!finished) {
-            messages.push({
-              role: 'user',
-              content: 'Please take action using the available tools, or call finish() when done.',
-            });
+            // Check if the model wrote text that looks like a tool call
+            if (fullText && /called\s+tool|calling\s+tool|finish\s*\(|store\s*\(|TOOL_INVOKED|\[TOOL_/i.test(fullText)) {
+              messages.push({
+                role: 'user',
+                content: 'ERROR: You wrote text about calling a tool instead of actually invoking it. You must USE the tool by making a proper tool call, not by writing about it. Try again - invoke the tool directly.',
+              });
+            } else {
+              messages.push({
+                role: 'user',
+                content: 'Please take action using the available tools, or call finish() when done.',
+              });
+            }
           }
         }
       } else {
@@ -323,6 +346,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           abortSignal: signal,
         });
 
+        // Check if finish was called during tool execution
+        if (finished) {
+          debugLog('Finish tool was called, exiting loop');
+          break;
+        }
+        
         // Debug response
         debugLog(`Response text: ${response.text || '(empty)'}`);
         debugLog(`Tool calls: ${response.toolCalls?.length ?? 0}`);
@@ -345,9 +374,13 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           messages.push({ role: 'assistant', content: response.text });
         }
 
-        // Process tool calls
-        if (toolCalls && toolCalls.length > 0) {
-          for (const toolCall of toolCalls) {
+        // Process tool calls - add to message history using proper AI SDK format
+        if (response.toolCalls && response.toolCalls.length > 0) {
+          // Build assistant message with tool calls
+          const toolCallContents: Array<{ type: 'tool-call'; toolCallId: string; toolName: string; args: unknown }> = [];
+          const toolResultContents: Array<{ type: 'tool-result'; toolCallId: string; toolName: string; result: unknown }> = [];
+          
+          for (const toolCall of response.toolCalls) {
             debugLog(`Tool call: ${toolCall.toolName}`, JSON.stringify(toolCall.args));
             // Find the tool result - toolResults is an array of results
             const toolResultObj = response.toolResults?.[response.toolCalls.indexOf(toolCall)];
@@ -358,28 +391,32 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
             const toolResult = (toolResultObj as { result?: unknown })?.result ?? toolResultObj;
             debugLog(`Tool result (extracted):`, toolResult !== undefined ? JSON.stringify(toolResult).substring(0, 500) : '(undefined)');
 
-            if (toolResult !== undefined) {
-              // Add tool call and result to messages for context
-              messages.push({
-                role: 'assistant',
-                content: `Called tool ${toolCall.toolName} with args: ${JSON.stringify(toolCall.args)}`,
-              });
-              messages.push({
-                role: 'user',
-                content: `Tool result: ${JSON.stringify(toolResult)}`,
-              });
-            } else {
-              // Tool returned undefined - still add to messages so LLM knows
-              messages.push({
-                role: 'assistant',
-                content: `Called tool ${toolCall.toolName} with args: ${JSON.stringify(toolCall.args)}`,
-              });
-              messages.push({
-                role: 'user',
-                content: `Tool returned no result. The tool may have failed or returned empty. Try a different approach.`,
-              });
-            }
+            const callId = toolCall.toolCallId || `call_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+            toolCallContents.push({
+              type: 'tool-call',
+              toolCallId: callId,
+              toolName: toolCall.toolName,
+              args: toolCall.args,
+            });
+            toolResultContents.push({
+              type: 'tool-result',
+              toolCallId: callId,
+              toolName: toolCall.toolName,
+              result: toolResult ?? 'No result returned',
+            });
           }
+          
+          // Add assistant message with tool calls
+          messages.push({
+            role: 'assistant',
+            content: toolCallContents,
+          } as CoreMessage);
+          
+          // Add tool results
+          messages.push({
+            role: 'tool',
+            content: toolResultContents,
+          } as CoreMessage);
           
           // Break immediately if finish was called
           if (finished) {
@@ -391,7 +428,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         if (!response.toolCalls || response.toolCalls.length === 0) {
           if (!finished) {
             // Check if the model wrote text that looks like a tool call
-            if (response.text && /called\s+tool|calling\s+tool|finish\s*\(/i.test(response.text)) {
+            if (response.text && /called\s+tool|calling\s+tool|finish\s*\(|store\s*\(|TOOL_INVOKED|\[TOOL_/i.test(response.text)) {
               messages.push({
                 role: 'user',
                 content: 'ERROR: You wrote text about calling a tool instead of actually invoking it. You must USE the tool by making a proper tool call, not by writing about it. Try again - invoke the tool directly.',
@@ -532,7 +569,7 @@ function buildSystemPrompt(
   parts.push('');
   parts.push('If you determine the task cannot be completed, call finish(false) immediately.');
   parts.push('');
-  parts.push('IMPORTANT: You must invoke tools directly, not write text about calling them. After storing results, call finish() in the same response - do not wait for another turn.');
+  parts.push('CRITICAL: You MUST actually invoke tools using the tool-calling capability - never write text like "Called tool X" or "I am calling finish()". Use the tool interface to make real tool calls. Writing about tools is NOT the same as using them.');
 
   return parts.join('\n');
 }

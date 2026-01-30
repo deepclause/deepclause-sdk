@@ -140,6 +140,7 @@ program
     .description('Execute a compiled DML program')
     .option('--workspace <path>', 'Working directory for file operations', './')
     .option('--verbose', 'Show debug output including tool calls')
+    .option('--stream', 'Stream LLM responses in real-time')
     .option('--headless', 'Plain output only, no TUI formatting')
     .option('--trace <file>', 'Save execution trace to file')
     .option('--dry-run', 'Show what would be executed without running')
@@ -150,6 +151,7 @@ program
         const result = await run(file, args, {
             workspace: options.workspace,
             verbose: options.verbose,
+            stream: options.stream,
             headless: options.headless,
             trace: options.trace,
             dryRun: options.dryRun,

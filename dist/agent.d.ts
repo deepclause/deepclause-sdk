@@ -33,6 +33,10 @@ export interface AgentLoopResult {
     }>;
 }
 /**
+ * Extract variable names from task description
+ * Looks for patterns like "Store X in VariableName" or "Store it in VariableName"
+ */
+/**
  * Run an agent loop for a task
  */
 export declare function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoopResult>;

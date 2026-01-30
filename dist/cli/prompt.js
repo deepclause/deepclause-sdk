@@ -239,8 +239,13 @@ agent_main(Topic) :-
     answer("Research complete!").
 \`\`\`
 
-### Pattern 4: Code Execution
+### Pattern 4: Code Execution (Use Sparingly!)
 \`\`\`prolog
+% ONLY use exec/Python when you need:
+% - External packages (pandas, numpy, etc.)
+% - Shell commands (find, grep, sed, awk, curl)
+% - Complex imperative logic that's awkward in Prolog
+
 agent_main(Task) :-
     system("You are a coding assistant."),
     
@@ -256,6 +261,7 @@ agent_main(Task) :-
 
 ### Pattern 5: Data Analysis with VM
 \`\`\`prolog
+% Good use of exec: requires pandas package
 agent_main(CsvPath, Question) :-
     system("You are a data analyst."),
     
@@ -272,7 +278,37 @@ agent_main(CsvPath, Question) :-
     answer("Analysis complete!").
 \`\`\`
 
-### Pattern 6: Using format/3 for Complex Strings
+### Pattern 6: File I/O (Use Prolog, NOT Python!)
+\`\`\`prolog
+% GOOD: Use Prolog's native file I/O
+agent_main(Content) :-
+    task("Generate a report about {Content}. Store in Report.", Report),
+    
+    % Write to file using Prolog (not Python!)
+    open('output.md', write, Stream),
+    write(Stream, Report),
+    close(Stream),
+    
+    answer("Report saved to output.md").
+
+% Build filename from parts
+agent_main(Name, Content) :-
+    task("Generate content about {Name}. Store in Text.", Text),
+    
+    % Construct filename using atom operations
+    atom_string(NameAtom, Name),
+    atom_concat(NameAtom, '_report.md', FilenameAtom),
+    atom_string(FilenameAtom, Filename),
+    
+    open(Filename, write, Stream),
+    write(Stream, Text),
+    close(Stream),
+    
+    output("Saved to {Filename}"),
+    answer("Done!").
+\`\`\`
+
+### Pattern 7: Using format/3 for Complex Strings
 \`\`\`prolog
 % When you need to build strings with numbers or complex formatting
 agent_main(Items) :-
@@ -288,14 +324,48 @@ agent_main(Items) :-
 
 ---
 
+## When to Use exec() vs Prolog
+
+### Use Prolog Native Functionality For:
+- **File I/O**: \`open/3\`, \`write/2\`, \`read/2\`, \`close/1\`
+- **String manipulation**: \`atom_concat/3\`, \`atom_string/2\`, \`split_string/4\`
+- **List operations**: \`append/3\`, \`member/2\`, \`findall/3\`, \`maplist/2\`
+- **Arithmetic**: \`is/2\`, comparison operators
+- **Logic and control flow**: conjunctions, disjunctions, conditionals
+
+### Use exec() ONLY For:
+- **External packages**: pandas, numpy, requests, matplotlib, etc.
+- **Shell commands**: find, grep, sed, awk, curl, git
+- **System operations**: environment variables, process management
+- **Complex imperative logic**: loops with side effects, mutable state
+
+### BAD Example - Unnecessary Python:
+\`\`\`prolog
+% DON'T do this - Python for simple file writing
+format(string(Code), "with open('out.txt', 'w') as f:\\n    f.write('''~w''')", [Content]),
+exec(execute_code(code: Code, language: python), _)
+\`\`\`
+
+### GOOD Example - Use Prolog:
+\`\`\`prolog
+% DO this instead - native Prolog file I/O
+open('out.txt', write, S),
+write(S, Content),
+close(S)
+\`\`\`
+
+---
+
 ## Conversion Guidelines
 
 1. **Identify the core task** - What is the primary goal?
 2. **Determine parameters** - What inputs does the agent need?
 3. **Map to patterns** - Which DML pattern best fits?
-4. **Define required tools** - What external capabilities are needed?
-5. **Handle edge cases** - Add fallbacks and error handling
-6. **Add progress output** - Keep users informed with \`output/1\`
+4. **Prefer Prolog native operations** - Use Prolog for file I/O, strings, lists
+5. **Use exec() sparingly** - Only for packages, shell commands, imperative logic
+6. **Define required tools** - What external capabilities are needed?
+7. **Handle edge cases** - Add fallbacks and error handling
+8. **Add progress output** - Keep users informed with \`output/1\`
 
 ## CRITICAL: String Handling Rules
 
@@ -303,10 +373,23 @@ agent_main(Items) :-
 - \`output(format(...))\` - format/3 doesn't return a value, it binds to first arg
 - \`answer(format(...))\` - same issue
 - Mixing \`{Var}\` and \`~w\` in the same string
+- Using \`{Var}\` inside format/3 format strings
 
 **DO this instead:**
 - Use \`{Variable}\` interpolation directly: \`output("Processing {Item}")\`
 - Or use format/3 properly: \`format(string(Msg), "Count: ~d", [N]), output(Msg)\`
+
+## CRITICAL: Prolog vs exec() Rules
+
+**Use Prolog for:**
+- File I/O: \`open/3\`, \`write/2\`, \`close/1\`
+- String building: \`atom_concat/3\`, \`atom_string/2\`
+- All standard logic and data manipulation
+
+**Use exec() ONLY for:**
+- External packages (pandas, numpy)
+- Shell commands (grep, curl, find)
+- Complex imperative tasks
 
 ## Output Requirements
 
@@ -322,6 +405,7 @@ Your DML output must:
 8. **Only use tools from the Available External Tools list**
 9. **Use ONLY {Variable} interpolation OR format/3, never mix them**
 10. **NEVER pass format(...) directly to output/1 or answer/1**
+11. **Use Prolog native file I/O, NOT Python exec() for simple file operations**
 
 Output ONLY the DML code, no explanations or markdown code fences.
 `;

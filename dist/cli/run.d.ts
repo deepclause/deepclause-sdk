@@ -8,6 +8,7 @@ import { type Provider } from './config.js';
 export interface RunOptions {
     workspace?: string;
     verbose?: boolean;
+    stream?: boolean;
     headless?: boolean;
     trace?: string;
     dryRun?: boolean;
