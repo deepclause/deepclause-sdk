@@ -562,6 +562,10 @@ export class DMLRunner {
    * Convert positional args to object based on tool schema
    */
   private argsToObject(args: unknown[], tool: ToolDefinition): Record<string, unknown> {
+    if (process.env.DEBUG_RUNNER) {
+      console.log('[RUNNER] argsToObject input:', JSON.stringify(args));
+    }
+    
     // Helper to unwrap Prolog values (PrologString, etc.)
     const unwrap = (val: unknown): unknown => {
       if (val && typeof val === 'object') {
@@ -584,6 +588,48 @@ export class DMLRunner {
       // Has at least one regular key
       return keys.some(k => !k.startsWith('$'));
     };
+    
+    // Helper to extract named args from Prolog key:value terms
+    // Format: { '$t': 't', ':': [['key', value]] } or similar
+    const extractNamedArgs = (args: unknown[]): Record<string, unknown> | null => {
+      const result: Record<string, unknown> = {};
+      let foundNamed = false;
+      
+      for (const arg of args) {
+        if (arg && typeof arg === 'object') {
+          const obj = arg as Record<string, unknown>;
+          // Handle { '$t': 't', ':': [['name', value]] }
+          if (obj['$t'] === 't' && ':' in obj) {
+            const colonData = obj[':'] as unknown[];
+            if (Array.isArray(colonData) && colonData.length > 0) {
+              const [name, value] = colonData[0] as [string, unknown];
+              result[name] = unwrap(value);
+              foundNamed = true;
+            }
+          }
+          // Handle { '$tag': ':', ... } format
+          else if (obj['$tag'] === ':') {
+            const name = String(obj[1] ?? '');
+            const value = obj[2];
+            if (name) {
+              result[name] = unwrap(value);
+              foundNamed = true;
+            }
+          }
+        }
+      }
+      
+      return foundNamed ? result : null;
+    };
+    
+    // First, try to extract named args (query:Value format)
+    const namedArgs = extractNamedArgs(args);
+    if (namedArgs) {
+      if (process.env.DEBUG_RUNNER) {
+        console.log('[RUNNER] Extracted named args:', JSON.stringify(namedArgs));
+      }
+      return namedArgs;
+    }
 
     // If args is a single dict-like object, unwrap and return it
     if (args.length === 1 && typeof args[0] === 'object' && args[0] !== null) {

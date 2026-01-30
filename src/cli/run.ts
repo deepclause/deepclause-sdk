@@ -10,6 +10,7 @@ import { createDeepClause } from '../sdk.js';
 import type { DMLEvent, ToolDefinition } from '../types.js';
 import { loadConfig, type Config, type Provider } from './config.js';
 import { resolveTools, getAgentVMTools, type Tool } from './tools.js';
+import { webSearch, newsSearch } from './search.js';
 import type { MetaFile } from './compile.js';
 
 // =============================================================================
@@ -19,6 +20,7 @@ import type { MetaFile } from './compile.js';
 export interface RunOptions {
   workspace?: string;
   verbose?: boolean;
+  stream?: boolean;
   headless?: boolean;
   trace?: string;
   dryRun?: boolean;
@@ -112,6 +114,7 @@ export async function run(
     model,
     provider,
     trace: !!options.trace,
+    streaming: options.stream,
     debug: options.verbose
   });
 
@@ -139,6 +142,17 @@ export async function run(
             if (!options.headless) {
               console.log(event.content);
             }
+          }
+          break;
+
+        case 'stream':
+          // Real-time streaming of LLM responses
+          if (options.stream && !options.headless && event.content) {
+            process.stdout.write(event.content);
+          }
+          // Add newline when stream chunk is done
+          if (options.stream && !options.headless && event.done) {
+            process.stdout.write('\n');
           }
           break;
 
@@ -295,9 +309,27 @@ function createToolDefinition(tool: Tool): ToolDefinition {
     description: tool.description,
     parameters: tool.schema || { type: 'object', properties: {}, required: [] },
     execute: async (args: Record<string, unknown>) => {
-      // For AgentVM tools, these are handled internally by the runner
-      // This is a placeholder that shouldn't be called directly
-      throw new Error(`Tool ${tool.name} should be handled by the DML runner`);
+      // Handle built-in tools
+      switch (tool.name) {
+        case 'web_search':
+          return await webSearch({
+            query: String(args.query || args.arg1 || ''),
+            count: typeof args.count === 'number' ? args.count : 10,
+            freshness: typeof args.freshness === 'string' ? args.freshness : undefined,
+          });
+        case 'news_search':
+          return await newsSearch({
+            query: String(args.query || args.arg1 || ''),
+            count: typeof args.count === 'number' ? args.count : 10,
+            freshness: typeof args.freshness === 'string' ? args.freshness : undefined,
+          });
+        case 'execute_code':
+        case 'vm_exec':
+          // These are handled by external AgentVM service
+          throw new Error(`Tool ${tool.name} requires AgentVM service connection (not yet implemented)`);
+        default:
+          throw new Error(`Tool ${tool.name} has no implementation`);
+      }
     }
   };
 }

@@ -186,13 +186,13 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       role: m.role as 'user' | 'assistant', 
       content: m.content 
     })),
-    { role: 'user', content: `Task: ${taskDescription}` },
+    { role: 'user', content: `Subtask: ${taskDescription}` },
   ];
 
   // Debug: log messages being sent
   debugLog('System prompt:', combinedSystemPrompt);
   debugLog('Conversation history:', conversationHistory);
-  debugLog('Task:', taskDescription);
+  debugLog('Subtask:', taskDescription);
 
   // Create model provider
   const model = createModelProvider(modelOptions.provider, modelOptions.model, modelOptions.baseUrl);
@@ -248,8 +248,15 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         const toolResults = await response.toolResults;
         
         // Debug response
-        debugLog(`Response text: ${fullText?.substring(0, 200)}${fullText && fullText.length > 200 ? '...' : ''}`);
+        debugLog(`Response text: ${fullText || '(empty)'}`);
         debugLog(`Tool calls: ${toolCalls?.length ?? 0}`);
+        if (toolCalls && toolCalls.length > 0) {
+          debugLog(`Tool call details:`, toolCalls.map(tc => tc.toolName));
+        }
+        // Log for debugging empty responses
+        if (!fullText && (!toolCalls || toolCalls.length === 0)) {
+          debugLog(`Empty response - no text and no tool calls`);
+        }
 
         // Process the response
         if (fullText) {
@@ -262,7 +269,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         if (toolCalls && toolCalls.length > 0) {
           for (const toolCall of toolCalls) {
             debugLog(`Tool call: ${toolCall.toolName}`, JSON.stringify(toolCall.args));
-            const toolResult = toolResults?.[toolCalls.indexOf(toolCall)];
+            const toolResultObj = toolResults?.[toolCalls.indexOf(toolCall)];
+            // Extract the actual result from the tool result object
+            const toolResult = toolResultObj?.result ?? toolResultObj;
+            debugLog(`Tool result:`, toolResult !== undefined ? JSON.stringify(toolResult).substring(0, 500) : '(undefined)');
 
             if (toolResult !== undefined) {
               messages.push({
@@ -272,6 +282,16 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
               messages.push({
                 role: 'user',
                 content: `Tool result: ${JSON.stringify(toolResult)}`,
+              });
+            } else {
+              // Tool returned undefined - still add to messages so LLM knows
+              messages.push({
+                role: 'assistant',
+                content: `Called tool ${toolCall.toolName} with args: ${JSON.stringify(toolCall.args)}`,
+              });
+              messages.push({
+                role: 'user',
+                content: `Tool returned no result. The tool may have failed or returned empty. Try a different approach.`,
               });
             }
           }
@@ -304,8 +324,19 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         });
 
         // Debug response
-        debugLog(`Response text: ${response.text?.substring(0, 200)}${response.text && response.text.length > 200 ? '...' : ''}`);
+        debugLog(`Response text: ${response.text || '(empty)'}`);
         debugLog(`Tool calls: ${response.toolCalls?.length ?? 0}`);
+        if (response.toolCalls && response.toolCalls.length > 0) {
+          debugLog(`Tool call details:`, response.toolCalls.map(tc => tc.toolName));
+        }
+        // Log full response object for debugging empty responses
+        if (!response.text && (!response.toolCalls || response.toolCalls.length === 0)) {
+          debugLog(`Empty response - full object:`, JSON.stringify({
+            text: response.text,
+            toolCalls: response.toolCalls,
+            finishReason: response.finishReason,
+          }, null, 2));
+        }
 
         // Process the response
         if (response.text) {
@@ -315,11 +346,17 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         }
 
         // Process tool calls
-        if (response.toolCalls && response.toolCalls.length > 0) {
-          for (const toolCall of response.toolCalls) {
+        if (toolCalls && toolCalls.length > 0) {
+          for (const toolCall of toolCalls) {
             debugLog(`Tool call: ${toolCall.toolName}`, JSON.stringify(toolCall.args));
             // Find the tool result - toolResults is an array of results
-            const toolResult = response.toolResults?.[response.toolCalls.indexOf(toolCall)];
+            const toolResultObj = response.toolResults?.[response.toolCalls.indexOf(toolCall)];
+            debugLog(`Tool result object (full):`, JSON.stringify(toolResultObj));
+            debugLog(`Tool result object keys:`, toolResultObj ? Object.keys(toolResultObj) : 'null');
+            // Extract the actual result from the tool result object
+            // The AI SDK returns {type, toolCallId, toolName, args, result}
+            const toolResult = (toolResultObj as { result?: unknown })?.result ?? toolResultObj;
+            debugLog(`Tool result (extracted):`, toolResult !== undefined ? JSON.stringify(toolResult).substring(0, 500) : '(undefined)');
 
             if (toolResult !== undefined) {
               // Add tool call and result to messages for context
@@ -330,6 +367,16 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
               messages.push({
                 role: 'user',
                 content: `Tool result: ${JSON.stringify(toolResult)}`,
+              });
+            } else {
+              // Tool returned undefined - still add to messages so LLM knows
+              messages.push({
+                role: 'assistant',
+                content: `Called tool ${toolCall.toolName} with args: ${JSON.stringify(toolCall.args)}`,
+              });
+              messages.push({
+                role: 'user',
+                content: `Tool returned no result. The tool may have failed or returned empty. Try a different approach.`,
               });
             }
           }
@@ -388,14 +435,15 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
   }
   
-  // Add the current task
+  // Add the current subtask
   persistentMessages.push({
     role: 'user',
-    content: `Task: ${taskDescription}`,
+    content: `Subtask: ${taskDescription}`,
   });
   
-  // Add a summary of the result if we have stored variables
+  // Add a summary of the result
   if (success && Object.keys(variables).length > 0) {
+    // If we have stored variables, include them
     const varSummary = Object.entries(variables)
       .map(([k, v]) => `${k}: ${v}`)
       .join(', ');
@@ -403,6 +451,25 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       role: 'assistant',
       content: `Task completed. Results: ${varSummary}`,
     });
+  } else if (success && outputs.length > 0) {
+    // For task/1 without variables, include the actual LLM output
+    // Filter out error messages and take the last meaningful output
+    const meaningfulOutputs = outputs.filter(o => 
+      !o.startsWith('Error:') && 
+      !o.includes('maximum iterations') &&
+      o.trim().length > 0
+    );
+    if (meaningfulOutputs.length > 0) {
+      persistentMessages.push({
+        role: 'assistant',
+        content: meaningfulOutputs.join('\n'),
+      });
+    } else {
+      persistentMessages.push({
+        role: 'assistant', 
+        content: 'Task completed successfully.',
+      });
+    }
   } else if (success) {
     persistentMessages.push({
       role: 'assistant', 
@@ -429,9 +496,9 @@ function buildSystemPrompt(
   tools: Map<string, ToolDefinition>
 ): string {
   const parts: string[] = [
-    `You are an AI agent executing a task. Your job is to complete the following task:`,
+    `You are an AI agent executing a subtask within a larger workflow. Your job is to complete the following subtask:`,
     '',
-    `Task: ${taskDescription}`,
+    `Subtask: ${taskDescription}`,
     '',
     'Available tools:',
     '',
