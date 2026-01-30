@@ -249,12 +249,12 @@ describe('buildToolsTable', () => {
   it('should format tools as markdown table', () => {
     const tools: Tool[] = [
       { name: 'search', description: 'Search the web', provider: 'mcp' },
-      { name: 'execute_code', description: 'Run code', provider: 'agentvm' }
+      { name: 'vm_exec', description: 'Run shell commands', provider: 'agentvm' }
     ];
     const table = buildToolsTable(tools);
     expect(table).toContain('| Tool |');
     expect(table).toContain('`search`'); // Tool names are in backticks
-    expect(table).toContain('`execute_code`');
+    expect(table).toContain('`vm_exec`');
   });
 
   it('should handle empty tools list', () => {

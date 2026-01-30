@@ -12,6 +12,33 @@ import { loadConfig, type Config, type Provider } from './config.js';
 import { getAgentVMTools, type Tool } from './tools.js';
 import { webSearch, newsSearch } from './search.js';
 import type { MetaFile } from './compile.js';
+import type { AgentVM } from 'deepclause-agentvm';
+
+// Dynamic import for AgentVM (ESM module)
+let AgentVMClass: (new (options?: { network?: boolean; mounts?: Record<string, string> }) => AgentVM) | null = null;
+let agentVMInstance: AgentVM | null = null;
+
+async function getAgentVM(workspacePath: string, network: boolean): Promise<AgentVM> {
+  if (!AgentVMClass) {
+    const mod = await import('deepclause-agentvm');
+    AgentVMClass = mod.AgentVM;
+  }
+  if (!agentVMInstance) {
+    agentVMInstance = new AgentVMClass!({
+      network,
+      mounts: { '/workspace': workspacePath }
+    });
+    await agentVMInstance.start();
+  }
+  return agentVMInstance;
+}
+
+async function stopAgentVM(): Promise<void> {
+  if (agentVMInstance) {
+    await agentVMInstance.stop();
+    agentVMInstance = null;
+  }
+}
 
 // =============================================================================
 // Types
@@ -119,7 +146,7 @@ export async function run(
   });
 
   // Register tools from MCP servers and AgentVM
-  await registerTools(sdk, config, options.verbose);
+  await registerTools(sdk, config, workspacePath, options.verbose);
 
   // Execute DML
   const result: RunResult = {
@@ -197,6 +224,8 @@ export async function run(
     return result;
 
   } finally {
+    // Clean up AgentVM if it was started
+    await stopAgentVM();
     await sdk.dispose();
   }
 }
@@ -282,13 +311,14 @@ function parseArgValue(value: string): unknown {
  */
 async function registerTools(
   sdk: { registerTool: (name: string, tool: ToolDefinition) => void },
-  _config: Config,
+  config: Config,
+  workspacePath: string,
   verbose?: boolean
 ): Promise<void> {
   // Register AgentVM tools (built-in)
   const agentVmTools = getAgentVMTools();
   for (const tool of agentVmTools) {
-    sdk.registerTool(tool.name, createToolDefinition(tool));
+    sdk.registerTool(tool.name, createToolDefinition(tool, config, workspacePath));
     if (verbose) {
       console.log(`[tool] Registered: ${tool.name} (agentvm)`);
     }
@@ -304,7 +334,7 @@ async function registerTools(
 /**
  * Create a ToolDefinition from our Tool interface
  */
-function createToolDefinition(tool: Tool): ToolDefinition {
+function createToolDefinition(tool: Tool, config: Config, workspacePath: string): ToolDefinition {
   const defaultSchema: JsonSchema = { 
     type: 'object', 
     properties: {}, 
@@ -328,10 +358,20 @@ function createToolDefinition(tool: Tool): ToolDefinition {
             count: typeof args.count === 'number' ? args.count : 10,
             freshness: typeof args.freshness === 'string' ? args.freshness : undefined,
           });
-        case 'execute_code':
-        case 'vm_exec':
-          // These are handled by external AgentVM service
-          throw new Error(`Tool ${tool.name} requires AgentVM service connection (not yet implemented)`);
+        case 'vm_exec': {
+          const command = String(args.command || args.arg1 || '');
+          if (!command) {
+            return { stdout: '', stderr: 'Error: No command provided', exitCode: 1 };
+          }
+          const networkEnabled = config.agentvm?.network ?? false;
+          const vm = await getAgentVM(workspacePath, networkEnabled);
+          const result = await vm.exec(command);
+          return {
+            stdout: result.stdout,
+            stderr: result.stderr,
+            exitCode: result.exitCode
+          };
+        }
         default:
           throw new Error(`Tool ${tool.name} has no implementation`);
       }

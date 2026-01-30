@@ -22,6 +22,11 @@ const MCPConfigSchema = z.object({
   servers: z.record(MCPServerSchema).optional().default({})
 });
 
+const AgentVMConfigSchema = z.object({
+  /** Enable networking in the VM (default: false for security) */
+  network: z.boolean().optional().default(false)
+}).optional().default({ network: false });
+
 const ProviderConfigSchema = z.object({
   apiKey: z.string().optional(),
   baseUrl: z.string().optional()
@@ -39,6 +44,7 @@ export const ConfigSchema = z.object({
   provider: z.enum(['openai', 'anthropic', 'google', 'openrouter']).default('openai'),
   providers: ProvidersSchema,
   mcp: MCPConfigSchema.optional().default({ servers: {} }),
+  agentvm: AgentVMConfigSchema,
   dmlBase: z.string().optional().default('.deepclause/tools'),
   workspace: z.string().optional().default('./')
 });
@@ -57,6 +63,7 @@ const DEFAULT_CONFIG: Config = {
   provider: 'openai',
   providers: {},
   mcp: { servers: {} },
+  agentvm: { network: false },
   dmlBase: '.deepclause/tools',
   workspace: './'
 };

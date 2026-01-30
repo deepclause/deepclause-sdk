@@ -81,7 +81,15 @@ task("Analyze this and store the result in Summary.", Summary)
 
 \`\`\`prolog
 exec(web_search(query: "AI news"), Results)
-exec(execute_code(code: "print('hello')", language: python), Output)
+exec(vm_exec(command: "echo hello"), Result)
+\`\`\`
+
+**Important:** \`vm_exec\` returns a dict with \`stdout\`, \`stderr\`, and \`exitCode\` fields.
+Use \`get_dict/3\` to extract values:
+\`\`\`prolog
+exec(vm_exec(command: "echo hello"), Result),
+get_dict(stdout, Result, Output),
+output(Output).
 \`\`\`
 
 #### Memory Management
@@ -245,16 +253,23 @@ agent_main(Topic) :-
 % - External packages (pandas, numpy, etc.)
 % - Shell commands (find, grep, sed, awk, curl)
 % - Complex imperative logic that's awkward in Prolog
+% NOTE: vm_exec returns a dict with stdout, stderr, exitCode - use get_dict to extract
 
 agent_main(Task) :-
     system("You are a coding assistant."),
     
     task("Write Python code to solve: {Task}. Store only the code in Code.", Code),
     
-    output("Executing code..."),
-    exec(execute_code(code: Code, language: python), Result),
+    % Write code to a file and execute it
+    open('script.py', write, S),
+    write(S, Code),
+    close(S),
     
-    task("Explain this execution result: {Result}"),
+    output("Executing code..."),
+    exec(vm_exec(command: "python3 script.py"), Result),
+    get_dict(stdout, Result, Output),
+    
+    task("Explain this execution result: {Output}"),
     
     answer("Done!").
 \`\`\`
@@ -262,6 +277,7 @@ agent_main(Task) :-
 ### Pattern 5: Data Analysis with VM
 \`\`\`prolog
 % Good use of exec: requires pandas package
+% NOTE: vm_exec returns a dict - use get_dict to extract stdout
 agent_main(CsvPath, Question) :-
     system("You are a data analyst."),
     
@@ -271,9 +287,14 @@ agent_main(CsvPath, Question) :-
     output("Analyzing data..."),
     task("Write Python code to load {CsvPath} with pandas and answer: {Question}. Store only the code in Code.", Code),
     
-    exec(execute_code(code: Code, language: python), Result),
+    % Write code to file and execute
+    open('analysis.py', write, S),
+    write(S, Code),
+    close(S),
+    exec(vm_exec(command: "python3 analysis.py"), Result),
+    get_dict(stdout, Result, Output),
     
-    task("Interpret and explain these analysis results: {Result}"),
+    task("Interpret and explain these analysis results: {Output}"),
     
     answer("Analysis complete!").
 \`\`\`
@@ -342,8 +363,7 @@ agent_main(Items) :-
 ### BAD Example - Unnecessary Python:
 \`\`\`prolog
 % DON'T do this - Python for simple file writing
-format(string(Code), "with open('out.txt', 'w') as f:\\n    f.write('''~w''')", [Content]),
-exec(execute_code(code: Code, language: python), _)
+exec(vm_exec(command: "python3 -c \"open('out.txt','w').write('hello')\""), _)
 \`\`\`
 
 ### GOOD Example - Use Prolog:

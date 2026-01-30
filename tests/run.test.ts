@@ -113,7 +113,7 @@ describe('Dry Run Formatting', () => {
     const meta = {
       description: 'Test task',
       parameters: [{ name: 'topic' }, { name: 'depth' }],
-      tools: ['web_search', 'execute_code']
+      tools: ['web_search', 'vm_exec']
     };
     
     // Just verify structure - actual formatting tested in integration
@@ -183,7 +183,7 @@ describe('run integration', () => {
       parameters: [
         { name: 'topic', position: 0, required: true }
       ],
-      tools: ['execute_code'],
+      tools: ['vm_exec'],
       history: []
     };
     
@@ -251,16 +251,16 @@ describe('run integration', () => {
 
 describe('Tool Verification', () => {
   it('should recognize AgentVM tools as available', () => {
-    const agentVmToolNames = ['execute_code', 'vm_exec'];
-    const required = ['execute_code'];
+    const agentVmToolNames = ['vm_exec'];
+    const required = ['vm_exec'];
     
     const missing = required.filter(t => !agentVmToolNames.includes(t));
     expect(missing).toHaveLength(0);
   });
 
   it('should identify missing non-AgentVM tools', () => {
-    const agentVmToolNames = ['execute_code', 'vm_exec'];
-    const required = ['execute_code', 'web_search', 'read_file'];
+    const agentVmToolNames = ['vm_exec'];
+    const required = ['vm_exec', 'web_search', 'read_file'];
     
     const missing = required.filter(t => !agentVmToolNames.includes(t));
     expect(missing).toEqual(['web_search', 'read_file']);

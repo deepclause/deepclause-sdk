@@ -9,26 +9,13 @@ import { getMCPServers } from './config.js';
 // =============================================================================
 const AGENTVM_TOOLS = [
     {
-        name: 'execute_code',
-        description: 'Execute code in sandboxed VM (Python, shell, etc.)',
-        provider: 'agentvm',
-        schema: {
-            type: 'object',
-            properties: {
-                code: { type: 'string', description: 'Code to execute' },
-                language: { type: 'string', description: 'Language (python, shell, etc.)' }
-            },
-            required: ['code', 'language']
-        }
-    },
-    {
         name: 'vm_exec',
-        description: 'Execute any shell command in the VM',
+        description: 'Execute a shell command in a sandboxed Alpine Linux VM with Python. Returns stdout, stderr, and exit code.',
         provider: 'agentvm',
         schema: {
             type: 'object',
             properties: {
-                command: { type: 'string', description: 'Shell command to execute' }
+                command: { type: 'string', description: 'Shell command to execute (e.g., "python3 script.py", "echo hello", "ls -la")' }
             },
             required: ['command']
         }

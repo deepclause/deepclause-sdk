@@ -123,6 +123,14 @@ export declare const ConfigSchema: z.ZodObject<{
             env?: Record<string, string> | undefined;
         }> | undefined;
     }>>>;
+    agentvm: z.ZodDefault<z.ZodOptional<z.ZodObject<{
+        /** Enable networking in the VM (default: false for security) */
+        network: z.ZodDefault<z.ZodOptional<z.ZodBoolean>>;
+    }, "strip", z.ZodTypeAny, {
+        network: boolean;
+    }, {
+        network?: boolean | undefined;
+    }>>>;
     dmlBase: z.ZodDefault<z.ZodOptional<z.ZodString>>;
     workspace: z.ZodDefault<z.ZodOptional<z.ZodString>>;
 }, "strip", z.ZodTypeAny, {
@@ -153,6 +161,9 @@ export declare const ConfigSchema: z.ZodObject<{
             env: Record<string, string>;
         }>;
     };
+    agentvm: {
+        network: boolean;
+    };
     dmlBase: string;
     workspace: string;
 }, {
@@ -182,6 +193,9 @@ export declare const ConfigSchema: z.ZodObject<{
             args?: string[] | undefined;
             env?: Record<string, string> | undefined;
         }> | undefined;
+    } | undefined;
+    agentvm?: {
+        network?: boolean | undefined;
     } | undefined;
     dmlBase?: string | undefined;
     workspace?: string | undefined;

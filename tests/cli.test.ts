@@ -101,7 +101,7 @@ const SAMPLE_META = {
     { name: 'topic', description: 'The topic to research', required: true },
     { name: 'depth', description: 'Research depth', default: 'standard' }
   ],
-  tools: ['web_search', 'execute_code'],
+  tools: ['web_search', 'vm_exec'],
   history: [
     { version: 1, timestamp: '2026-01-29T10:30:00Z', sourceHash: 'sha256:abc123', model: 'gpt-4o' }
   ]
@@ -271,7 +271,7 @@ describe('Compilation', () => {
       const dmlWithTools = `
 agent_main(Topic) :-
     exec(web_search(query: Topic), Results),
-    exec(execute_code(code: "print('hello')", language: python), Output),
+    exec(vm_exec(command: "echo hello"), Output),
     answer("Done").
 `;
       
@@ -280,7 +280,7 @@ agent_main(Topic) :-
       const tools = extractToolDependencies(dmlWithTools);
       
       expect(tools).toContain('web_search');
-      expect(tools).toContain('execute_code');
+      expect(tools).toContain('vm_exec');
       expect(tools).toHaveLength(2);
     });
 
@@ -381,13 +381,13 @@ agent_main(Topic) :-
       
       const tools = [
         { name: 'web_search', description: 'Search the web', provider: 'brave-search' },
-        { name: 'execute_code', description: 'Run code', provider: 'agentvm' }
+        { name: 'vm_exec', description: 'Run shell commands', provider: 'agentvm' }
       ];
       
       const prompt = buildCompilationPrompt(SAMPLE_TASK_MD, tools);
       
       expect(prompt).toContain('web_search');
-      expect(prompt).toContain('execute_code');
+      expect(prompt).toContain('vm_exec');
       expect(prompt).toContain('brave-search');
       expect(prompt).toContain('agentvm');
     });
@@ -397,7 +397,6 @@ agent_main(Topic) :-
       
       const prompt = buildCompilationPrompt(SAMPLE_TASK_MD, []);
       
-      expect(prompt).toContain('execute_code');
       expect(prompt).toContain('vm_exec');
     });
   });
@@ -471,19 +470,19 @@ describe('Execution', () => {
         }),
         '/workspace/.deepclause/tools/code_runner.dml': `
 agent_main(Code) :-
-    exec(execute_code(code: Code, language: python), Result),
+    exec(vm_exec(command: Code), Result),
     answer(Result).
 `,
         '/workspace/.deepclause/tools/code_runner.meta.json': JSON.stringify({
           ...SAMPLE_META,
-          tools: ['execute_code'] // AgentVM tool, always available
+          tools: ['vm_exec'] // AgentVM tool, always available
         })
       });
       
       const { run } = await import('../src/cli/run');
       
-      // Should not throw - execute_code is built-in
-      await expect(run('/workspace/.deepclause/tools/code_runner', ['print("hello")']))
+      // Should not throw - vm_exec is built-in
+      await expect(run('/workspace/.deepclause/tools/code_runner', ['echo hello']))
         .resolves.toBeDefined();
     });
 
@@ -537,11 +536,10 @@ agent_main(Code) :-
     it('should resolve AgentVM tools without config', async () => {
       const { resolveTools } = await import('../src/cli/tools');
       
-      const tools = await resolveTools({ model: 'gpt-4o' }, ['execute_code', 'vm_exec']);
+      const tools = await resolveTools({ model: 'gpt-4o' }, ['vm_exec']);
       
-      expect(tools).toHaveProperty('execute_code');
       expect(tools).toHaveProperty('vm_exec');
-      expect(tools.execute_code.provider).toBe('agentvm');
+      expect(tools.vm_exec.provider).toBe('agentvm');
     });
 
     it('should report missing tools', async () => {
@@ -573,7 +571,6 @@ describe('Tool Listing', () => {
       const tools = await listTools('/workspace');
       
       // Should include AgentVM tools
-      expect(tools.some(t => t.name === 'execute_code')).toBe(true);
       expect(tools.some(t => t.name === 'vm_exec')).toBe(true);
       
       // Should include MCP tools (if servers respond)
@@ -649,12 +646,12 @@ describe('Shared Workspace', () => {
       '/workspace/.deepclause/tools/data_analysis.dml': `
 agent_main :-
     read_file("data.csv", CsvContent),
-    exec(execute_code(code: "import pandas; df = pandas.read_csv('data.csv'); print(df.shape)", language: python), Result),
+    exec(vm_exec(command: "python3 -c \\"import pandas; df = pandas.read_csv('data.csv'); print(df.shape)\\""), Result),
     answer(Result).
 `,
       '/workspace/.deepclause/tools/data_analysis.meta.json': JSON.stringify({
         ...SAMPLE_META,
-        tools: ['execute_code']
+        tools: ['vm_exec']
       })
     });
     
@@ -674,14 +671,14 @@ agent_main :-
       '/workspace/.deepclause/tools/file_test.dml': `
 agent_main :-
     % Write from Python
-    exec(execute_code(code: "open('output.txt', 'w').write('from python')", language: python), _),
+    exec(vm_exec(command: "python3 -c \\"open('output.txt', 'w').write('from python')\\""), _),
     % Read from DML
     read_file("output.txt", Content),
     answer(Content).
 `,
       '/workspace/.deepclause/tools/file_test.meta.json': JSON.stringify({
         ...SAMPLE_META,
-        tools: ['execute_code']
+        tools: ['vm_exec']
       })
     });
     
@@ -779,12 +776,12 @@ describe('Error Handling', () => {
       '/workspace/.deepclause/config.json': JSON.stringify(SAMPLE_CONFIG),
       '/workspace/.deepclause/tools/failing.dml': `
 agent_main :-
-    exec(execute_code(code: "raise Exception('test error')", language: python), Result),
+    exec(vm_exec(command: "python3 -c \\"raise Exception('test error')\\""), Result),
     answer(Result).
 `,
       '/workspace/.deepclause/tools/failing.meta.json': JSON.stringify({
         ...SAMPLE_META,
-        tools: ['execute_code']
+        tools: ['vm_exec']
       })
     });
     
@@ -869,11 +866,11 @@ describe('DML Parser', () => {
       const dml = `
 agent_main :-
     exec(web_search(query: "test"), R1),
-    exec(execute_code(code: "x", language: python), R2).
+    exec(vm_exec(command: "echo hello"), R2).
 `;
       
       const tools = extractToolDependencies(dml);
-      expect(tools).toEqual(['web_search', 'execute_code']);
+      expect(tools).toEqual(['web_search', 'vm_exec']);
     });
 
     it('should handle nested exec in tool definitions', () => {

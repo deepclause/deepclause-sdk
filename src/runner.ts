@@ -485,10 +485,8 @@ export class DMLRunner {
             yield streamQueue.shift()!;
           }
           
-          // Stream any final output from the agent
-          for (const output of raceResult.result.outputs) {
-            yield { type: 'output', content: output };
-          }
+          // In streaming mode, output was already shown via onStream - don't repeat it
+          // The outputs array is kept for memory/history purposes only
 
           // Update memory with full agent conversation
           this.currentMemory = raceResult.result.messages;

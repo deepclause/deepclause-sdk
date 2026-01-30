@@ -1,0 +1,51 @@
+%% vm-exec.dml - Test AgentVM Shell Execution
+%% 
+%% This example demonstrates using vm_exec to run shell commands
+%% in a sandboxed Alpine Linux VM with Python.
+%%
+%% Usage:
+%%   npm run cli -- run examples/vm-exec.dml
+%%
+%% To enable networking (for curl, wget, pip install, etc.):
+%%   Add to .deepclause/config.json:
+%%   {
+%%     "agentvm": { "network": true }
+%%   }
+%%
+%% The vm_exec tool returns a dict with: stdout, stderr, exitCode
+%% Access fields using get_dict/3 or the .field syntax
+
+agent_main :-
+    output("Testing AgentVM shell execution..."),
+    
+    % Basic shell command
+    output("1. Running 'echo hello':"),
+    exec(vm_exec(command: "echo hello"), Echo),
+    get_dict(stdout, Echo, Stdout1),
+    output(Stdout1),
+    
+    % Python version check
+    output("2. Checking Python version:"),
+    exec(vm_exec(command: "python3 --version"), PyVersion),
+    get_dict(stdout, PyVersion, Stdout2),
+    output(Stdout2),
+    
+    % Run inline Python
+    output("3. Running inline Python (2 + 2):"),
+    exec(vm_exec(command: "python3 -c 'print(2 + 2)'"), PyResult),
+    get_dict(stdout, PyResult, Stdout3),
+    output(Stdout3),
+    
+    % List directory
+    output("4. Listing /workspace directory:"),
+    exec(vm_exec(command: "ls -la /workspace"), DirListing),
+    get_dict(stdout, DirListing, Stdout4),
+    output(Stdout4),
+    
+    % Create and run a Python script
+    output("5. Creating and running a Python script:"),
+    exec(vm_exec(command: "echo 'import sys; print(f\"Python {sys.version}\")' > /workspace/test.py && python3 /workspace/test.py"), ScriptResult),
+    get_dict(stdout, ScriptResult, Stdout5),
+    output(Stdout5),
+    
+    answer("AgentVM test complete!").
