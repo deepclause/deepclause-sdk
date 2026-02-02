@@ -108,24 +108,20 @@ deepclause configure mcp-add --name <name> --type <type> [options]
 **Examples:**
 
 ```bash
-# Add a filesystem MCP server (stdio)
+# Add a custom MCP server (stdio)
 deepclause configure mcp-add \
-  --name filesystem \
+  --name my-tools \
   --type stdio \
-  --command "npx -y @modelcontextprotocol/server-filesystem /home/user/documents"
+  --command "npx -y my-mcp-server"
 
-# Add a web search MCP server (http)
+# Add an HTTP-based MCP server
 deepclause configure mcp-add \
-  --name brave-search \
+  --name custom-api \
   --type http \
   --url "http://localhost:3001"
-
-# Add AgentVM for code execution
-deepclause configure mcp-add \
-  --name agentvm \
-  --type stdio \
-  --command "npx -y deepclause-agentvm"
 ```
+
+> **Note:** File access is available via Prolog predicates (`read_file_to_string/3`, `write_to_file/2`) or through the `vm_exec` tool. No separate filesystem MCP server is needed.
 
 #### `deepclause configure mcp-remove`
 
@@ -192,7 +188,7 @@ deepclause compile <input_file.md> [output_path]
     { "name": "company", "description": "Company name to analyze", "required": true },
     { "name": "depth", "description": "Analysis depth (shallow/deep)", "default": "shallow" }
   ],
-  "tools": ["web_search", "execute_code", "vm_exec"],
+  "tools": ["web_search", "vm_exec"],
   "history": [
     { 
       "version": 1, 
@@ -301,20 +297,17 @@ deepclause list-tools [options]
 ```
 Available Tools:
 
-📦 filesystem (MCP)
-  ├─ read_file(path) - Read contents of a file
-  ├─ write_file(path, content) - Write content to a file
-  ├─ list_directory(path) - List directory contents
-  └─ search_files(pattern, path) - Search for files
+🛠️ agentvm (built-in)
+  ├─ vm_exec(command) - Execute shell command in sandboxed Alpine Linux VM
 
-📦 brave-search (MCP)
-  ├─ web_search(query, count) - Search the web
-  └─ news_search(query, freshness) - Search recent news
+🔍 brave (built-in)
+  ├─ web_search(query, count?, freshness?) - Search the web
+  └─ news_search(query, count?, freshness?) - Search recent news
 
-📦 agentvm (MCP)
-  ├─ execute_code(code, language) - Execute code in sandbox
-  └─ create_file(path, content) - Create file in VM
-```
+📁 File Access (via Prolog or vm_exec)
+  ├─ read_file_to_string(Path, String, []) - Read file contents (Prolog)
+  ├─ write_to_file(Path, Content) - Write to file (Prolog)
+  └─ vm_exec("cat file.txt") - Read via shell command
 
 ---
 
@@ -362,8 +355,7 @@ Compiled Commands:
      • company (required) - Company name to analyze
      • depth (optional, default: "shallow") - Analysis depth
    Tool Dependencies:
-     • web_search (brave-search)
-     • execute_code (agentvm)
+     • web_search (brave)
      • vm_exec (agentvm)
    Usage: deepclause run tools/competitor_analysis <company>
 
@@ -373,7 +365,7 @@ Compiled Commands:
      • topic (required) - Research topic
      • max_sources (optional, default: 10) - Maximum sources
    Tool Dependencies:
-     • web_search (brave-search)
+     • web_search (brave)
      • fetch_url (brave-search)
    Usage: deepclause run tools/research --param topic=<topic>
 ```
@@ -424,15 +416,11 @@ Current Model Configuration:
     "maxTokens": 8192
   },
   "mcpServers": {
-    "filesystem": {
+    "custom-tools": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/documents"],
+      "args": ["-y", "my-mcp-server"],
       "env": {}
-    },
-    "brave-search": {
-      "type": "http",
-      "url": "http://localhost:3001"
     }
   },
   "defaults": {
@@ -529,7 +517,88 @@ The prompt is dynamically constructed at compile time to include:
 You are an expert DML (DeepClause Meta Language) programmer. Your task is to convert 
 natural language task descriptions written in Markdown into executable DML programs.
 
-## Available Tools
+## Tool System Overview
+
+DeepClause has a layered tool system with different types of tools serving different purposes.
+
+### Tool Categories
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                        Tool Categories                                │
+├──────────────────────────────────────────────────────────────────────┤
+│                                                                       │
+│  1. EXTERNAL TOOLS (via exec/2)                                       │
+│     Called directly from DML, execute in fresh isolated state         │
+│     ├── AgentVM: vm_exec                                              │
+│     ├── Search: web_search, news_search                               │
+│     ├── User Input: ask_user                                          │
+│     └── MCP Servers: custom configured tools                          │
+│                                                                       │
+│  2. DML TOOL WRAPPERS (via tool/2)                                    │
+│     Defined in DML, available to LLM during task()                    │
+│     └── Wrap external tools with custom logic/descriptions            │
+│                                                                       │
+│  3. AGENT-INTERNAL TOOLS (built into agent loop)                      │
+│     Always available to LLM during task(), cannot be overridden       │
+│     ├── finish(success) - REQUIRED to complete task                   │
+│     └── set_result(var, value) - store output variable values         │
+│                                                                       │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### Built-in External Tools
+
+These are always available via `exec/2`:
+
+| Tool | Provider | Description |
+|------|----------|-------------|
+| `vm_exec(command: Cmd)` | AgentVM | Execute shell command in sandboxed Alpine Linux VM |
+| `web_search(query: Q)` | Brave | Search the web, returns structured results |
+| `news_search(query: Q)` | Brave | Search recent news articles |
+| `ask_user(prompt: P)` | Internal | Request input from the user |
+
+**Tip:** For Python code execution, use `vm_exec(command: "python3 -c 'your_code'")` or `vm_exec(command: "python3 script.py")`.
+
+### Agent-Internal Tools
+
+These are **automatically available** to the LLM during every `task()` call:
+
+| Tool | Description |
+|------|-------------|
+| `finish(success)` | **Required** - Signal task completion. Pass `true` for success, `false` for failure. |
+| `set_result(variable, value)` | Store a value for an output variable. Used with `task(Desc, Var)`. |
+
+**Important:** The LLM must call `finish()` to complete any task. The `set_result()` tool is only present when the task has output variables.
+
+### State and Isolation
+
+**Critical Concept:** Tools and `exec()` calls run in **fresh, isolated state**:
+
+| Context | Memory Access | State Changes | Backtracking |
+|---------|---------------|---------------|--------------|
+| Normal predicates | ✓ Full access | ✓ Persists | ✓ Full backtracking |
+| `exec()` calls | ✗ No access | ✗ Isolated | ✗ Deterministic |
+| DML tool bodies | ✗ Fresh state | ✗ Isolated | ✗ Deterministic |
+
+This means:
+- Memory added with `system()` or `user()` **backtrack** when execution backtracks
+- Tool results from `exec()` are computed once and **don't backtrack**
+- DML tool bodies (defined with `tool/2`) run in isolation - they cannot see or modify the main program's state
+
+**Example of backtrackable memory:**
+```prolog
+% If approach_1 fails, memory from system() is backtracked
+agent_main :-
+    (   system("You are approach 1 assistant"),
+        task("Try approach 1"),
+        approach_1_succeeds
+    ;   system("You are approach 2 assistant"),  % Fresh memory!
+        task("Try approach 2")
+    ).
+```
+
+## Available External Tools
 
 The following tools are available for use with `exec/2`. Use only tools from this list.
 
@@ -537,8 +606,20 @@ The following tools are available for use with `exec/2`. Use only tools from thi
 
 | Tool | Description |
 |------|-------------|
-| `execute_code(code, language)` | Execute code in sandboxed VM (Python, shell, etc.) |
-| `vm_exec(command)` | Execute any shell command in the VM |
+| `vm_exec(command)` | Execute any shell command in the sandboxed Alpine Linux VM |
+
+### Built-in Search Tools
+
+| Tool | Description |
+|------|-------------|
+| `web_search(query, count?, freshness?)` | Search the web using Brave Search API |
+| `news_search(query, count?, freshness?)` | Search recent news articles |
+
+### Built-in User Interaction
+
+| Tool | Description |
+|------|-------------|
+| `ask_user(prompt)` | Ask the user a question and wait for response |
 
 ### Configured MCP Tools
 
@@ -573,17 +654,22 @@ agent_main(MaxResults, Topic) :- ...
 
 | Predicate | Description |
 |-----------|-------------|
-| `task(Description)` | Execute an LLM task |
+| `task(Description)` | Execute an LLM task with current memory |
 | `task(Description, Var)` | Execute task, bind result to Var |
 | `task(Description, Var1, Var2)` | Execute task, bind two results |
-| `task(Description, Var1, Var2, Var3)` | Execute task, bind three results |
+| `prompt(Description)` | Execute LLM task with **fresh/empty memory** |
+| `prompt(Description, Var)` | Prompt with fresh memory, bind result |
 
 **Important:** Variable names in the description must match the Prolog variables:
 ```prolog
 task("Analyze this and store the result in Summary.", Summary)
 ```
 
-#### Direct Tool Execution
+**task() vs prompt():** 
+- `task()` inherits current memory (conversation context flows through)
+- `prompt()` starts with empty memory (for isolated subtasks)
+
+#### External Tool Execution
 
 | Predicate | Description |
 |-----------|-------------|
@@ -591,10 +677,11 @@ task("Analyze this and store the result in Summary.", Summary)
 
 ```prolog
 exec(web_search(query: "AI news"), Results)
-exec(calculator(expression: "15 * 23"), Answer)
+exec(vm_exec(command: "python3 script.py"), Output)
+exec(ask_user(prompt: "What is your name?"), Response)
 ```
 
-#### Memory Management
+#### Memory Management (Backtrackable)
 
 | Predicate | Description |
 |-----------|-------------|
@@ -603,6 +690,8 @@ exec(calculator(expression: "15 * 23"), Answer)
 | `push_context` | Save memory state (for isolation) |
 | `push_context(clear)` | Save and clear memory |
 | `pop_context` | Restore previous memory state |
+
+**Note:** Memory changes are backtrackable. If a branch fails and Prolog backtracks, memory is restored to its previous state.
 
 #### Output
 
@@ -613,19 +702,37 @@ exec(calculator(expression: "15 * 23"), Answer)
 | `log(Text)` | Emit debug/log message |
 | `answer(Text)` | Emit final answer (commits execution) |
 
-#### Tool Definitions
+#### DML Tool Wrappers
 
-Define tools that the LLM can call during `task()`:
+Define tools that the LLM can call during `task()`. These provide a named interface that wraps external tools:
 
 ```prolog
-% Tool implementation (last arg is result, description is second arg)
+% Tool definition: tool(Head, Description) :- Body.
+% - Head: tool name with parameters (last param is typically the result)
+% - Description: string shown to the LLM
+% - Body: implementation (usually calls exec/2)
+
 tool(search(Query, Results), "Search the web for information") :-
     exec(web_search(query: Query), Results).
+
+tool(run_python(Code, Output), "Execute Python code") :-
+    exec(vm_exec(command: "python3 -c '" ++ Code ++ "'"), Output).
 ```
+
+**Important:** Tool bodies run in **fresh isolated state**. They cannot:
+- Access memory from the main program
+- Modify the main program's state
+- Use backtracking from the main program
+
+They are essentially stateless functions that the LLM can invoke.
 
 #### Parameters
 
-Access named parameters with `param/3`:
+Access named parameters with `param/2`:
+
+```prolog
+param(topic, Topic)  % Bind Topic to the 'topic' parameter value
+```
 
 ```prolog
 param(name, "Description", Variable)
@@ -951,8 +1058,12 @@ agent_main(Topic) :-
 For tasks involving code:
 
 ```prolog
-tool(run_code(Code, Language, Output), "Execute code in a sandboxed environment") :-
-    exec(execute_code(code: Code, language: Language), Output).
+% Helper tool to run Python code
+tool(run_python(Code, Output), "Execute Python code in the sandboxed VM") :-
+    % Save code to temp file and execute (handles multi-line code safely)
+    exec(vm_exec(command: "cat > /tmp/script.py << 'ENDOFCODE'\n" ++ Code ++ "\nENDOFCODE"), _),
+    exec(vm_exec(command: "python3 /tmp/script.py"), Result),
+    get_dict(stdout, Result, Output).
 
 agent_main(Task) :-
     system("You are a coding assistant. Write and test code to solve problems."),
@@ -962,7 +1073,7 @@ agent_main(Task) :-
     
     % Execute and capture output
     output("Executing code..."),
-    tool(run_code(Code, python, Result)),
+    tool(run_python(Code, Result)),
     
     % Analyze results
     format(string(AnalyzeTask), "The code produced this output: ~w. Explain the results.", [Result]),
@@ -982,11 +1093,13 @@ agent_main(Url) :-
     % Download web content
     output("Fetching content..."),
     format(string(Cmd), "wget -q -O- ~w | head -200", [Url]),
-    exec(vm_exec(command: Cmd), WebContent),
+    exec(vm_exec(command: Cmd), WebResult),
+    get_dict(stdout, WebResult, WebContent),
     
     % Process with Python
-    task("Write Python code to extract all links from this HTML: {WebContent}. Store in Code.", Code),
-    exec(execute_code(code: Code, language: python), Links),
+    task("Write Python code to extract all links from this HTML. Store in Code.", Code),
+    exec(vm_exec(command: "python3 -c '" ++ Code ++ "'"), LinksResult),
+    get_dict(stdout, LinksResult, Links),
     
     % Summarize findings
     format(string(SummaryTask), "Summarize what you found at this URL based on these links: ~w", [Links]),
@@ -1021,12 +1134,14 @@ agent_main(DataUrl, Question) :-
 Store in Code.", [Question]),
     task(AnalysisTask, Code),
     
-    % Execute analysis
-    exec(execute_code(code: Code, language: python), Result),
+    % Save and execute analysis
+    exec(vm_exec(command: "cat > /tmp/analysis.py << 'EOF'\n" ++ Code ++ "\nEOF"), _),
+    exec(vm_exec(command: "python3 /tmp/analysis.py"), Result),
+    get_dict(stdout, Result, Output),
     
     % Interpret results
     output("Interpreting results..."),
-    format(string(InterpretTask), "Explain these analysis results in plain language: ~w", [Result]),
+    format(string(InterpretTask), "Explain these analysis results in plain language: ~w", [Output]),
     task(InterpretTask),
     
     answer("Data analysis complete!").
@@ -1400,29 +1515,32 @@ agent_main(CsvPath, Question) :-
     output("Setting up analysis environment..."),
     exec(vm_exec(command: "pip install pandas numpy"), _),
     
-    % Load data - workspace is shared, same paths work in DML and VM
+    % Load data - workspace is shared at /workspace
     output("Loading data..."),
     format(string(LoadCode), "
 import pandas as pd
-df = pd.read_csv('~w')
+df = pd.read_csv('/workspace/~w')
 print('Shape:', df.shape)
-print('\\nColumns:', df.columns.tolist())
-print('\\nFirst rows:\\n', df.head())
-print('\\nData types:\\n', df.dtypes)
-print('\\nBasic stats:\\n', df.describe())
+print('Columns:', df.columns.tolist())
+print('First rows:', df.head())
+print('Data types:', df.dtypes)
+print('Basic stats:', df.describe())
     ", [CsvPath]),
-    exec(execute_code(code: LoadCode, language: python), DataInfo),
+    exec(vm_exec(command: "python3 -c '" ++ LoadCode ++ "'"), DataInfoResult),
+    get_dict(stdout, DataInfoResult, DataInfo),
     
     output("Analyzing data..."),
     format(string(AnalysisTask), "Based on this data info:
 ~w
 
 Write Python code to answer: ~w
-Load from ~w. Print clear results.
+Load from /workspace/~w. Print clear results.
 Store the code in AnalysisCode.", [DataInfo, Question, CsvPath]),
     task(AnalysisTask, AnalysisCode),
     
-    exec(execute_code(code: AnalysisCode, language: python), AnalysisResult),
+    exec(vm_exec(command: "cat > /tmp/analysis.py << 'EOF'\n" ++ AnalysisCode ++ "\nEOF"), _),
+    exec(vm_exec(command: "python3 /tmp/analysis.py"), AnalysisResultDict),
+    get_dict(stdout, AnalysisResultDict, AnalysisResult),
     
     output("Generating insights..."),
     format(string(InsightTask), "Explain these analysis results in plain language:
@@ -1989,40 +2107,44 @@ AgentVM is bundled with the DeepClause CLI and provides secure sandboxed code ex
 
 ### Overview
 
-AgentVM is a lightweight WASM-based Linux virtual machine (Alpine Linux with Python) that runs in a worker thread. It allows you to execute shell commands and capture their output, making it an ideal sandbox for AI agents.
+AgentVM is a lightweight WASM-based Linux virtual machine (Alpine Linux with Python 3.12) that runs in a worker thread. It allows you to execute shell commands and capture their output, making it an ideal sandbox for AI agents.
 
 **Features:**
-- **Full Linux VM**: Runs Alpine Linux with Python in a WASM-based emulator
-- **Networking**: Built-in DHCP, DNS, and TCP/UDP NAT for internet access
-- **Shared Filesystem**: Workspace directory mounted identically in SWI-Prolog WASM and AgentVM
+- **Full Linux VM**: Runs Alpine Linux with Python 3.12 in a WASM-based emulator
+- **Networking**: Built-in DHCP, DNS, and TCP/UDP NAT for internet access (when enabled)
+- **Shared Filesystem**: Workspace directory mounted at `/workspace` in both DML and AgentVM
 - **Command Execution**: Execute shell commands and capture stdout/stderr
 - **Worker Thread**: Runs in a separate thread to avoid blocking
 
-### Built-in Tools from AgentVM
+### Built-in Tool
 
 | Tool | Description |
 |------|-------------|
-| `execute_code(code, language)` | Execute code in the sandboxed VM (Python, shell, etc.) |
-| `vm_exec(command)` | Execute any shell command in the VM |
+| `vm_exec(command)` | Execute any shell command in the sandboxed Alpine Linux VM |
 
 ### Shared Workspace
 
 The workspace directory is mounted in both the SWI-Prolog WASM environment and AgentVM at the same path. This means:
 
-- Use standard `read_file/2` and `write_file/2` predicates for file I/O from DML
 - Files written by DML are immediately accessible to Python/shell code in the VM
 - Files created by VM code are immediately readable from DML
 - No path translation needed - same paths work everywhere
 
 ### Tool Response Format
 
-All AgentVM tools return:
-```json
+The `vm_exec` tool returns a dict with:
+```prolog
 {
-  "stdout": "command output",
-  "stderr": "error output if any",
-  "exitCode": 0
+  stdout: "command output",
+  stderr: "error output if any",
+  exitCode: 0
 }
+```
+
+Access fields using `get_dict/3`:
+```prolog
+exec(vm_exec(command: "echo hello"), Result),
+get_dict(stdout, Result, Output)
 ```
 
 ### Example Usage in DML
@@ -2032,8 +2154,10 @@ All AgentVM tools return:
 agent_main(Task) :-
     system("You are a coding assistant. Write Python to solve problems."),
     task("Write Python code to solve: {Task}. Store in Code.", Code),
-    exec(execute_code(code: Code, language: python), Result),
-    format(string(Msg), "Output: ~w", [Result]),
+    format(string(Cmd), "python3 -c '~w'", [Code]),
+    exec(vm_exec(command: Cmd), Result),
+    get_dict(stdout, Result, Output),
+    format(string(Msg), "Output: ~w", [Output]),
     answer(Msg).
 ```
 
@@ -2052,16 +2176,17 @@ agent_main(Url) :-
 agent_main(CsvPath, Question) :-
     system("You are a data analyst."),
     
-    % Read CSV from shared workspace (accessible to both DML and VM)
-    read_file(CsvPath, CsvData),
-    
     % Generate and run analysis code (VM sees same file at same path)
     format(string(AnalysisTask), "Write Python code using pandas to analyze ~w and answer: ~w. Store in Code.", [CsvPath, Question]),
     task(AnalysisTask, Code),
-    exec(execute_code(code: Code, language: python), Result),
+    
+    % Write code to file and execute
+    format(string(RunCmd), "python3 -c '~w'", [Code]),
+    exec(vm_exec(command: RunCmd), Result),
+    get_dict(stdout, Result, Output),
     
     % Explain results
-    format(string(ExplainTask), "Explain these results in plain language: ~w", [Result]),
+    format(string(ExplainTask), "Explain these results in plain language: ~w", [Output]),
     task(ExplainTask),
     answer("Analysis complete!").
 ```
@@ -2077,10 +2202,12 @@ agent_main(Task) :-
     % Generate code
     task("Write Python code to: {Task}. Use requests and beautifulsoup4 if needed. Store in Code.", Code),
     
-    % Execute
-    exec(execute_code(code: Code, language: python), Result),
+    % Save code to file and execute (better for multi-line code)
+    exec(vm_exec(command: "cat > /tmp/script.py << 'EOF'\n" ++ Code ++ "\nEOF"), _),
+    exec(vm_exec(command: "python3 /tmp/script.py"), Result),
+    get_dict(stdout, Result, Output),
     
-    format(string(Msg), "Result: ~w", [Result]),
+    format(string(Msg), "Result: ~w", [Output]),
     answer(Msg).
 ```
 
@@ -2102,18 +2229,20 @@ deepclause run tools/analysis --workspace ./my-project
 ```prolog
 % Same paths work in DML and VM
 agent_main :-
-    % Read with DML predicate
-    read_file("data.csv", Contents),
-    
-    % Or read with VM shell command - same path
-    exec(vm_exec(command: "cat data.csv"), Data),
+    % Read with VM shell command
+    exec(vm_exec(command: "cat /workspace/data.csv"), Data),
+    get_dict(stdout, Data, CsvContents),
     
     % Python can access the same files directly
-    exec(execute_code(code: "import pandas; df = pandas.read_csv('data.csv'); print(df.head())", language: python), Result),
+    exec(vm_exec(command: "python3 -c \"import pandas; df = pandas.read_csv('/workspace/data.csv'); print(df.head())\""), Result),
+    get_dict(stdout, Result, Output),
     
-    % Write from Python, read from DML
-    exec(execute_code(code: "open('output.txt', 'w').write('hello')", language: python), _),
-    read_file("output.txt", Output),  % Works immediately
+    % Write from Python
+    exec(vm_exec(command: "python3 -c \"open('/workspace/output.txt', 'w').write('hello')\""), _),
+    
+    % Read back with shell
+    exec(vm_exec(command: "cat /workspace/output.txt"), ReadBack),
+    get_dict(stdout, ReadBack, FileContents),
     
     answer("Done!").
 ```
@@ -2125,6 +2254,6 @@ Documentation: https://github.com/deepclause/agentvm
 | Provider | Models | API Key Variable |
 |----------|--------|------------------|
 | OpenAI | gpt-4o, gpt-4-turbo, gpt-3.5-turbo | `OPENAI_API_KEY` |
-| Anthropic | claude-3-opus, claude-3-sonnet | `ANTHROPIC_API_KEY` |
-| Google | gemini-2.0-flash, gemini-pro | `GOOGLE_GENERATIVE_AI_API_KEY` |
+| Anthropic | claude-3.5-sonnet, claude-3-opus | `ANTHROPIC_API_KEY` |
+| Google | gemini-2.0-flash, gemini-2.5-flash, gemini-pro | `GOOGLE_GENERATIVE_AI_API_KEY` |
 | OpenRouter | Various | `OPENROUTER_API_KEY` |

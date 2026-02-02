@@ -83,15 +83,22 @@ DML Code → Prolog Engine → Yield Request → Runner Handler → Resume Engin
 **Responsibilities**:
 - Build system prompts with task description and available tools
 - Run iterative LLM calls until task completion
-- Handle built-in tools: `finish()`, `ask_user()`, `store()`
+- Handle built-in agent tools: `finish()`, `set_result()`
 - Convert registered tools to AI SDK format
 - Support streaming responses
 - Maintain conversation history within a task
 - Return messages for memory persistence
 
+**Built-in Agent Tools** (available during `task()` execution):
+
+| Tool | Description |
+|------|-------------|
+| `finish(success)` | Signal task completion (true/false) - **required** |
+| `set_result(variable, value)` | Store result value for output variables |
+
 **Agent Loop Cycle**:
 ```
-1. Build messages (system + history + task)
+1. Build messages (system + memory + task description)
 2. Call LLM with tools
 3. Process response:
    - Text output → Stream to user
@@ -128,14 +135,89 @@ State = state{
 }
 ```
 
-### 5. Tool System (`tools.ts`)
+### 5. Tool System
 
-**Purpose**: Tool registration and access control.
+The DeepClause tool system has two distinct layers that serve different purposes:
 
-**Features**:
-- Register external tools with Zod or JSON Schema
-- Whitelist/blacklist policy with wildcard support
-- Built-in tools (filesystem, etc.) with schema validation
+#### External Tools (via `exec/2`)
+
+External tools are called from DML using `exec(tool_name(args...), Result)`. They execute in **fresh, isolated state** and are used for I/O operations, web searches, code execution, etc.
+
+**Built-in External Tools**:
+
+| Tool | Provider | Description |
+|------|----------|-------------|
+| `vm_exec(command)` | AgentVM | Execute shell commands in sandboxed Alpine Linux VM |
+| `web_search(query)` | Brave | Search the web using Brave Search API |
+| `news_search(query)` | Brave | Search for recent news articles |
+| `ask_user(prompt)` | Internal | Request input from the user |
+
+**Key Characteristics**:
+- **Fresh State**: Each `exec()` call runs in isolation - no access to current Prolog state
+- **No Backtracking**: Tool results are computed once and don't participate in backtracking
+- **Side Effects**: Tools can perform I/O, network requests, file operations
+
+**Example**:
+```prolog
+exec(web_search(query: "AI news"), Results),
+exec(vm_exec(command: "python3 script.py"), Output)
+```
+
+#### Internal Tools (DML Wrappers via `tool/2`)
+
+DML tool wrappers are defined in Prolog using `tool/2` predicates. They provide a **named interface** for the LLM to call during `task()` execution, typically wrapping external tools with additional logic.
+
+**Key Characteristics**:
+- **LLM Accessible**: Tools defined with `tool/2` appear in the LLM's available tools during `task()`
+- **Fresh State per Call**: When the LLM calls a DML tool, it runs in a fresh Prolog engine
+- **Can Call External Tools**: Tool bodies can use `exec/2` to call external tools
+
+**Example**:
+```prolog
+% Define a tool the LLM can use
+tool(search(Query, Results), "Search the web for information") :-
+    exec(web_search(query: Query, count: 10), Results).
+
+% LLM can now call 'search' during task() execution
+agent_main(Topic) :-
+    task("Research {Topic} using the search tool.").
+```
+
+#### Agent-Internal Tools (built into agent loop)
+
+These tools are **always available** to the LLM during `task()` execution and are handled directly by the agent loop:
+
+| Tool | Description |
+|------|-------------|
+| `finish(success)` | **Required** - Signal task completion (true/false) |
+| `set_result(variable, value)` | Store result in an output variable |
+
+These cannot be overridden by user-defined tools.
+
+#### State Isolation Summary
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                    DML Program State                            │
+│  - Memory (conversation history) - BACKTRACKABLE               │
+│  - Params dict                                                  │
+│  - Context stack                                                │
+├────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Normal Predicates         │    tool() and exec() calls       │
+│   ──────────────────────    │    ────────────────────────      │
+│   ✓ Full state access       │    ✗ Fresh isolated state        │
+│   ✓ Memory persists         │    ✗ No memory access            │
+│   ✓ Backtracking works      │    ✗ Results are deterministic   │
+│   ✓ Can modify state        │    ✗ Cannot modify main state    │
+│                                                                 │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**Why Isolation?** Tool execution runs in a separate Prolog engine to ensure:
+1. Tools cannot corrupt the main program state
+2. Backtracking in the main program doesn't re-execute tools
+3. LLM tool calls are predictable and repeatable
 
 ---
 
@@ -217,27 +299,49 @@ deepclause-sdk/
 │   ├── index.ts          # Public exports
 │   ├── sdk.ts            # SDK factory and main interface
 │   ├── runner.ts         # DML execution engine
-│   ├── agent.ts          # LLM agent loop
-│   ├── tools.ts          # Tool registry and policy
+│   ├── agent.ts          # LLM agent loop with tool orchestration
+│   ├── tools.ts          # Tool registry (AgentVM, Search tools)
 │   ├── types.ts          # TypeScript type definitions
-│   ├── prolog/
+│   ├── cli/              # CLI implementation
+│   │   ├── index.ts      # CLI entry point
+│   │   ├── commands.ts   # Command handlers
+│   │   ├── run.ts        # DML execution command
+│   │   ├── compile.ts    # Compilation/validation
+│   │   ├── config.ts     # Configuration management
+│   │   ├── tools.ts      # CLI-specific tool setup
+│   │   ├── search.ts     # Search tool integration
+│   │   ├── mcp.ts        # MCP protocol support
+│   │   ├── prompt.ts     # User prompting
+│   │   └── tui/          # Terminal UI components
+│   │       └── index.ts
+│   ├── prolog/           # Prolog-JS bridge
 │   │   ├── loader.ts     # SWI-Prolog WASM loader
-│   │   ├── bridge.ts     # JS-Prolog data conversion
-│   │   ├── deepclause_mi.pl      # Meta-interpreter
-│   │   ├── deepclause_strings.pl # String interpolation
-│   │   └── deepclause_memory.pl  # Memory utilities
-│   └── prolog-src/       # Prolog source (copied to dist)
-│       └── deepclause_mi.pl
-├── examples/
-│   ├── basic-usage.ts    # Simple example
+│   │   └── bridge.ts     # JS-Prolog data conversion
+│   └── prolog-src/       # Prolog source files
+│       ├── deepclause_mi.pl      # Meta-interpreter
+│       ├── deepclause_strings.pl # String interpolation
+│       └── deepclause_memory.pl  # Memory utilities
+├── sdk-examples/         # TypeScript SDK examples
+│   ├── basic-usage.ts    # Simple SDK usage
 │   ├── deep-research.ts  # Multi-phase research agent
 │   ├── neurosymbolic.ts  # Hybrid logic+LLM example
-│   └── quick-start.ts    # Minimal getting started
+│   ├── quick-start.ts    # Minimal getting started
+│   └── no-api-key.ts     # Usage without LLM
+├── dml-examples/         # DML file examples
+│   ├── deep_research.dml # Research agent DML
+│   ├── vm-exec.dml       # AgentVM code execution
+│   └── test.dml          # Simple test DML
 ├── tests/
-│   ├── api.test.ts       # API tests
-│   ├── policy.test.ts    # Tool policy tests
-│   ├── memory.test.ts    # Memory threading tests
-│   └── ...
+│   ├── cli.test.ts       # CLI tests
+│   ├── run.test.ts       # DML execution tests
+│   ├── compile.test.ts   # Compilation tests
+│   ├── config.test.ts    # Configuration tests
+│   ├── language-features.test.ts  # DML language tests
+│   └── llm-integration.test.ts    # LLM integration tests
+├── docs/
+│   └── DML_REFERENCE.md  # DML language reference
+├── vendor/
+│   └── swipl-wasm/       # SWI-Prolog WASM runtime
 └── dist/                 # Compiled output
 ```
 
@@ -280,7 +384,8 @@ agent_main(Topic) :-
     system("You are a research assistant"),
     task("Research the topic: ~w", [Topic]),
     task("Write a summary of your findings", Summary),
-    answer(Summary).
+    set_result(summary, Summary),
+    finish(success).
 
 % String interpolation
 task("Hello ~w!", [Name]).
@@ -288,12 +393,17 @@ task("Hello ~w!", [Name]).
 % Parameter access  
 param(api_key, Key).
 
-% External tools
-exec(brave_search(Query), Results).
+% External tools via exec/2
+exec(web_search(query: Topic), SearchResults),  % Brave web search
+exec(vm_exec(command: "python3 script.py"), ExecResult),  % AgentVM code execution
 
-% Tool definitions
-tool(my_tool(Input, Output), "Description") :-
-    ... implementation ...
+% Agent-internal tools
+set_result(variable_name, value),  % Store output variable
+finish(success).  % Required: Mark completion
+
+% Tool definitions (LLM-accessible wrappers)
+tool(search(Query, Results), "Search the web for information") :-
+    exec(web_search(query: Query), Results).
 ```
 
 ---
@@ -303,12 +413,13 @@ tool(my_tool(Input, Output), "Description") :-
 | Event | Description |
 |-------|-------------|
 | `output` | Final text output from agent |
-| `stream` | Streaming text chunk |
+| `stream` | Streaming text chunk (with `done` flag) |
 | `log` | Debug/info log message |
 | `answer` | Answer from `answer/1` predicate |
-| `input_required` | Waiting for user input |
+| `tool_call` | Tool invocation (includes `toolName`, `toolArgs`, `toolResult`) |
+| `input_required` | Waiting for user input (includes `prompt`) |
 | `error` | Execution error |
-| `finished` | Execution complete (may include trace) |
+| `finished` | Execution complete (may include `trace` and `results`) |
 
 ---
 
@@ -332,24 +443,23 @@ Provider is auto-detected from model name or can be explicitly specified.
 ```typescript
 const sdk = await createDeepClause({ model: 'gemini-2.0-flash' });
 
-sdk.registerTool('brave_search', {
-  description: 'Search the web',
-  parameters: z.object({ query: z.string() }),
-  execute: async ({ query }) => searchBrave(query),
-});
+// Tools are pre-registered: web_search, news_search, vm_exec, ask_user, set_result, finish
 
 const dml = `
 agent_main(Topic) :-
-    system("You are a research analyst"),
+    system("You are a research analyst with web search capabilities"),
     task("Search for information about: ~w", [Topic]),
     task("Write a comprehensive report based on your research", Report),
-    exec(write_file("report.md", Report), _),
-    answer("Report saved!").
+    % Save report using AgentVM
+    exec(vm_exec(command: "cat > /tmp/report.md"), _),
+    set_result(report, Report),
+    finish(success).
 `;
 
 for await (const event of sdk.runDML(dml, { args: ["AI trends"] })) {
   if (event.type === 'stream') process.stdout.write(event.content);
   if (event.type === 'answer') console.log(event.content);
+  if (event.type === 'finished') console.log('Report:', event.results?.report);
 }
 ```
 
