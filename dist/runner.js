@@ -77,6 +77,8 @@ export class DMLRunner {
     currentMemory = [];
     // Mutex for serializing tool execution (AI SDK may call tools in parallel)
     toolExecutionLock = Promise.resolve();
+    // Depth counter for re-entrant tool execution (nested task() calls)
+    toolExecutionDepth = 0;
     constructor(swipl, options) {
         this.swipl = swipl;
         this.options = options;
@@ -372,7 +374,7 @@ export class DMLRunner {
         const availableTools = this.buildAgentTools(userTools, options.toolPolicy, 
         // executeToolInline callback - runs tool in main engine with shared state
         async (toolName, args) => {
-            return this.executeToolInline(toolName, args, augmentedTools, onToolOutput);
+            return this.executeToolInline(toolName, args, augmentedTools, onToolOutput, options);
         });
         // Queue for streaming events
         const streamQueue = [];
@@ -387,13 +389,13 @@ export class DMLRunner {
             streaming: this.options.streaming,
             debug: this.options.debug,
             onOutput: (_text) => { },
-            onStream: (chunk, done) => {
+            onStream: this.options.streaming ? (chunk, done) => {
                 streamQueue.push({ type: 'stream', content: chunk, done });
                 if (streamResolve) {
                     streamResolve();
                     streamResolve = null;
                 }
-            },
+            } : undefined,
             onToolCall: (toolName, args) => {
                 streamQueue.push({ type: 'tool_call', toolName, toolArgs: args });
                 if (streamResolve) {
@@ -441,6 +443,9 @@ export class DMLRunner {
             while (streamQueue.length > 0) {
                 yield streamQueue.shift();
             }
+            // if (process.env.DEBUG_RUNNER) {
+            console.log('[RUNNER] Non-streaming agent result.outputs:', result.outputs);
+            //  }
             // Stream any output from the agent
             for (const output of result.outputs) {
                 yield { type: 'output', content: output };
@@ -695,9 +700,23 @@ export class DMLRunner {
      * Tools now share state with the task() that calls them.
      * Uses a mutex to serialize concurrent tool calls (AI SDK may execute multiple tools in parallel).
      */
-    async executeToolInline(toolName, args, registeredTools, onOutput) {
+    async executeToolInline(toolName, args, registeredTools, onOutput, options) {
         if (process.env.DEBUG_RUNNER) {
-            console.log('[RUNNER] executeToolInline called for:', toolName, '- waiting for mutex');
+            console.log('[RUNNER] executeToolInline called for:', toolName, '- depth:', this.toolExecutionDepth);
+        }
+        // If we're already inside a tool execution (nested task()), skip the mutex
+        // The mutex is only for parallel calls from the AI SDK, not for nested calls
+        if (this.toolExecutionDepth > 0) {
+            if (process.env.DEBUG_RUNNER) {
+                console.log('[RUNNER] Nested tool call - skipping mutex for:', toolName);
+            }
+            this.toolExecutionDepth++;
+            try {
+                return await this.executeToolInlineImpl(toolName, args, registeredTools, onOutput, options);
+            }
+            finally {
+                this.toolExecutionDepth--;
+            }
         }
         // Acquire mutex - wait for any previous tool execution to complete
         const previousLock = this.toolExecutionLock;
@@ -707,10 +726,12 @@ export class DMLRunner {
         if (process.env.DEBUG_RUNNER) {
             console.log('[RUNNER] executeToolInline acquired mutex for:', toolName);
         }
+        this.toolExecutionDepth++;
         try {
-            return await this.executeToolInlineImpl(toolName, args, registeredTools, onOutput);
+            return await this.executeToolInlineImpl(toolName, args, registeredTools, onOutput, options);
         }
         finally {
+            this.toolExecutionDepth--;
             if (process.env.DEBUG_RUNNER) {
                 console.log('[RUNNER] executeToolInline releasing mutex for:', toolName);
             }
@@ -720,7 +741,7 @@ export class DMLRunner {
     /**
      * Internal implementation of executeToolInline (called with mutex held)
      */
-    async executeToolInlineImpl(toolName, args, registeredTools, onOutput) {
+    async executeToolInlineImpl(toolName, args, registeredTools, onOutput, options) {
         const outputs = [];
         // Convert args to Prolog list format
         const sortedArgs = Object.entries(args)
@@ -803,6 +824,32 @@ export class DMLRunner {
                  deepclause_mi:session_engine('${this.sessionId}', Engine),
                  engine_post(Engine, exec_done)`);
                         }
+                    }
+                    break;
+                }
+                case 'request_agent_loop': {
+                    // Tool body contains a nested task() - run the agent loop
+                    if (!options) {
+                        console.warn('[RUNNER] Cannot run nested task() - no options available');
+                        return { result: { error: 'Nested task() requires agent loop options' }, outputs };
+                    }
+                    if (process.env.DEBUG_RUNNER) {
+                        console.log('[RUNNER] Nested task() in tool - running agent loop');
+                    }
+                    // Run nested agent loop and collect results
+                    // Note: This is synchronous from the Prolog perspective - we consume all events
+                    for await (const event of this.handleAgentLoop(step.payload, '', options)) {
+                        if (process.env.DEBUG_RUNNER) {
+                            console.log('[RUNNER] Nested agent loop event:', event.type, event.content?.substring(0, 50));
+                        }
+                        if (event.type === 'output' && event.content) {
+                            outputs.push(event.content);
+                            onOutput(event.content);
+                        }
+                        // Other event types (stream, tool_call, etc.) are also forwarded
+                    }
+                    if (process.env.DEBUG_RUNNER) {
+                        console.log('[RUNNER] Nested agent loop completed, continuing tool execution');
                     }
                     break;
                 }

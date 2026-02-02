@@ -257,8 +257,16 @@ create_engine(SessionId, _MemoryId, Args, Params, Engine) :-
 
 %% determine_agent_goal(+SessionId, +Args, -Goal)
 %% Args is a list of positional arguments - passed directly to agent_main
-determine_agent_goal(SessionId, _Args, SessionId:agent_main) :-
+%% Prefers arity that matches the number of arguments provided
+determine_agent_goal(SessionId, [], SessionId:agent_main) :-
     current_predicate(SessionId:agent_main/0), !.
+determine_agent_goal(SessionId, [Arg1], SessionId:agent_main(Arg1)) :-
+    current_predicate(SessionId:agent_main/1), !.
+determine_agent_goal(SessionId, [Arg1, Arg2], SessionId:agent_main(Arg1, Arg2)) :-
+    current_predicate(SessionId:agent_main/2), !.
+determine_agent_goal(SessionId, [Arg1, Arg2, Arg3], SessionId:agent_main(Arg1, Arg2, Arg3)) :-
+    current_predicate(SessionId:agent_main/3), !.
+% Fallback: if no exact arity match, try best fit
 determine_agent_goal(SessionId, Args, Goal) :-
     current_predicate(SessionId:agent_main/1), !,
     (   Args = [Arg1|_]

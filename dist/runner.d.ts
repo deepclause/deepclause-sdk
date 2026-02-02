@@ -32,6 +32,7 @@ export declare class DMLRunner {
     private sessionId;
     private currentMemory;
     private toolExecutionLock;
+    private toolExecutionDepth;
     constructor(swipl: SWIPLModule, options: RunnerOptions);
     /**
      * Get the current conversation memory
