@@ -175,7 +175,9 @@ export async function runAgentLoop(options) {
             await tick();
             if (streaming && onStream) {
                 // Use streaming mode
+                console.log("Current History");
                 console.log(messages);
+                console.log("----------------------");
                 const response = streamText({
                     model,
                     messages,
@@ -185,6 +187,7 @@ export async function runAgentLoop(options) {
                     maxTokens: modelOptions.maxTokens,
                     abortSignal: signal,
                 });
+                console.log("Max tokens: " + modelOptions.maxTokens);
                 // Collect streamed text
                 let fullText = '';
                 for await (const chunk of response.textStream) {
@@ -497,11 +500,10 @@ Please try again - invoke the tool correctly using the tool interface.`,
         success = false;
         outputs.push('Agent loop reached maximum iterations without completing');
     }
-    // For memory persistence between tasks, keep the conversation flow:
-    // 1. Previous conversation history (from memory)
+    // For memory persistence between tasks, build a conversation that includes:
+    // 1. Previous conversation history (from memory) 
     // 2. Current task as user message
-    // 3. Summary of result as assistant message
-    // Filter out internal tool call/result messages which are implementation details
+    // 3. Actual assistant responses (text only, not tool call details)
     const persistentMessages = [];
     // Keep previous conversation history
     for (const m of conversationHistory) {
@@ -517,9 +519,19 @@ Please try again - invoke the tool correctly using the tool interface.`,
         role: 'user',
         content: `Subtask: ${taskDescription}`,
     });
-    // Add a summary of the result
+    // Extract actual assistant text responses from the NEW part of the conversation only
+    // (skip system prompt and old history - start after conversationHistory + system + subtask)
+    const newMessagesStartIndex = 1 + conversationHistory.length + 1; // system + history + subtask
+    const assistantTextResponses = [];
+    for (let i = newMessagesStartIndex; i < messages.length; i++) {
+        const m = messages[i];
+        if (m.role === 'assistant' && typeof m.content === 'string' && m.content.trim()) {
+            assistantTextResponses.push(m.content);
+        }
+    }
+    // Add the result to persistent messages
     if (success && Object.keys(variables).length > 0) {
-        // If we have stored variables, include them
+        // If we have stored variables, include them as the result
         const varSummary = Object.entries(variables)
             .map(([k, v]) => `${k}: ${v}`)
             .join(', ');
@@ -528,9 +540,15 @@ Please try again - invoke the tool correctly using the tool interface.`,
             content: `Task completed. Results: ${varSummary}`,
         });
     }
+    else if (assistantTextResponses.length > 0) {
+        // Include actual assistant text responses from this task
+        persistentMessages.push({
+            role: 'assistant',
+            content: assistantTextResponses.join('\n\n'),
+        });
+    }
     else if (success && outputs.length > 0) {
-        // For task/1 without variables, include the actual LLM output
-        // Filter out error messages and take the last meaningful output
+        // Fallback: use outputs if we have them
         const meaningfulOutputs = outputs.filter(o => !o.startsWith('Error:') &&
             !o.includes('maximum iterations') &&
             o.trim().length > 0);
