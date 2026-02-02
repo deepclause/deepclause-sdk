@@ -250,6 +250,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       
       if (streaming && onStream) {
         // Use streaming mode
+
+        console.log(messages)
+
         const response = streamText({
           model,
           messages,

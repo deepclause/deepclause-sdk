@@ -175,6 +175,7 @@ export async function runAgentLoop(options) {
             await tick();
             if (streaming && onStream) {
                 // Use streaming mode
+                console.log(messages);
                 const response = streamText({
                     model,
                     messages,
