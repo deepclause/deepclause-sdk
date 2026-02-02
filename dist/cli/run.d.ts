@@ -14,6 +14,7 @@ export interface RunOptions {
     dryRun?: boolean;
     model?: string;
     provider?: Provider;
+    temperature?: number;
     params?: Record<string, string>;
 }
 export interface RunResult {

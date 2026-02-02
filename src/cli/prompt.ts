@@ -125,6 +125,26 @@ tool(search(Query, Results), "Search the web for information") :-
     exec(web_search(query: Query), Results).
 \`\`\`
 
+#### Built-in Agent Tools
+
+During \`task()\` execution, the LLM has access to these built-in tools:
+
+| Tool | Description |
+|------|-------------|
+| \`store(variable, value)\` | Store a result in an output variable |
+| \`ask_user(prompt)\` | Ask the user for input or clarification |
+| \`finish(success)\` | Complete the task |
+
+**Important:** If your task might need user input (clarification, choices, confirmation), 
+you should define an \`ask_user\` tool wrapper so the LLM can request input:
+
+\`\`\`prolog
+% Define ask_user wrapper so LLM can request user input during task()
+tool(ask_user(Prompt, Response), "Ask the user a question and get their response") :-
+    exec(ask_user(prompt: Prompt), Result),
+    get_dict(user_response, Result, Response).
+\`\`\`
+
 ### String Interpolation
 
 DML supports **automatic string interpolation** using \`{Variable}\` syntax in task descriptions 
@@ -347,6 +367,22 @@ agent_main(Items) :-
     answer(DoneMsg).
 \`\`\`
 
+### Pattern 8: Interactive Agent (User Input)
+\`\`\`prolog
+% When the task may need user clarification or choices
+% Define ask_user wrapper so LLM can interact with user
+tool(ask_user(Prompt, Response), "Ask the user a question") :-
+    exec(ask_user(prompt: Prompt), Result),
+    get_dict(user_response, Result, Response).
+
+agent_main(Task) :-
+    system("You are a helpful assistant. If you need clarification, use the ask_user tool."),
+    
+    task("Help the user with: {Task}. If anything is unclear, ask for clarification."),
+    
+    answer("Task completed!").
+\`\`\`
+
 ---
 
 ## When to Use exec() vs Prolog
@@ -390,6 +426,7 @@ close(S)
 6. **Define required tools** - What external capabilities are needed?
 7. **Handle edge cases** - Add fallbacks and error handling
 8. **Add progress output** - Keep users informed with \`output/1\`
+9. **Add ask_user wrapper** - If the task might need user input, clarification, or choices
 
 ## CRITICAL: String Handling Rules
 
@@ -421,15 +458,16 @@ Your DML output must:
 
 1. Start with a comment header describing the program
 2. Define any tool wrappers needed with \`tool/3\`
-3. Have a single \`agent_main\` entry point
-4. Use appropriate system prompts
-5. Include progress outputs for long-running tasks
-6. End with \`answer/1\` to signal completion
-7. Handle stated edge cases
-8. **Only use tools from the Available External Tools list**
-9. **Use ONLY {Variable} interpolation OR format/3, never mix them**
-10. **NEVER pass format(...) directly to output/1 or answer/1**
-11. **Use Prolog native file I/O, NOT Python exec() for simple file operations**
+3. **If the task may need user input, define an \`ask_user\` tool wrapper**
+4. Have a single \`agent_main\` entry point
+5. Use appropriate system prompts
+6. Include progress outputs for long-running tasks
+7. End with \`answer/1\` to signal completion
+8. Handle stated edge cases
+9. **Only use tools from the Available External Tools list**
+10. **Use ONLY {Variable} interpolation OR format/3, never mix them**
+11. **NEVER pass format(...) directly to output/1 or answer/1**
+12. **Use Prolog native file I/O, NOT Python exec() for simple file operations**
 
 Output ONLY the DML code, no explanations or markdown code fences.
 `;

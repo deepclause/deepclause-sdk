@@ -20,7 +20,7 @@ export async function createDeepClause(options) {
         model: options.model,
         provider,
         temperature: options.temperature ?? 0.7,
-        maxTokens: options.maxTokens ?? 4096,
+        maxTokens: options.maxTokens ?? 65536,
         baseUrl: options.baseUrl,
         trace: options.trace ?? false,
         streaming: options.streaming ?? false,

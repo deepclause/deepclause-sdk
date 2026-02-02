@@ -9,6 +9,7 @@ export interface CompileOptions {
     validateOnly?: boolean;
     model?: string;
     provider?: Provider;
+    temperature?: number;
 }
 export interface CompileResult {
     output: string;

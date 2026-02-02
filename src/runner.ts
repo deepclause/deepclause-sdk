@@ -126,6 +126,8 @@ export class DMLRunner {
   private engine: unknown = null;
   private sessionId: string = '';
   private currentMemory: MemoryMessage[] = [];
+  // Mutex for serializing tool execution (AI SDK may call tools in parallel)
+  private toolExecutionLock: Promise<void> = Promise.resolve();
 
   constructor(swipl: SWIPLModule, options: RunnerOptions) {
     this.swipl = swipl;
@@ -435,8 +437,52 @@ export class DMLRunner {
     // Store current memory for getMemory() access
     this.currentMemory = memory;
 
+    // Callback for tool output events
+    const onToolOutput = (text: string) => {
+      streamQueue.push({ type: 'output', content: text });
+      if (streamResolve) {
+        streamResolve();
+        streamResolve = null;
+      }
+    };
+
+    // Augment registered tools with internal ask_user so DML tools can call exec(ask_user(...))
+    const augmentedTools = new Map(options.tools);
+    if (!augmentedTools.has('ask_user')) {
+      augmentedTools.set('ask_user', {
+        description: 'Ask the user for input or clarification',
+        parameters: {
+          type: 'object',
+          properties: {
+            prompt: { type: 'string', description: 'The question or prompt to show the user' }
+          },
+          required: ['prompt']
+        },
+        execute: async (args) => {
+          const argsObj = args as Record<string, unknown>;
+          const prompt = (argsObj.prompt ?? argsObj.arg1 ?? Object.values(argsObj).find(v => typeof v === 'string')) as string;
+          if (!prompt) {
+            return { error: 'No prompt provided to ask_user' };
+          }
+          try {
+            const response = await options.onInputRequired(prompt);
+            return { user_response: response };
+          } catch (err) {
+            return { error: String(err) };
+          }
+        },
+      });
+    }
+
     // Build available tools for agent
-    const availableTools = this.buildAgentTools(userTools, options.tools, options.toolPolicy);
+    const availableTools = this.buildAgentTools(
+      userTools, 
+      options.toolPolicy,
+      // executeToolInline callback - runs tool in main engine with shared state
+      async (toolName: string, args: Record<string, unknown>) => {
+        return this.executeToolInline(toolName, args, augmentedTools, onToolOutput);
+      }
+    );
 
     // Queue for streaming events
     const streamQueue: DMLEvent[] = [];
@@ -454,6 +500,13 @@ export class DMLRunner {
       onOutput: (_text) => { /* Final outputs handled after completion */ },
       onStream: (chunk: string, done: boolean) => {
         streamQueue.push({ type: 'stream', content: chunk, done });
+        if (streamResolve) {
+          streamResolve();
+          streamResolve = null;
+        }
+      },
+      onToolCall: (toolName: string, args: Record<string, unknown>) => {
+        streamQueue.push({ type: 'tool_call', toolName, toolArgs: args });
         if (streamResolve) {
           streamResolve();
           streamResolve = null;
@@ -501,6 +554,11 @@ export class DMLRunner {
       // Non-streaming mode - wait for completion
       const result = await resultPromise;
 
+      // Drain tool_call events from queue (they were queued during agent execution)
+      while (streamQueue.length > 0) {
+        yield streamQueue.shift()!;
+      }
+
       // Stream any output from the agent
       for (const output of result.outputs) {
         yield { type: 'output', content: output };
@@ -545,6 +603,10 @@ export class DMLRunner {
     try {
       // Execute tool
       const argsObj = this.argsToObject(args, tool);
+      
+      // Emit tool_call event before execution
+      yield { type: 'tool_call', toolName, toolArgs: argsObj };
+      
       const result = await tool.execute(argsObj);
 
       // Post result back to Prolog
@@ -734,8 +796,8 @@ export class DMLRunner {
    */
   private buildAgentTools(
     userTools: UserToolInfo[],
-    registeredTools: Map<string, ToolDefinition>,
-    policy: ToolPolicy | null
+    policy: ToolPolicy | null,
+    executeToolInline: (toolName: string, args: Record<string, unknown>) => Promise<{ result: unknown; outputs: string[] }>
   ): Map<string, ToolDefinition> {
     const result = new Map<string, ToolDefinition>();
 
@@ -766,8 +828,8 @@ export class DMLRunner {
         description += `\n\nProlog implementation:\n${tool.source}`;
       }
 
-      // Capture registeredTools for the closure
-      const regTools = registeredTools;
+      // Capture tool name for closure
+      const toolName = tool.name;
       
       result.set(tool.name, {
         description,
@@ -777,8 +839,9 @@ export class DMLRunner {
           required: required.length > 0 ? required : undefined,
         },
         execute: async (args) => {
-          // Execute via Prolog meta-interpreter (cooperative with exec)
-          return this.executeUserTool(tool.name, args, regTools);
+          // Execute tool inline via main Prolog engine (shares state with task)
+          const { result: toolResult } = await executeToolInline(toolName, args);
+          return toolResult;
         },
       });
     }
@@ -791,217 +854,166 @@ export class DMLRunner {
   }
 
   /**
-   * Execute a user-defined tool via Prolog meta-interpreter
-   * Uses a single engine with yield/post pattern for exec/2 calls
+   * Execute a tool inline via the main Prolog engine
+   * Posts execute_tool signal, handles yields (output, exec requests), returns tool_result
+   * Tools now share state with the task() that calls them.
+   * Uses a mutex to serialize concurrent tool calls (AI SDK may execute multiple tools in parallel).
    */
-  private async executeUserTool(name: string, args: Record<string, unknown>, registeredTools: Map<string, ToolDefinition>): Promise<unknown> {
-    // Sort args by key name to ensure correct order (arg1 before arg2, etc.)
-    const sortedArgs = Object.entries(args)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([, v]) => this.toPrologTerm(v))
-      .join(', ');
-
-    // Build the tool goal
-    const toolArgs = sortedArgs ? `${sortedArgs}, Result` : 'Result';
-    const toolGoal = `tool(${name}(${toolArgs}))`;
+  private async executeToolInline(
+    toolName: string,
+    args: Record<string, unknown>,
+    registeredTools: Map<string, ToolDefinition>,
+    onOutput: (text: string) => void
+  ): Promise<{ result: unknown; outputs: string[] }> {
+    if (process.env.DEBUG_RUNNER) {
+      console.log('[RUNNER] executeToolInline called for:', toolName, '- waiting for mutex');
+    }
+    
+    // Acquire mutex - wait for any previous tool execution to complete
+    const previousLock = this.toolExecutionLock;
+    let releaseLock: () => void;
+    this.toolExecutionLock = new Promise(resolve => { releaseLock = resolve; });
+    await previousLock;
     
     if (process.env.DEBUG_RUNNER) {
-      console.log('[RUNNER] Executing user tool via MI:', toolGoal);
+      console.log('[RUNNER] executeToolInline acquired mutex for:', toolName);
     }
-
-    // Create engine for this tool execution
-    // Use a unique session ID for this tool call so exec results don't conflict
-    const toolSessionId = `tool_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     
-    // Use mi/3 with state-threaded memory (state{memory: [], params: _{}}
-    const createResult = this.query(
-      `engine_create(Result, (
-         nb_setval(current_session_id, '${toolSessionId}'),
-         deepclause_mi:mi(${this.sessionId}:${toolGoal}, state{memory: [], params: _{}}, '${toolSessionId}')
-       ), Engine),
-       assertz(deepclause_mi:session_engine('${toolSessionId}', Engine))`
-    );
-    
-    if (!createResult) {
-      console.error('[RUNNER] Failed to create tool engine');
-      return undefined;
-    }
-
-    // Step through the engine, handling exec requests
-    let result: unknown = undefined;
-    
-    while (true) {
-      // Get the engine and call engine_next directly
-      const stepResult = this.query(
-        `deepclause_mi:session_engine('${toolSessionId}', Engine), 
-         (engine_next(Engine, Answer) -> Status = running, Result = Answer ; Status = done, Result = none)`
-      );
-      
-      if (!stepResult || stepResult.Status === 'done') {
-        if (process.env.DEBUG_RUNNER) {
-          console.log('[RUNNER] Tool engine completed');
-        }
-        break;
+    try {
+      return await this.executeToolInlineImpl(toolName, args, registeredTools, onOutput);
+    } finally {
+      if (process.env.DEBUG_RUNNER) {
+        console.log('[RUNNER] executeToolInline releasing mutex for:', toolName);
       }
+      releaseLock!();
+    }
+  }
 
-      const answer = toJsValue(stepResult.Result);
+  /**
+   * Internal implementation of executeToolInline (called with mutex held)
+   */
+  private async executeToolInlineImpl(
+    toolName: string,
+    args: Record<string, unknown>,
+    registeredTools: Map<string, ToolDefinition>,
+    onOutput: (text: string) => void
+  ): Promise<{ result: unknown; outputs: string[] }> {
+    const outputs: string[] = [];
+    
+    // Convert args to Prolog list format
+    const sortedArgs = Object.entries(args)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([, v]) => this.toPrologTerm(v));
+    
+    // Post execute_tool signal to main engine
+    const argsListStr = `[${sortedArgs.join(', ')}]`;
+    
+    if (process.env.DEBUG_RUNNER) {
+      console.log('[RUNNER] About to post execute_tool signal:', toolName);
+    }
+    
+    try {
+      this.query(
+        `deepclause_mi:session_engine('${this.sessionId}', Engine),
+         engine_post(Engine, execute_tool("${toolName}", ${argsListStr}))`
+      );
+    } catch (err) {
+      console.error('[RUNNER] Failed to post execute_tool:', err);
+      return { result: { error: `Failed to execute tool: ${err}` }, outputs };
+    }
+    
+    if (process.env.DEBUG_RUNNER) {
+      console.log('[RUNNER] Posted execute_tool signal:', toolName, sortedArgs);
+    }
+    
+    // Step engine and handle yields until we get tool_result
+    while (true) {
+      const step = this.stepEngine();
       
       if (process.env.DEBUG_RUNNER) {
-        console.log('[RUNNER] Tool engine yielded:', JSON.stringify(answer));
+        console.log('[RUNNER] Tool inline step:', step.status, step.content, step.payload);
       }
-
-      // Check what the engine yielded - handle swipl-wasm compound term format
-      // Format: {"$t":"t","request_exec":[["calculator",["15 * 7 + 23"]]]}
-      // or: {"$tag":"request_exec", ...}
-      if (answer && typeof answer === 'object') {
-        const answerObj = answer as Record<string, unknown>;
+      
+      switch (step.status) {
+        case 'tool_result': {
+          // Tool execution completed
+          const payload = step.payload as { result: unknown } | undefined;
+          return { result: payload?.result, outputs };
+        }
         
-        // Check for swipl-wasm tuple format: {$t: "t", request_exec: [[toolName, args]]}
-        if (answerObj['$t'] === 't' && 'request_exec' in answerObj) {
-          const reqExecData = answerObj['request_exec'] as unknown[][];
-          if (Array.isArray(reqExecData) && reqExecData.length > 0) {
-            const [toolName, toolArgsRaw] = reqExecData[0] as [string, unknown[]];
-            
+        case 'output': {
+          // Tool body emitted output
+          if (step.content) {
+            outputs.push(step.content);
+            onOutput(step.content);
+          }
+          break;
+        }
+        
+        case 'log': {
+          // Log message - ignore for now
+          break;
+        }
+        
+        case 'request_exec': {
+          // Tool body needs to call an external tool via exec()
+          const payload = step.payload as { toolName: string; args: unknown[] } | undefined;
+          if (payload) {
             if (process.env.DEBUG_RUNNER) {
-              console.log('[RUNNER] Exec request for tool:', toolName, 'args:', toolArgsRaw);
+              console.log('[RUNNER] request_exec for tool:', payload.toolName);
+              console.log('[RUNNER] Available tools:', Array.from(registeredTools.keys()));
             }
-            
-            const tool = registeredTools.get(toolName);
+            const tool = registeredTools.get(payload.toolName);
             if (tool) {
-              const mappedArgs = this.argsToObject(Array.isArray(toolArgsRaw) ? toolArgsRaw : [toolArgsRaw], tool);
+              const mappedArgs = this.argsToObject(payload.args, tool);
               if (process.env.DEBUG_RUNNER) {
-                console.log('[RUNNER] Mapped args:', JSON.stringify(mappedArgs));
+                console.log('[RUNNER] Mapped args for', payload.toolName, ':', mappedArgs);
               }
               try {
                 const execResult = await tool.execute(mappedArgs);
                 if (process.env.DEBUG_RUNNER) {
-                  console.log('[RUNNER] Tool result:', execResult);
+                  console.log('[RUNNER] Inline exec result:', execResult);
                 }
-                // Post result back - store it and signal the engine
+                // Post result back to engine
                 const resultStr = this.toPrologTerm(execResult);
                 this.query(
-                  `assertz(deepclause_mi:session_exec_result('${toolSessionId}', result{status: success, result: ${resultStr}})),
-                   deepclause_mi:session_engine('${toolSessionId}', Engine),
+                  `assertz(deepclause_mi:session_exec_result('${this.sessionId}', result{status: success, result: ${resultStr}})),
+                   deepclause_mi:session_engine('${this.sessionId}', Engine),
                    engine_post(Engine, exec_done)`
                 );
               } catch (error) {
                 const errMsg = error instanceof Error ? error.message : String(error);
                 this.query(
-                  `assertz(deepclause_mi:session_exec_result('${toolSessionId}', result{status: error, result: "${errMsg}"})),
-                   deepclause_mi:session_engine('${toolSessionId}', Engine),
+                  `assertz(deepclause_mi:session_exec_result('${this.sessionId}', result{status: error, result: "${errMsg}"})),
+                   deepclause_mi:session_engine('${this.sessionId}', Engine),
                    engine_post(Engine, exec_done)`
                 );
               }
             } else {
               this.query(
-                `assertz(deepclause_mi:session_exec_result('${toolSessionId}', result{status: error, result: "Tool not found: ${toolName}"})),
-                 deepclause_mi:session_engine('${toolSessionId}', Engine),
+                `assertz(deepclause_mi:session_exec_result('${this.sessionId}', result{status: error, result: "Tool not found: ${payload.toolName}"})),
+                 deepclause_mi:session_engine('${this.sessionId}', Engine),
                  engine_post(Engine, exec_done)`
               );
             }
-            continue;  // Continue the loop to get next yield
           }
+          break;
         }
         
-        // Also check for $tag format
-        if ('$tag' in answerObj && answerObj['$tag'] === 'request_exec') {
-          const toolName = String(toJsValue(answerObj[1]) ?? '');
-          const toolArgsRaw = toJsValue(answerObj[2]) as unknown[];
-          
-          if (process.env.DEBUG_RUNNER) {
-            console.log('[RUNNER] Exec request ($tag) for tool:', toolName, 'args:', toolArgsRaw);
-          }
-          
-          const tool = registeredTools.get(toolName);
-          if (tool) {
-            const mappedArgs = this.argsToObject(toolArgsRaw, tool);
-            try {
-              const execResult = await tool.execute(mappedArgs);
-              if (process.env.DEBUG_RUNNER) {
-                console.log('[RUNNER] Tool result:', execResult);
-              }
-              const resultStr = this.toPrologTerm(execResult);
-              this.query(
-                `assertz(deepclause_mi:session_exec_result('${toolSessionId}', result{status: success, result: ${resultStr}})),
-                 deepclause_mi:session_engine('${toolSessionId}', Engine),
-                 engine_post(Engine, exec_done)`
-              );
-            } catch (error) {
-              const errMsg = error instanceof Error ? error.message : String(error);
-              this.query(
-                `assertz(deepclause_mi:session_exec_result('${toolSessionId}', result{status: error, result: "${errMsg}"})),
-                 deepclause_mi:session_engine('${toolSessionId}', Engine),
-                 engine_post(Engine, exec_done)`
-              );
-            }
-          } else {
-            this.query(
-              `assertz(deepclause_mi:session_exec_result('${toolSessionId}', result{status: error, result: "Tool not found: ${toolName}"})),
-               deepclause_mi:session_engine('${toolSessionId}', Engine),
-               engine_post(Engine, exec_done)`
-            );
-          }
-          continue;
+        case 'error': {
+          return { result: { error: step.content }, outputs };
+        }
+        
+        case 'finished': {
+          // Engine finished without tool_result - shouldn't happen
+          return { result: { error: 'Tool execution ended unexpectedly' }, outputs };
+        }
+        
+        default: {
+          console.warn('[RUNNER] Unexpected step during tool execution:', step.status);
         }
       }
-      
-      // Check if it's a plain compound term like request_exec(name, args)
-      if (Array.isArray(answer) && answer.length >= 3) {
-        const functor = answer[0];
-        if (functor === 'request_exec') {
-          const toolName = String(answer[1] ?? '');
-          const toolArgsRaw = answer[2] as unknown[];
-          
-          if (process.env.DEBUG_RUNNER) {
-            console.log('[RUNNER] Exec request (array) for tool:', toolName, 'args:', toolArgsRaw);
-          }
-          
-          const tool = registeredTools.get(toolName);
-          if (tool) {
-            const mappedArgs = this.argsToObject(Array.isArray(toolArgsRaw) ? toolArgsRaw : [toolArgsRaw], tool);
-            try {
-              const execResult = await tool.execute(mappedArgs);
-              if (process.env.DEBUG_RUNNER) {
-                console.log('[RUNNER] Tool result:', execResult);
-              }
-              const resultStr = this.toPrologTerm(execResult);
-              this.query(
-                `assertz(deepclause_mi:session_exec_result('${toolSessionId}', result{status: success, result: ${resultStr}})),
-                 deepclause_mi:session_engine('${toolSessionId}', Engine),
-                 engine_post(Engine, exec_done)`
-              );
-            } catch (error) {
-              const errMsg = error instanceof Error ? error.message : String(error);
-              this.query(
-                `assertz(deepclause_mi:session_exec_result('${toolSessionId}', result{status: error, result: "${errMsg}"})),
-                 deepclause_mi:session_engine('${toolSessionId}', Engine),
-                 engine_post(Engine, exec_done)`
-              );
-            }
-          } else {
-            this.query(
-              `assertz(deepclause_mi:session_exec_result('${toolSessionId}', result{status: error, result: "Tool not found: ${toolName}"})),
-               deepclause_mi:session_engine('${toolSessionId}', Engine),
-               engine_post(Engine, exec_done)`
-            );
-          }
-          continue;
-        }
-      }
-      
-      // If the answer is the final result (not a request), capture it
-      result = answer;
-      break;
     }
-
-    // Clean up the temporary engine
-    this.query(
-      `(deepclause_mi:session_engine('${toolSessionId}', Engine) -> catch(engine_destroy(Engine), _, true) ; true),
-       retractall(deepclause_mi:session_engine('${toolSessionId}', _)),
-       retractall(deepclause_mi:session_exec_result('${toolSessionId}', _))`
-    );
-
-    return result;
   }
 
   /**

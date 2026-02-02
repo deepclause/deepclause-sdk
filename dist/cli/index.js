@@ -84,6 +84,7 @@ program
     .option('-f, --force', 'Force recompilation even if source unchanged')
     .option('--validate-only', 'Validate without saving output')
     .option('--model <model>', 'Override model for compilation')
+    .option('--temperature <number>', 'Override temperature (0.0-2.0)', parseFloat)
     .action(async (source, output, options) => {
     try {
         const config = await loadConfig(process.cwd());
@@ -91,7 +92,8 @@ program
         const result = await compile(source, outputDir, {
             force: options.force,
             validateOnly: options.validateOnly,
-            model: options.model || config.model
+            model: options.model || config.model,
+            temperature: options.temperature
         });
         if (result.skipped) {
             console.log(`⏭️  Skipped (unchanged): ${source}`);
@@ -144,10 +146,20 @@ program
     .option('--headless', 'Plain output only, no TUI formatting')
     .option('--trace <file>', 'Save execution trace to file')
     .option('--dry-run', 'Show what would be executed without running')
-    .option('--model <model>', 'Override configured model')
+    .option('--model <model>', 'Override configured model (can be provider/model format, e.g., google/gemini-2.5-pro)')
+    .option('--provider <provider>', 'Override configured provider (openai, anthropic, google, openrouter)')
+    .option('--temperature <number>', 'Override temperature (0.0-2.0)', parseFloat)
     .option('-p, --param <key=value>', 'Pass named parameter (can be repeated)', collectParams, {})
     .action(async (file, args, options) => {
     try {
+        // Parse provider/model format if provided (e.g., "google/gemini-2.5-pro")
+        let model = options.model;
+        let provider = options.provider;
+        if (model && model.includes('/')) {
+            const [parsedProvider, ...modelParts] = model.split('/');
+            provider = provider || parsedProvider;
+            model = modelParts.join('/'); // Handle models with / in name
+        }
         const result = await run(file, args, {
             workspace: options.workspace,
             verbose: options.verbose,
@@ -155,7 +167,9 @@ program
             headless: options.headless,
             trace: options.trace,
             dryRun: options.dryRun,
-            model: options.model,
+            model,
+            provider: provider,
+            temperature: options.temperature,
             params: options.param
         });
         if (options.dryRun) {

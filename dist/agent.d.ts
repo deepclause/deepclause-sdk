@@ -17,6 +17,7 @@ export interface AgentLoopOptions {
     };
     onOutput: (text: string) => void;
     onStream?: (chunk: string, done: boolean) => void;
+    onToolCall?: (toolName: string, args: Record<string, unknown>) => void;
     onAskUser: (prompt: string) => Promise<string>;
     signal?: AbortSignal;
     streaming?: boolean;

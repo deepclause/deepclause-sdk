@@ -24,6 +24,7 @@ export interface CompileOptions {
   validateOnly?: boolean;
   model?: string;
   provider?: Provider;
+  temperature?: number;
 }
 
 export interface CompileResult {
@@ -126,7 +127,7 @@ export async function compile(
   const userMessage = buildUserMessage(markdown);
 
   // Call LLM to generate DML
-  const dml = await generateDML(systemPrompt, userMessage, model, provider);
+  const dml = await generateDML(systemPrompt, userMessage, model, provider, options.temperature);
 
   // Extract metadata from generated DML
   const extractedTools = extractToolDependencies(dml);
@@ -257,7 +258,8 @@ async function generateDML(
   systemPrompt: string,
   userMessage: string,
   model: string,
-  provider: Provider
+  provider: Provider,
+  temperature?: number
 ): Promise<string> {
   const llm = getLanguageModel(provider, model);
 
@@ -265,7 +267,7 @@ async function generateDML(
     model: llm,
     system: systemPrompt,
     prompt: userMessage,
-    temperature: 0.3, // Lower temperature for more consistent code generation
+    temperature: temperature ?? 0.3, // Lower temperature for more consistent code generation
     maxTokens: 8192
   });
 

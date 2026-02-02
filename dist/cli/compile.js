@@ -60,7 +60,7 @@ export async function compile(sourcePath, outputDir, options = {}) {
     const systemPrompt = buildCompilationPrompt(tools);
     const userMessage = buildUserMessage(markdown);
     // Call LLM to generate DML
-    const dml = await generateDML(systemPrompt, userMessage, model, provider);
+    const dml = await generateDML(systemPrompt, userMessage, model, provider, options.temperature);
     // Extract metadata from generated DML
     const extractedTools = extractToolDependencies(dml);
     const extractedParams = extractParameters(dml);
@@ -169,13 +169,13 @@ export async function compileAll(sourceDir, outputDir, options = {}) {
 /**
  * Generate DML using LLM
  */
-async function generateDML(systemPrompt, userMessage, model, provider) {
+async function generateDML(systemPrompt, userMessage, model, provider, temperature) {
     const llm = getLanguageModel(provider, model);
     const result = await generateText({
         model: llm,
         system: systemPrompt,
         prompt: userMessage,
-        temperature: 0.3, // Lower temperature for more consistent code generation
+        temperature: temperature ?? 0.3, // Lower temperature for more consistent code generation
         maxTokens: 8192
     });
     // Clean up the response - remove any markdown code fences if present

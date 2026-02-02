@@ -31,6 +31,7 @@ export declare class DMLRunner {
     private engine;
     private sessionId;
     private currentMemory;
+    private toolExecutionLock;
     constructor(swipl: SWIPLModule, options: RunnerOptions);
     /**
      * Get the current conversation memory
@@ -87,10 +88,16 @@ export declare class DMLRunner {
      */
     private buildAgentTools;
     /**
-     * Execute a user-defined tool via Prolog meta-interpreter
-     * Uses a single engine with yield/post pattern for exec/2 calls
+     * Execute a tool inline via the main Prolog engine
+     * Posts execute_tool signal, handles yields (output, exec requests), returns tool_result
+     * Tools now share state with the task() that calls them.
+     * Uses a mutex to serialize concurrent tool calls (AI SDK may execute multiple tools in parallel).
      */
-    private executeUserTool;
+    private executeToolInline;
+    /**
+     * Internal implementation of executeToolInline (called with mutex held)
+     */
+    private executeToolInlineImpl;
     /**
      * Extract memory from payload (now passed via state threading)
      */

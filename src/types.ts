@@ -66,13 +66,19 @@ export interface TraceEntry {
  * Events emitted during DML execution
  */
 export interface DMLEvent {
-  type: 'output' | 'log' | 'answer' | 'input_required' | 'error' | 'finished' | 'stream';
+  type: 'output' | 'log' | 'answer' | 'input_required' | 'error' | 'finished' | 'stream' | 'tool_call';
   content?: string;
   prompt?: string;
   /** Execution trace (only present in 'finished' event when trace mode enabled) */
   trace?: TraceEntry[];
   /** Whether this is the final chunk of a stream (only for 'stream' events) */
   done?: boolean;
+  /** Tool name (only for 'tool_call' events) */
+  toolName?: string;
+  /** Tool arguments (only for 'tool_call' events) */
+  toolArgs?: Record<string, unknown>;
+  /** Tool result (only for 'tool_call' events, set after execution) */
+  toolResult?: unknown;
 }
 
 /**
@@ -81,8 +87,8 @@ export interface DMLEvent {
 export interface ToolDefinition {
   /** Human-readable description of what the tool does */
   description: string;
-  /** JSON Schema or Zod schema for tool parameters */
-  parameters: z.ZodSchema | JsonSchema;
+  /** JSON Schema for tool parameters */
+  parameters: JsonSchema;
   /** Function to execute the tool */
   execute: (args: Record<string, unknown>) => Promise<unknown>;
 }

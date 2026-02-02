@@ -3,18 +3,9 @@
  *
  * Provides web and news search functionality using Brave Search API.
  * Requires BRAVE_API_KEY or BRAVE_KEY environment variable.
+ *
+ * Returns plain text results for easier LLM consumption.
  */
-export interface BraveWebResult {
-    title: string;
-    url: string;
-    description: string;
-    published?: string;
-}
-export interface BraveSearchResponse {
-    search_type: string;
-    results: BraveWebResult[];
-    message?: string;
-}
 export interface WebSearchParams {
     query: string;
     count?: number;
@@ -23,10 +14,12 @@ export interface WebSearchParams {
 }
 /**
  * Perform a web search using Brave Search API
+ * Returns plain text formatted results
  */
-export declare function webSearch(params: WebSearchParams): Promise<BraveSearchResponse>;
+export declare function webSearch(params: WebSearchParams): Promise<string>;
 /**
  * Perform a news search using Brave Search API
+ * Returns plain text formatted results
  */
-export declare function newsSearch(params: WebSearchParams): Promise<BraveSearchResponse>;
+export declare function newsSearch(params: WebSearchParams): Promise<string>;
 //# sourceMappingURL=search.d.ts.map

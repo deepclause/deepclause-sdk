@@ -6,6 +6,7 @@
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import * as readline from 'readline';
 import { createDeepClause } from '../sdk.js';
 import type { DMLEvent, ToolDefinition, JsonSchema } from '../types.js';
 import { loadConfig, type Config, type Provider } from './config.js';
@@ -40,6 +41,33 @@ async function stopAgentVM(): Promise<void> {
   }
 }
 
+/**
+ * Prompt the user for input from stdin
+ */
+function promptUser(prompt: string): Promise<string> {
+  console.error(`[CLI] promptUser called with prompt length: ${prompt?.length}`);
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+    
+    // Print the prompt with a visual indicator
+    console.log('\n' + '─'.repeat(60));
+    console.log('📝 USER INPUT REQUIRED:');
+    console.log('─'.repeat(60));
+    console.log(prompt);
+    console.log('─'.repeat(60));
+    
+    rl.question('Your response: ', (answer) => {
+      rl.close();
+      console.log('─'.repeat(60) + '\n');
+      console.error(`[CLI] promptUser resolving with: "${answer}"`);
+      resolve(answer);
+    });
+  });
+}
+
 // =============================================================================
 // Types
 // =============================================================================
@@ -53,6 +81,7 @@ export interface RunOptions {
   dryRun?: boolean;
   model?: string;
   provider?: Provider;
+  temperature?: number;
   params?: Record<string, string>;
 }
 
@@ -142,7 +171,9 @@ export async function run(
     provider,
     trace: !!options.trace,
     streaming: options.stream,
-    debug: options.verbose
+    debug: options.verbose,
+    maxTokens:  65536,
+    temperature: options.temperature ?? 0.0
   });
 
   // Register tools from MCP servers and AgentVM
@@ -158,7 +189,11 @@ export async function run(
     for await (const event of sdk.runDML(dmlCode, {
       params,
       args,
-      workspacePath
+      workspacePath,
+      // Handle user input requests from ask_user tool
+      onUserInput: options.headless 
+        ? async () => '' // In headless mode, return empty string
+        : promptUser
     })) {
       result.events?.push(event);
 
@@ -186,6 +221,26 @@ export async function run(
         case 'log':
           if (options.verbose && event.content && !options.headless) {
             console.log(`[log] ${event.content}`);
+          }
+          break;
+
+        case 'tool_call':
+          // Show tool calls in shortened form (always, unless headless)
+          if (!options.headless && event.toolName) {
+            // Format args for display - truncate long values
+            const formatArgs = (args: Record<string, unknown> | undefined): string => {
+              if (!args) return '';
+              const parts: string[] = [];
+              for (const [key, value] of Object.entries(args)) {
+                let strVal = typeof value === 'string' ? value : JSON.stringify(value);
+                if (strVal.length > 50) {
+                  strVal = strVal.substring(0, 47) + '...';
+                }
+                parts.push(`${key}=${strVal}`);
+              }
+              return parts.join(', ');
+            };
+            console.log(`  🔧 ${event.toolName}(${formatArgs(event.toolArgs)})`);
           }
           break;
 
@@ -386,10 +441,17 @@ async function verifyToolsAvailable(
   config: Config,
   toolNames: string[]
 ): Promise<{ available: boolean; missing: string[] }> {
+  // Internal tools are automatically provided by the agent - don't require external config
+  const internalTools = ['ask_user', 'finish', 'set_result', 'store'];
+  
   const agentVmToolNames = getAgentVMTools().map(t => t.name);
   const missing: string[] = [];
 
   for (const name of toolNames) {
+    // Skip internal tools - they're auto-provided by the agent
+    if (internalTools.includes(name)) {
+      continue;
+    }
     if (!agentVmToolNames.includes(name)) {
       // Tool not in AgentVM, would need MCP server
       // For now, assume MCP tools are available if configured

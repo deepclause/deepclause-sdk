@@ -309,6 +309,9 @@ process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory), request_age
     payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory}) :- !.
 process_engine_result(request_exec(Tool, Args), request_exec, '',
     payload{toolName: Tool, args: Args}) :- !.
+%% Tool result from inline tool execution
+process_engine_result(tool_result(Result), tool_result, '',
+    payload{result: Result}) :- !.
 process_engine_result(wait_input(Prompt), wait_input, Prompt, none) :- !.
 process_engine_result(error(Msg), error, Msg, none) :- !.
 process_engine_result(Other, error, Msg, none) :-
@@ -465,6 +468,107 @@ add_trace_with_result(SessionId, Type, Predicate, Args, Result, Depth) :-
     ).
 
 %% ============================================================
+%% Agent Signal Loop - Handles tool execution during agent loops
+%% ============================================================
+
+%% handle_agent_signals(+SessionId, +StateIn, -StateOut)
+%% Loops to handle signals from the host until agent_done is received.
+%% This allows tools to execute inline during the agent loop,
+%% sharing state with the task and supporting backtracking.
+handle_agent_signals(SessionId, StateIn, StateOut) :-
+    engine_fetch(Signal),
+    handle_signal(SessionId, Signal, StateIn, StateOut).
+
+%% handle_signal(+SessionId, +Signal, +StateIn, -StateOut)
+handle_signal(_SessionId, agent_done, State, State) :- !.
+
+handle_signal(SessionId, execute_tool(ToolName, Args), StateIn, StateOut) :-
+    !,
+    call_tool_inline(SessionId, ToolName, Args, StateIn, StateMid, Result),
+    engine_yield(tool_result(Result)),
+    handle_agent_signals(SessionId, StateMid, StateOut).
+
+handle_signal(SessionId, set_input(Value), StateIn, StateOut) :-
+    !,
+    % Store user input - used by ask_user tool
+    assertz(session_user_input(SessionId, Value)),
+    handle_agent_signals(SessionId, StateIn, StateOut).
+
+handle_signal(SessionId, Unknown, StateIn, StateOut) :-
+    % Unknown signal, just continue
+    format(user_error, 'Unknown signal: ~w~n', [Unknown]),
+    handle_agent_signals(SessionId, StateIn, StateOut).
+
+%% call_tool_inline(+SessionId, +ToolName, +Args, +StateIn, -StateOut, -Result)
+%% Executes a DML-defined tool inline in the current engine.
+%% The tool body runs through the meta-interpreter, sharing state.
+%% Args is a list of input argument values from the tool call.
+%% The tool may have additional output arguments which become unbound variables.
+call_tool_inline(SessionId, ToolName, Args, StateIn, StateOut, Result) :-
+    % Convert tool name to atom
+    atom_string(ToolNameAtom, ToolName),
+    % Find the tool clause to determine its actual arity
+    % Tools are stored as: SessionId:(tool(Head) :- Body)
+    (   clause(SessionId:tool(ToolPattern), Body),
+        ToolPattern =.. [ToolNameAtom|PatternArgs]
+    ->  % Found the tool - create head args with inputs filled in
+        length(PatternArgs, TotalArity),
+        length(Args, InputArity),
+        % Create the head with input args + unbound output variables
+        length(HeadArgs, TotalArity),
+        % Fill in the input args
+        fill_args(HeadArgs, Args, InputArity),
+        ToolHead =.. [ToolNameAtom|HeadArgs],
+        % Unify with the pattern to bind variables in Body
+        ToolHead = ToolPattern,
+        % Execute the tool body through MI
+        (   mi_call(Body, StateIn, StateOut)
+        ->  % Collect result from result/1 facts or output args
+            % Use catch to handle case where result/2 doesn't exist
+            (   catch(SessionId:result(ToolNameAtom, R), _, fail)
+            ->  Result = R,
+                catch(retract(SessionId:result(ToolNameAtom, R)), _, true)
+            ;   % No explicit result - return the last output arg if bound
+                (   TotalArity > InputArity,
+                    last(HeadArgs, LastArg),
+                    nonvar(LastArg)
+                ->  Result = LastArg
+                ;   Result = true
+                )
+            )
+        ;   % Tool body failed
+            StateOut = StateIn,
+            Result = false
+        )
+    ;   % No DML body - should not happen if host checked
+        StateOut = StateIn,
+        format(atom(Result), 'Tool ~w not found', [ToolName])
+    ).
+
+%% fill_args(+HeadArgs, +InputArgs, +Count)
+%% Fill the first Count elements of HeadArgs with InputArgs
+fill_args(_, [], 0) :- !.
+fill_args([H|T], [A|As], N) :-
+    N > 0,
+    H = A,
+    N1 is N - 1,
+    fill_args(T, As, N1).
+
+%% bind_tool_params(+ParamsList, +ArgsDict)
+%% Binds tool parameters from the arguments dictionary
+bind_tool_params([], _) :- !.
+bind_tool_params([Param|Rest], Args) :-
+    (   atom(Param)
+    ->  ParamName = Param, ParamVar = Param
+    ;   Param = (ParamName = ParamVar)
+    ),
+    (   get_dict(ParamName, Args, Value)
+    ->  ParamVar = Value
+    ;   true  % Leave unbound if not provided
+    ),
+    bind_tool_params(Rest, Args).
+
+%% ============================================================
 %% Task Handling
 %% ============================================================
 
@@ -491,16 +595,17 @@ mi_call(task(Desc), StateIn, StateOut) :-
     get_memory(StateIn, Memory),
     % Yield request with current memory
     engine_yield(request_agent_loop(InterpDesc, [], UserTools, Memory)),
-    engine_fetch(_Signal),
+    % Handle signals (tool calls) until agent_done
+    handle_agent_signals(SessionId, StateIn, StateAfterAgent),
     session_agent_result(SessionId, Result),
     retract(session_agent_result(SessionId, _)),
     Result.success == true,
     % Use full messages from agent loop result
     (   get_dict(messages, Result, Messages), Messages \= []
     ->  % Replace memory with all messages from agent (includes system, history, and new messages)
-        set_memory(StateIn, Messages, StateOut)
+        set_memory(StateAfterAgent, Messages, StateOut)
     ;   % Fallback: just add task description and response (old behavior)
-        add_memory(StateIn, user, InterpDesc, State1),
+        add_memory(StateAfterAgent, user, InterpDesc, State1),
         (   get_dict(response, Result, Response), Response \= ""
         ->  add_trace_with_result(SessionId, exit, task, [InterpDesc], Response, Depth),
             add_memory(State1, assistant, Response, StateOut)
@@ -521,7 +626,7 @@ mi_call(task_named(Desc, Vars, VarNames), StateIn, StateOut) :-
 
 %% mi_call(prompt(Desc), +StateIn, -StateOut)
 %% Like task/1 but starts with empty memory
-mi_call(prompt(Desc), StateIn, StateIn) :-
+mi_call(prompt(Desc), StateIn, StateOut) :-
     !,
     get_params(StateIn, Params),
     interpolate_desc(Desc, Params, InterpDesc),
@@ -529,11 +634,12 @@ mi_call(prompt(Desc), StateIn, StateIn) :-
     collect_user_tools(SessionId, UserTools),
     % Use empty memory instead of current memory
     engine_yield(request_agent_loop(InterpDesc, [], UserTools, [])),
-    engine_fetch(_Signal),
+    % Handle signals (tool calls) until agent_done - still need for tool execution
+    handle_agent_signals(SessionId, StateIn, StateOut),
     session_agent_result(SessionId, Result),
     retract(session_agent_result(SessionId, _)),
     Result.success == true.
-    % Don't modify memory - state unchanged
+    % Don't modify memory - but state may have changed from tool calls
 
 %% mi_call(prompt_named(Desc, Vars, VarNames), +StateIn, -StateOut)
 %% New unified handler for prompt/N with embedded variable names
@@ -543,19 +649,20 @@ mi_call(prompt_named(Desc, Vars, VarNames), StateIn, StateOut) :-
 
 %% mi_call_prompt_n(+Desc, +Vars, +VarNames, +StateIn, -StateOut)
 %% Like mi_call_task_n but uses empty memory and doesn't update memory
-mi_call_prompt_n(Desc, Vars, VarNames, StateIn, StateIn) :-
+mi_call_prompt_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     get_params(StateIn, Params),
     interpolate_desc(Desc, Params, InterpDesc),
     get_session_id(SessionId),
     collect_user_tools(SessionId, UserTools),
     % Use empty memory instead of current memory
     engine_yield(request_agent_loop(InterpDesc, VarNames, UserTools, [])),
-    engine_fetch(_Signal),
+    % Handle signals (tool calls) until agent_done - still need for tool execution
+    handle_agent_signals(SessionId, StateIn, StateOut),
     session_agent_result(SessionId, Result),
     retract(session_agent_result(SessionId, _)),
     Result.success == true,
     bind_task_variables(Result.variables, VarNames, Vars).
-    % Don't modify memory - state unchanged
+    % Don't modify memory - but state may have changed from tool calls
 
 %% mi_call_task_n(+Desc, +Vars, +VarNames, +StateIn, -StateOut)
 mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
@@ -565,7 +672,8 @@ mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     collect_user_tools(SessionId, UserTools),
     get_memory(StateIn, Memory),
     engine_yield(request_agent_loop(InterpDesc, VarNames, UserTools, Memory)),
-    engine_fetch(_Signal),
+    % Handle signals (tool calls) until agent_done
+    handle_agent_signals(SessionId, StateIn, StateAfterAgent),
     session_agent_result(SessionId, Result),
     retract(session_agent_result(SessionId, _)),
     Result.success == true,
@@ -573,9 +681,9 @@ mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     % Use full messages from agent loop result
     (   get_dict(messages, Result, Messages), Messages \= []
     ->  % Replace memory with all messages from agent
-        set_memory(StateIn, Messages, StateOut)
+        set_memory(StateAfterAgent, Messages, StateOut)
     ;   % Fallback: just add task description and response (old behavior)
-        add_memory(StateIn, user, InterpDesc, State1),
+        add_memory(StateAfterAgent, user, InterpDesc, State1),
         (   get_dict(response, Result, Response), Response \= ""
         ->  add_memory(State1, assistant, Response, StateOut)
         ;   StateOut = State1

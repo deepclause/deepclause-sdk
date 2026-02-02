@@ -3,24 +3,13 @@
  * 
  * Provides web and news search functionality using Brave Search API.
  * Requires BRAVE_API_KEY or BRAVE_KEY environment variable.
+ * 
+ * Returns plain text results for easier LLM consumption.
  */
 
 // =============================================================================
 // Types
 // =============================================================================
-
-export interface BraveWebResult {
-  title: string;
-  url: string;
-  description: string;
-  published?: string;
-}
-
-export interface BraveSearchResponse {
-  search_type: string;
-  results: BraveWebResult[];
-  message?: string;
-}
 
 export interface WebSearchParams {
   query: string;
@@ -35,20 +24,38 @@ export interface WebSearchParams {
 
 /**
  * Perform a web search using Brave Search API
+ * Returns plain text formatted results
  */
-export async function webSearch(params: WebSearchParams): Promise<BraveSearchResponse> {
+export async function webSearch(params: WebSearchParams): Promise<string> {
   return braveSearch(params.query, 'web', params.count ?? 10, params.country ?? 'us', params.freshness);
 }
 
 /**
  * Perform a news search using Brave Search API
+ * Returns plain text formatted results
  */
-export async function newsSearch(params: WebSearchParams): Promise<BraveSearchResponse> {
+export async function newsSearch(params: WebSearchParams): Promise<string> {
   return braveSearch(params.query, 'news', params.count ?? 10, params.country ?? 'us', params.freshness);
 }
 
 /**
+ * Format a single search result as plain text
+ */
+function formatResult(index: number, title: string, url: string, description: string, published?: string): string {
+  const lines = [
+    `[${index}] ${title}`,
+    `    URL: ${url}`,
+    `    ${description}`,
+  ];
+  if (published) {
+    lines.push(`    Published: ${published}`);
+  }
+  return lines.join('\n');
+}
+
+/**
  * Core Brave Search implementation
+ * Returns plain text formatted results
  */
 async function braveSearch(
   query: string, 
@@ -56,7 +63,7 @@ async function braveSearch(
   count: number = 10,
   country: string = 'us',
   freshness?: string
-): Promise<BraveSearchResponse> {
+): Promise<string> {
   const apiKey = process.env.BRAVE_KEY || process.env.BRAVE_API_KEY;
   
   if (!apiKey) {
@@ -108,7 +115,7 @@ async function braveSearch(
 
     const data = await response.json() as Record<string, unknown>;
     
-    // Format web results
+    // Format web results as plain text
     if (searchType === 'web' && data.web && (data.web as Record<string, unknown>).results) {
       const webResults = (data.web as { results: Array<{
         title?: string;
@@ -117,18 +124,25 @@ async function braveSearch(
         age?: string;
       }> }).results;
       
-      return {
-        search_type: 'web',
-        results: webResults.map((page) => ({
-          title: page.title || 'Untitled',
-          url: page.url || '',
-          description: page.description || '',
-          published: page.age,
-        })),
-      };
+      if (webResults.length === 0) {
+        return `No web results found for: ${query}`;
+      }
+      
+      const header = `Web search results for: ${query}\n${'='.repeat(50)}\n`;
+      const formattedResults = webResults.map((page, i) => 
+        formatResult(
+          i + 1,
+          page.title || 'Untitled',
+          page.url || '',
+          page.description || 'No description',
+          page.age
+        )
+      ).join('\n\n');
+      
+      return header + formattedResults;
     }
     
-    // Format news results
+    // Format news results as plain text
     if (searchType === 'news' && data.results) {
       const newsResults = data.results as Array<{
         title?: string;
@@ -138,22 +152,25 @@ async function braveSearch(
         source?: { name: string };
       }>;
       
-      return {
-        search_type: 'news',
-        results: newsResults.map((article) => ({
-          title: article.title || 'Untitled',
-          url: article.url || '',
-          description: article.description || '',
-          published: article.age,
-        })),
-      };
+      if (newsResults.length === 0) {
+        return `No news results found for: ${query}`;
+      }
+      
+      const header = `News search results for: ${query}\n${'='.repeat(50)}\n`;
+      const formattedResults = newsResults.map((article, i) => 
+        formatResult(
+          i + 1,
+          article.title || 'Untitled',
+          article.url || '',
+          article.description || 'No description',
+          article.age
+        )
+      ).join('\n\n');
+      
+      return header + formattedResults;
     }
 
-    return {
-      search_type: searchType,
-      results: [],
-      message: 'No results found',
-    };
+    return `No results found for: ${query}`;
 
   } catch (error) {
     console.error('Brave search failed:', error);
@@ -165,21 +182,21 @@ async function braveSearch(
 /**
  * Generate mock search results for demo when no API key is available
  */
-function generateMockSearchResults(query: string, numResults: number): BraveSearchResponse {
+function generateMockSearchResults(query: string, numResults: number): string {
   const topics = query.toLowerCase().split(' ').slice(0, 3);
-  const results: BraveWebResult[] = [];
   
+  const header = `Web search results for: ${query} (MOCK DATA - No API key)\n${'='.repeat(50)}\n`;
+  
+  const results: string[] = [];
   for (let i = 0; i < numResults; i++) {
-    results.push({
-      title: `Research Article ${i + 1}: Understanding ${topics.join(' ')}`,
-      url: `https://example.com/research/${topics[0] || 'topic'}-${i + 1}`,
-      description: `This comprehensive study examines the various aspects of ${query}. Key findings suggest important implications for the field. The research methodology involved analyzing multiple data sources.`,
-      published: `${Math.floor(Math.random() * 30) + 1} days ago`,
-    });
+    results.push(formatResult(
+      i + 1,
+      `Research Article ${i + 1}: Understanding ${topics.join(' ')}`,
+      `https://example.com/research/${topics[0] || 'topic'}-${i + 1}`,
+      `This comprehensive study examines the various aspects of ${query}. Key findings suggest important implications for the field. The research methodology involved analyzing multiple data sources.`,
+      `${Math.floor(Math.random() * 30) + 1} days ago`
+    ));
   }
   
-  return {
-    search_type: 'web',
-    results,
-  };
+  return header + results.join('\n\n');
 }

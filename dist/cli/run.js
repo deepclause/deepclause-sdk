@@ -5,6 +5,7 @@
  */
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import * as readline from 'readline';
 import { createDeepClause } from '../sdk.js';
 import { loadConfig } from './config.js';
 import { getAgentVMTools } from './tools.js';
@@ -31,6 +32,30 @@ async function stopAgentVM() {
         await agentVMInstance.stop();
         agentVMInstance = null;
     }
+}
+/**
+ * Prompt the user for input from stdin
+ */
+function promptUser(prompt) {
+    console.error(`[CLI] promptUser called with prompt length: ${prompt?.length}`);
+    return new Promise((resolve) => {
+        const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout,
+        });
+        // Print the prompt with a visual indicator
+        console.log('\n' + '─'.repeat(60));
+        console.log('📝 USER INPUT REQUIRED:');
+        console.log('─'.repeat(60));
+        console.log(prompt);
+        console.log('─'.repeat(60));
+        rl.question('Your response: ', (answer) => {
+            rl.close();
+            console.log('─'.repeat(60) + '\n');
+            console.error(`[CLI] promptUser resolving with: "${answer}"`);
+            resolve(answer);
+        });
+    });
 }
 // =============================================================================
 // Main Run Function
@@ -95,7 +120,9 @@ export async function run(file, args, options = {}) {
         provider,
         trace: !!options.trace,
         streaming: options.stream,
-        debug: options.verbose
+        debug: options.verbose,
+        maxTokens: 65536,
+        temperature: options.temperature ?? 0.0
     });
     // Register tools from MCP servers and AgentVM
     await registerTools(sdk, config, workspacePath, options.verbose);
@@ -108,7 +135,11 @@ export async function run(file, args, options = {}) {
         for await (const event of sdk.runDML(dmlCode, {
             params,
             args,
-            workspacePath
+            workspacePath,
+            // Handle user input requests from ask_user tool
+            onUserInput: options.headless
+                ? async () => '' // In headless mode, return empty string
+                : promptUser
         })) {
             result.events?.push(event);
             switch (event.type) {
@@ -133,6 +164,26 @@ export async function run(file, args, options = {}) {
                 case 'log':
                     if (options.verbose && event.content && !options.headless) {
                         console.log(`[log] ${event.content}`);
+                    }
+                    break;
+                case 'tool_call':
+                    // Show tool calls in shortened form (always, unless headless)
+                    if (!options.headless && event.toolName) {
+                        // Format args for display - truncate long values
+                        const formatArgs = (args) => {
+                            if (!args)
+                                return '';
+                            const parts = [];
+                            for (const [key, value] of Object.entries(args)) {
+                                let strVal = typeof value === 'string' ? value : JSON.stringify(value);
+                                if (strVal.length > 50) {
+                                    strVal = strVal.substring(0, 47) + '...';
+                                }
+                                parts.push(`${key}=${strVal}`);
+                            }
+                            return parts.join(', ');
+                        };
+                        console.log(`  🔧 ${event.toolName}(${formatArgs(event.toolArgs)})`);
                     }
                     break;
                 case 'answer':
@@ -301,9 +352,15 @@ function createToolDefinition(tool, config, workspacePath) {
  * Verify that all required tools are available
  */
 async function verifyToolsAvailable(config, toolNames) {
+    // Internal tools are automatically provided by the agent - don't require external config
+    const internalTools = ['ask_user', 'finish', 'set_result', 'store'];
     const agentVmToolNames = getAgentVMTools().map(t => t.name);
     const missing = [];
     for (const name of toolNames) {
+        // Skip internal tools - they're auto-provided by the agent
+        if (internalTools.includes(name)) {
+            continue;
+        }
         if (!agentVmToolNames.includes(name)) {
             // Tool not in AgentVM, would need MCP server
             // For now, assume MCP tools are available if configured
