@@ -114,7 +114,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
   // Add finish tool
   aiTools['finish'] = aiTool({
-    description: 'Complete the task. Call with true for success, false for failure.',
+    description: 'Signals that the task has been completed and sets the success status. Call with true for success, false for failure. You MUST always use this tool as the last step to indicate whether the task could be completed or not!',
     parameters: jsonSchema({
       type: 'object',
       properties: {
@@ -258,6 +258,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           temperature: modelOptions.temperature,
           maxTokens: modelOptions.maxTokens,
           abortSignal: signal,
+          
         });
 
         // Collect streamed text

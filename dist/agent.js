@@ -59,7 +59,7 @@ export async function runAgentLoop(options) {
     const aiTools = {};
     // Add finish tool
     aiTools['finish'] = aiTool({
-        description: 'Complete the task. Call with true for success, false for failure.',
+        description: 'Signals that the task has been completed and sets the success status. Call with true for success, false for failure. You MUST always use this tool as the last step to indicate whether the task could be completed or not!',
         parameters: jsonSchema({
             type: 'object',
             properties: {
@@ -175,9 +175,6 @@ export async function runAgentLoop(options) {
             await tick();
             if (streaming && onStream) {
                 // Use streaming mode
-                console.log("Current History");
-                console.log(messages);
-                console.log("----------------------");
                 const response = streamText({
                     model,
                     messages,
@@ -187,7 +184,6 @@ export async function runAgentLoop(options) {
                     maxTokens: modelOptions.maxTokens,
                     abortSignal: signal,
                 });
-                console.log("Max tokens: " + modelOptions.maxTokens);
                 // Collect streamed text
                 let fullText = '';
                 for await (const chunk of response.textStream) {
