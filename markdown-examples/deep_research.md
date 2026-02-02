@@ -7,7 +7,6 @@ Output should always cite sources and list source in the end.
 ## Parameters
 
 - `question` (required): The topic or question to research
-- `depth` (optional, default: "standard"): Research depth (quick/standard/deep)
 
 ## Requirements
 

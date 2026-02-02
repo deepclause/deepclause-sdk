@@ -1,0 +1,87 @@
+% Program: Competitor Analysis
+% Description: Analyzes a company's competitors and generates a strategic report.
+
+
+agent_main(Company, Depth) :-
+    system("You are an expert business analyst specializing in competitor analysis. 
+    Your goal is to provide a comprehensive strategic report on the company '{Company}'."),
+    
+    output("Starting competitor analysis for {Company} with depth: {Depth}."),
+
+    % Step 1: Search for the company and identify its industry
+    output("Step 1: Identifying company industry..."),
+    task("Search for information about {Company} to identify its primary industry. If you cannot find it, state 'Industry Not Found'. Store the identified industry in Industry.", Industry),
+    
+    (   Industry = "Industry Not Found" ->
+        user("I could not identify the industry for {Company}. Please provide the industry manually."),
+        fail % Fail to allow user to re-run or provide input
+    ;   output("Identified industry for {Company}: {Industry}.")
+    ),
+
+    % Step 2: Find top 5 competitors in that industry
+    output("Step 2: Finding top competitors in the {Industry} industry..."),
+    task("Given that {Company} is in the {Industry} industry, identify its top 5 competitors. List them as a comma-separated string of names. Store them in CompetitorNames.", CompetitorNames),
+    
+    % Split competitor names into a list and filter out empty/whitespace-only entries
+    split_string(CompetitorNames, ",", " ", RawCompetitorList),
+    findall(C, (member(C_raw, RawCompetitorList), string_trim(C_raw, C_trimmed), C_trimmed \= "", C = C_trimmed), ValidCompetitors),
+    
+    length(ValidCompetitors, NumCompetitors),
+    (   NumCompetitors < 5 ->
+        output("Found {NumCompetitors} competitors (fewer than 5). Proceeding with available data.")
+    ;   output("Found {NumCompetitors} competitors.")
+    ),
+
+    % Step 3: For each competitor, gather information
+    output("Step 3: Gathering detailed information for each competitor..."),
+    gather_all_competitor_info(ValidCompetitors, AllCompetitorInfo),
+    
+    % Step 4: Generate a comparative analysis
+    output("Step 4: Generating strategic comparative analysis report..."),
+    task("Now generate a strategic comparative analysis report for the company '{Company}'. The analysis depth is specified as '{Depth}'. Ensure the report is comprehensive and actionable. Store the full report content in ReportContent.", ReportContent),
+    
+    % Step 5: Save report to file
+    output("Step 5: Saving the report to a file..."),
+    atom_string(CompanyAtom, Company),
+    atom_concat(CompanyAtom, '_competitor_analysis.md', FilenameAtom),
+    atom_string(FilenameAtom, Filename),
+    
+    % Use Prolog's native file I/O
+    open(Filename, write, Stream),
+    write(Stream, ReportContent),
+    close(Stream),
+    
+    output("Report successfully saved to {Filename}."),
+    answer("Competitor analysis complete. Report available at {Filename}.").
+
+% Fallback clause - only reached if main clause fails completely
+agent_main(Company, Depth) :-
+    output("Competitor analysis for {Company} with depth {Depth} failed."),
+    answer("Analysis failed.").
+
+% Helper predicate to gather info for all competitors
+gather_all_competitor_info([], []).
+gather_all_competitor_info([Competitor|Rest], [CompetitorInfo|AllRestInfo]) :-
+    output("Gathering info for competitor: {Competitor}..."),
+    task("Gather an overview, key products/services, strengths, and weaknesses for {Competitor}. Provide this information in a structured format (e.g., markdown sections or bullet points). Store it in CompetitorInfo.", CompetitorInfo),
+    gather_all_competitor_info(Rest, AllRestInfo).
+
+% DML tool wrapper for web search (LLM can also use web_search directly via task)
+tool(search(Query, Results), "Search the web for information") :-
+    exec(web_search(query: Query), Results).
+
+% Helper predicate for string trimming (basic implementation if not built-in)
+string_trim(String, TrimmedString) :-
+    string_codes(String, Codes),
+    trim_leading(Codes, TrimmedLeading),
+    reverse(TrimmedLeading, Reversed),
+    trim_leading(Reversed, TrimmedTrailingReversed),
+    reverse(TrimmedTrailingReversed, TrimmedCodes),
+    string_codes(TrimmedString, TrimmedCodes).
+
+trim_leading([], []).
+trim_leading([C|Cs], Trimmed) :-
+    (   (C = 32 ; C = 9 ; C = 10 ; C = 13) -> % Space, Tab, Newline, Carriage Return
+        trim_leading(Cs, Trimmed)
+    ;   Trimmed = [C|Cs]
+    ).

@@ -1,0 +1,87 @@
+% DML program for a deep research agent that generates a cited report.
+% It analyzes a question, creates a research plan, asks the user for
+% confirmation, executes the plan using web search, and saves the
+% final report to a file.
+
+% --- Tool Definitions ---
+
+% Web search tool wrapper.
+tool(search(Query, Results), "Search the web for information on a given query. Returns a list of search results.") :-
+    exec(web_search(query: Query, count: 10), Results).
+
+% Tool for asking the user for input or confirmation.
+tool(ask_user(Prompt, Response), "Ask the user a clarifying question or for confirmation and get their response.") :-
+    exec(ask_user(prompt: Prompt), Result),
+    get_dict(user_response, Result, Response).
+
+% --- Main Agent Logic ---
+
+
+% Main entry point 
+agent_main(Question) :-
+    system("You are a meticulous research assistant. Your goal is to conduct comprehensive research, synthesize findings, and generate a detailed report with citations.
+- If the user's question is ambiguous, you must ask for clarification using the ask_user tool.
+- For controversial topics, you must present multiple viewpoints.
+- If you find limited sources, explicitly state this and the confidence level in your findings.
+- Always cite your sources within the report and list them in a 'Sources' section at the end."),
+
+    output("Step 1: Analyzing the research question..."),
+    task("Analyze the user's question to identify key topics and sub-questions for research. Question: '{Question}'.  Store the key topics as a formatted list in KeyTopics.", KeyTopics),
+
+    output("Step 2: Creating a research plan..."),
+    task("Based on these key topics, create a step-by-step research plan. Topics: {KeyTopics}. The plan should be clear and concise. Store the plan as a formatted string in ResearchPlan.", ResearchPlan),
+
+    output("Step 3: Confirming the plan with the user..."),
+    confirm_plan(ResearchPlan),
+
+    output("Step 4: Executing research and generating the report..."),
+    task("Execute the approved research plan: {ResearchPlan}.
+Use the search tool to find authoritative sources for each topic.
+For each source, extract key findings, evidence, and opinions.
+Synthesize all information into a coherent, well-structured report in Markdown format.
+The report must include inline citations and a 'Sources' section at the end.
+Store the final, complete report in FinalReport.", FinalReport),
+
+    output("Step 5: Saving the report to a file..."),
+    generate_filename(Question, Filename),
+    save_report(Filename, FinalReport),
+
+    format(string(AnswerMsg), "Research complete. Report saved to ~s.", [Filename]),
+    answer(AnswerMsg).
+
+% --- Helper Predicates ---
+
+% Asks the user to confirm the research plan before proceeding.
+% Uses a task with ask_user to facilitate an interactive dialog where the user
+% can request modifications until they approve the plan.
+confirm_plan(Plan) :-
+    task("Present this research plan to the user and get their approval:
+
+{Plan}
+
+Use the ask_user tool to present the plan and ask if they approve.
+- If they approve (yes/ok/looks good/etc.), set Approved to 'yes'.
+- If they want changes, use ask_user to clarify what changes they want,
+  then revise the plan and ask again. Continue this dialog until they approve.
+- If they want to cancel entirely, set Approved to 'cancelled'.
+
+Store 'yes' or 'cancelled' in Approved.", Approved),
+    ( Approved == "yes" ->
+        output("Plan approved. Proceeding with research.")
+    ;
+        answer("Research cancelled by user."), !, fail
+    ).
+
+% Generates a file-safe name for the report based on the question.
+generate_filename(Question, Filename) :-
+    task("Generate a short, file-safe slug from this question: '{Question}'. For example, 'What is the future of AI?' could become 'future_of_ai'. Use underscores instead of spaces. Store only the slug in Slug.", Slug),
+    atom_string(SlugAtom, Slug),
+    atom_concat('report_', SlugAtom, BaseName),
+    atom_concat(BaseName, '.md', FilenameAtom),
+    atom_string(FilenameAtom, Filename).
+
+% Writes the report content to the specified file.
+save_report(Filename, Report) :-
+    open(Filename, write, Stream),
+    write(Stream, Report),
+    close(Stream).
