@@ -134,8 +134,8 @@ export declare const ConfigSchema: z.ZodObject<{
     dmlBase: z.ZodDefault<z.ZodOptional<z.ZodString>>;
     workspace: z.ZodDefault<z.ZodOptional<z.ZodString>>;
 }, "strip", z.ZodTypeAny, {
-    model: string;
     provider: "openai" | "anthropic" | "google" | "openrouter";
+    model: string;
     providers: {
         openai?: {
             apiKey?: string | undefined;

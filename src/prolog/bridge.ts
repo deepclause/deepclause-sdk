@@ -5,7 +5,7 @@
 import { google } from '@ai-sdk/google';
 import { anthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
-import type { LanguageModelV1 } from 'ai';
+import type { LanguageModel } from 'ai';
 
 /**
  * Create a model provider for the Vercel AI SDK
@@ -14,7 +14,7 @@ export function createModelProvider(
   provider: string,
   model: string,
   baseUrl?: string
-): LanguageModelV1 {
+): LanguageModel {
   switch (provider) {
     case 'google':
       return google(model);

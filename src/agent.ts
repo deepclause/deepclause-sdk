@@ -1,9 +1,14 @@
 /**
  * Agent Loop Implementation
  * Runs an LLM agent loop for task() predicate execution
+ * 
+ * Based on AI SDK v6 agent patterns:
+ * - Uses Zod schemas for tool definitions
+ * - Uses result.response.messages for message history management
  */
 
-import { generateText, streamText, tool as aiTool, type CoreTool, type CoreMessage, jsonSchema } from 'ai';
+import { generateText, streamText, tool as aiTool } from 'ai';
+import { z } from 'zod';
 import type { ToolDefinition, MemoryMessage } from './types.js';
 import { createModelProvider } from './prolog/bridge.js';
 
@@ -50,7 +55,7 @@ export interface AgentLoopOptions {
     model: string;
     provider: string;
     temperature: number;
-    maxTokens: number;
+    maxOutputTokens: number;
     baseUrl?: string;
   };
   onOutput: (text: string) => void;
@@ -71,9 +76,63 @@ export interface AgentLoopResult {
 }
 
 /**
- * Extract variable names from task description
- * Looks for patterns like "Store X in VariableName" or "Store it in VariableName"
+ * Convert JSON Schema to Zod schema
+ * Handles basic JSON Schema types used in tool definitions
  */
+function jsonSchemaToZod(schema: Record<string, unknown>): z.ZodTypeAny {
+  const type = schema.type as string;
+  const description = schema.description as string | undefined;
+  
+  let zodType: z.ZodTypeAny;
+  
+  switch (type) {
+    case 'string':
+      zodType = z.string();
+      break;
+    case 'number':
+      zodType = z.number();
+      break;
+    case 'integer':
+      zodType = z.number().int();
+      break;
+    case 'boolean':
+      zodType = z.boolean();
+      break;
+    case 'array': {
+      const items = schema.items as Record<string, unknown> | undefined;
+      zodType = z.array(items ? jsonSchemaToZod(items) : z.unknown());
+      break;
+    }
+    case 'object': {
+      const properties = schema.properties as Record<string, Record<string, unknown>> | undefined;
+      const required = (schema.required as string[]) || [];
+      
+      if (properties) {
+        const shape: Record<string, z.ZodTypeAny> = {};
+        for (const [key, propSchema] of Object.entries(properties)) {
+          let propZod = jsonSchemaToZod(propSchema);
+          if (!required.includes(key)) {
+            propZod = propZod.optional();
+          }
+          shape[key] = propZod;
+        }
+        zodType = z.object(shape);
+      } else {
+        zodType = z.record(z.unknown());
+      }
+      break;
+    }
+    default:
+      zodType = z.unknown();
+  }
+  
+  if (description) {
+    zodType = zodType.describe(description);
+  }
+  
+  return zodType;
+}
+
 /**
  * Run an agent loop for a task
  */
@@ -87,7 +146,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     onOutput,
     onStream,
     onToolCall,
-    // onAskUser is now handled via registered tools in the runner
     signal,
     streaming = false,
     debug = false,
@@ -108,49 +166,34 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let success = false;
   let errorRetryCount = 0;
 
-  // Build the AI SDK tools - use CoreTool type for compatibility
+  // Build the AI SDK tools using Zod schemas
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const aiTools: Record<string, CoreTool<any, any>> = {};
+  const aiTools: Record<string, any> = {};
 
-  // Add finish tool
+  // Add finish tool with Zod schema
   aiTools['finish'] = aiTool({
     description: 'Signals that the task has been completed and sets the success status. Call with true for success, false for failure. You MUST always use this tool as the last step to indicate whether the task could be completed or not!',
-    parameters: jsonSchema({
-      type: 'object',
-      properties: {
-        success: { type: 'boolean', description: 'Whether the task was completed successfully' }
-      },
-      required: ['success']
+    inputSchema: z.object({
+      success: z.boolean().describe('Whether the task was completed successfully')
     }),
-    execute: async (args) => {
-      const { success: s } = args as { success: boolean };
+    execute: async ({ success: s }: { success: boolean }) => {
       finished = true;
       success = s;
       return { finished: true, success: s };
     },
   });
 
-  // Note: ask_user is now handled via DML tool definitions.
-  // The internal ask_user functionality is added to registered tools in the runner
-  // so that DML tools can call exec(ask_user(...)) to prompt the user.
-
   // Add set_result tool for output variables
-  // outputVars now contains actual variable names from Prolog (e.g., "Industry" not "Var1")
   if (outputVars.length > 0) {
     const varList = outputVars.map((v, i) => `"${v}"${i < outputVars.length - 1 ? ',' : ''}`).join(' ');
     
     aiTools['set_result'] = aiTool({
       description: `Set a result value for an output variable. You MUST call this tool to return results from the task. Use the exact variable name as specified.`,
-      parameters: jsonSchema({
-        type: 'object',
-        properties: {
-          variable: { type: 'string', description: `The variable name to set. Must be exactly one of: ${varList}` },
-          value: { type: 'string', description: 'The value to set (must be a string)' }
-        },
-        required: ['variable', 'value']
+      inputSchema: z.object({
+        variable: z.string().describe(`The variable name to set. Must be exactly one of: ${varList}`),
+        value: z.string().describe('The value to set (must be a string)')
       }),
-      execute: async (args) => {
-        const { variable, value } = args as { variable: string; value: string };
+      execute: async ({ variable, value }: { variable: string; value: string }) => {
         if (outputVars.includes(variable)) {
           variables[variable] = value;
           return { success: true, variable, value };
@@ -163,20 +206,22 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   // Reserved internal tool names that cannot be overwritten by user-defined tools
   const reservedToolNames = ['finish', 'set_result'];
 
-  // Add user-defined tools - all parameters are JSON Schema, wrap with jsonSchema()
+  // Add user-defined tools - convert JSON Schema to Zod
   for (const [name, tool] of tools) {
-    // Skip tools that would overwrite internal tools - the internal implementation is used instead
     if (reservedToolNames.includes(name)) {
-      // Don't log - this is expected when DML declares ask_user to enable the internal tool
       continue;
     }
+    
+    // Convert JSON Schema parameters to Zod schema
+    const zodSchema = jsonSchemaToZod(tool.parameters as unknown as Record<string, unknown>);
+    
     aiTools[name] = aiTool({
       description: tool.description,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      parameters: jsonSchema(tool.parameters as any),
-      execute: async (args) => {
+      inputSchema: zodSchema,
+      execute: async (input: unknown) => {
         try {
-          return await tool.execute(args as Record<string, unknown>);
+          const result = await tool.execute(input as Record<string, unknown>);
+          return cleanPrologMarkers(result);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           return { error: message };
@@ -189,14 +234,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const baseSystemPrompt = buildSystemPrompt(taskDescription, outputVars, tools);
 
   // Extract system context from memory (user-defined system() calls)
-  // These will be appended to the base system prompt
   const systemContext = memory
     .filter(m => m.role === 'system' && typeof m.content === 'string')
     .map(m => m.content)
     .join('\n\n');
 
   // Combine into a single system message
-  // User context comes first (sets the persona/context), then task instructions
   const combinedSystemPrompt = systemContext
     ? `${systemContext}\n\n---\n\n${baseSystemPrompt}`
     : baseSystemPrompt;
@@ -208,8 +251,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     ['user', 'assistant'].includes(m.role)
   );
 
-  // Build messages with single system message
-  const messages: CoreMessage[] = [
+  // Build initial messages - AI SDK v6 uses ModelMessage[]
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let messages: any[] = [
     { role: 'system', content: combinedSystemPrompt },
     ...conversationHistory.map(m => ({ 
       role: m.role as 'user' | 'assistant', 
@@ -218,7 +262,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     { role: 'user', content: `Subtask: ${taskDescription}` },
   ];
 
-  // Debug: log messages being sent
   debugLog('System prompt:', combinedSystemPrompt);
   debugLog('Conversation history:', conversationHistory);
   debugLog('Subtask:', taskDescription);
@@ -235,209 +278,140 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
   while (!finished && iteration < maxIterations) {
     iteration++;
-
-    // Debug iteration
     debugLog(`Iteration ${iteration}`);
 
-    // Check for abort
     if (signal?.aborted) {
       break;
     }
 
     try {
-      // Allow event loop to process before making API call
       await tick();
       
       if (streaming && onStream) {
-        // Use streaming mode
-        const response = streamText({
+        // Streaming mode
+        const result = streamText({
           model,
           messages,
           tools: aiTools,
           toolChoice: 'auto',
           temperature: modelOptions.temperature,
-          maxTokens: modelOptions.maxTokens,
+          maxOutputTokens: modelOptions.maxOutputTokens,
           abortSignal: signal,
-          
         });
 
         // Collect streamed text
         let fullText = '';
-        for await (const chunk of response.textStream) {
+        for await (const chunk of result.textStream) {
           fullText += chunk;
           onStream(chunk, false);
         }
 
-        // Signal stream done for this iteration
         if (fullText) {
           onStream('', true);
         }
 
-        // Get final results - must await these promises
-        const toolCalls = await response.toolCalls;
-        const toolResults = await response.toolResults;
-        const finishReason = await response.finishReason;
+        // Get results
+        const finishReason = await result.finishReason;
+        const toolCalls = await result.toolCalls;
+        const toolResults = await result.toolResults;
+        const responseObj = await result.response;
         
         // Check if finish was called during tool execution
         if (finished) {
           debugLog('Finish tool was called, exiting loop');
           break;
         }
-        
-        // Debug response
+
         debugLog(`Response text: ${fullText || '(empty)'}`);
         debugLog(`Tool calls: ${toolCalls?.length ?? 0}`);
         debugLog(`Finish reason: ${finishReason}`);
-        if (toolCalls && toolCalls.length > 0) {
-          debugLog(`Tool call details:`, toolCalls.map(tc => tc.toolName));
-        }
-        // Log for debugging empty responses
-        if (!fullText && (!toolCalls || toolCalls.length === 0)) {
-          debugLog(`Empty response - no text and no tool calls`);
-          // If finish reason is error, try to get more info
-          if (finishReason === 'error') {
-            // Log everything we can about the response
-            let finishMessage = '';
-            try {
-              const warnings = await response.warnings;
-              const usage = await response.usage;
-              // Try to extract the finishMessage from the response body (for Gemini)
-              const responseObj = await response.response;
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              const body = (responseObj as any)?.body;
-              finishMessage = body?.candidates?.[0]?.finishMessage || '';
-              debugLog(`Empty response - full object:`, JSON.stringify({
-                text: fullText,
-                toolCalls,
-                finishReason,
-                warnings,
-                usage,
-                response: responseObj,
-              }, null, 2));
-            } catch (e) {
-              debugLog(`ERROR: LLM returned error finish reason. Could not get full response:`, e);
-            }
-            
-            // Check for malformed function call error (Gemini specific)
-            if (finishMessage && finishMessage.includes('Malformed function call')) {
-              debugLog(`Detected malformed function call, adding retry message`);
-              messages.push({
-                role: 'user',
-                content: `ERROR: Your function call was malformed. The error was: "${finishMessage}"
 
-DO NOT write code syntax like print(), default_api.X(), or function(). 
-Instead, use the structured tool-calling interface to invoke tools.
-Each tool should be called as a separate function call, not embedded in text.
-
-Please try again - invoke the tool correctly using the tool interface.`,
-              });
-              // Don't break - continue the loop to retry
-              continue;
-            }
-            
-            // Retry on general error finish reason (up to errorRetryCount times)
-            errorRetryCount++;
-            if (errorRetryCount <= MAX_ERROR_RETRIES) {
-              debugLog(`ERROR: LLM returned error finish reason (attempt ${errorRetryCount}/${MAX_ERROR_RETRIES}). Retrying...`);
-              // Add a small delay before retry to avoid hammering the API
-              await new Promise(resolve => setTimeout(resolve, 1000 * errorRetryCount));
-              continue;
-            }
-            
-            // Break the loop after max retries
-            debugLog(`ERROR: LLM returned error finish reason. Max retries (${MAX_ERROR_RETRIES}) exceeded.`);
-            outputs.push('Error: LLM API returned an error. Check API key and rate limits.');
-            break;
+        // Handle errors
+        if (finishReason === 'error') {
+          errorRetryCount++;
+          if (errorRetryCount <= MAX_ERROR_RETRIES) {
+            debugLog(`ERROR: LLM returned error (attempt ${errorRetryCount}/${MAX_ERROR_RETRIES}). Retrying...`);
+            await new Promise(resolve => setTimeout(resolve, 1000 * errorRetryCount));
+            continue;
           }
+          outputs.push('Error: LLM API returned an error. Check API key and rate limits.');
+          break;
         }
 
-        // Process the response
+        // Process text output
         if (fullText) {
           outputs.push(fullText);
           onOutput(fullText);
-          messages.push({ role: 'assistant', content: fullText });
         }
 
-        // Process tool calls - add to message history using proper AI SDK format
+        // Emit tool call events
         if (toolCalls && toolCalls.length > 0) {
-          // Build assistant message with tool calls
-          const toolCallContents: Array<{ type: 'tool-call'; toolCallId: string; toolName: string; args: unknown }> = [];
-          const toolResultContents: Array<{ type: 'tool-result'; toolCallId: string; toolName: string; result: unknown }> = [];
-          
-          for (const toolCall of toolCalls) {
-            debugLog(`Tool call: ${toolCall.toolName}`, JSON.stringify(toolCall.args));
-            
-            // Emit tool call event
+          for (const tc of toolCalls) {
+            debugLog(`Tool call: ${tc.toolName}`, JSON.stringify(tc.input));
             if (onToolCall) {
-              onToolCall(toolCall.toolName, toolCall.args as Record<string, unknown>);
+              onToolCall(tc.toolName, tc.input as Record<string, unknown>);
             }
-            
-            const toolResultObj = toolResults?.[toolCalls.indexOf(toolCall)];
-            // Extract the actual result from the tool result object
-            const rawResult = (toolResultObj as { result?: unknown })?.result ?? toolResultObj;
-            // Clean Prolog markers ($tag, $t) from the result
-            const toolResult = cleanPrologMarkers(rawResult);
-            debugLog(`Tool result:`, toolResult !== undefined ? JSON.stringify(toolResult).substring(0, 500) : '(undefined)');
-
-            const callId = toolCall.toolCallId || `call_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-            toolCallContents.push({
-              type: 'tool-call',
-              toolCallId: callId,
-              toolName: toolCall.toolName,
-              args: toolCall.args,
-            });
-            toolResultContents.push({
-              type: 'tool-result',
-              toolCallId: callId,
-              toolName: toolCall.toolName,
-              result: toolResult ?? 'No result returned',
-            });
           }
           
-          // Add assistant message with tool calls
-          messages.push({
-            role: 'assistant',
-            content: toolCallContents,
-          } as CoreMessage);
-          
-          // Add tool results
-          messages.push({
-            role: 'tool',
-            content: toolResultContents,
-          } as CoreMessage);
-          
-          // Break immediately if finish was called
-          if (finished) {
-            break;
+          // Log tool results
+          if (toolResults) {
+            for (const tr of toolResults) {
+              debugLog(`Tool result for ${tr.toolName}:`, JSON.stringify(tr.output).substring(0, 500));
+            }
           }
         }
 
-        // If no tool calls were made, prompt the agent to take action
-        if (!toolCalls || toolCalls.length === 0) {
+        // Use response.messages to update message history (AI SDK v6 pattern)
+        if (responseObj?.messages) {
+          messages = [...messages, ...responseObj.messages];
+        } else {
+          // Fallback: manually add messages if response.messages not available
+          if (fullText) {
+            messages.push({ role: 'assistant', content: fullText });
+          }
+          if (toolCalls && toolCalls.length > 0 && toolResults) {
+            // Add tool calls as assistant message
+            messages.push({
+              role: 'assistant',
+              content: toolCalls.map(tc => ({
+                type: 'tool-call',
+                toolCallId: tc.toolCallId,
+                toolName: tc.toolName,
+                input: tc.input,
+              })),
+            });
+            // Add tool results
+            messages.push({
+              role: 'tool',
+              content: toolResults.map(tr => ({
+                type: 'tool-result',
+                toolCallId: tr.toolCallId,
+                toolName: tr.toolName,
+                output: tr.output,
+              })),
+            });
+          }
+        }
+
+        // If no tool calls and model stopped, prompt to continue or we're done
+        if (finishReason === 'stop' && (!toolCalls || toolCalls.length === 0)) {
           if (!finished) {
-            // Check if the model wrote text that looks like a tool call
-            if (fullText && /called\s+tool|calling\s+tool|finish\s*\(|set_result\s*\(|TOOL_INVOKED|\[TOOL_/i.test(fullText)) {
-              messages.push({
-                role: 'user',
-                content: 'ERROR: You wrote text about calling a tool instead of actually invoking it. You must USE the tool by making a proper tool call, not by writing about it. Try again - invoke the tool directly.',
-              });
-            } else {
-              messages.push({
-                role: 'user',
-                content: 'Please take action using the available tools, or call finish() when done.',
-              });
-            }
+            messages.push({
+              role: 'user',
+              content: 'Please take action using the available tools, or call finish() when done.',
+            });
           }
         }
+
       } else {
-        // Non-streaming mode (original behavior)
-        const response = await generateText({
+        // Non-streaming mode
+        const result = await generateText({
           model,
           messages,
           tools: aiTools,
           toolChoice: 'auto',
           temperature: modelOptions.temperature,
-          maxTokens: modelOptions.maxTokens,
+          maxOutputTokens: modelOptions.maxOutputTokens,
           abortSignal: signal,
         });
 
@@ -446,157 +420,72 @@ Please try again - invoke the tool correctly using the tool interface.`,
           debugLog('Finish tool was called, exiting loop');
           break;
         }
-        
-        // Debug response
-        debugLog(`Response text: ${response.text || '(empty)'}`);
-        debugLog(`Tool calls: ${response.toolCalls?.length ?? 0}`);
-        debugLog(`Finish reason: ${response.finishReason}`);
-        if (response.toolCalls && response.toolCalls.length > 0) {
-          debugLog(`Tool call details:`, response.toolCalls.map(tc => tc.toolName));
-        }
-        // Log full response object for debugging empty responses
-        if (!response.text && (!response.toolCalls || response.toolCalls.length === 0)) {
-          // Try to extract the finishMessage from the response body (for Gemini)
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const body = (response.response as any)?.body;
-          const finishMessage = body?.candidates?.[0]?.finishMessage || '';
-          
-          debugLog(`Empty response - full object:`, JSON.stringify({
-            text: response.text,
-            toolCalls: response.toolCalls,
-            finishReason: response.finishReason,
-            warnings: response.warnings,
-            usage: response.usage,
-            response: response.response,
-          }, null, 2));
-          
-          // If finish reason is error, check for recoverable errors
-          if (response.finishReason === 'error') {
-            // Check for malformed function call error (Gemini specific)
-            if (finishMessage && finishMessage.includes('Malformed function call')) {
-              debugLog(`Detected malformed function call, adding retry message`);
-              messages.push({
-                role: 'user',
-                content: `ERROR: Your function call was malformed. The error was: "${finishMessage}"
 
-DO NOT write code syntax like print(), default_api.X(), or function(). 
-Instead, use the structured tool-calling interface to invoke tools.
-Each tool should be called as a separate function call, not embedded in text.
+        debugLog(`Response text: ${result.text || '(empty)'}`);
+        debugLog(`Tool calls: ${result.toolCalls?.length ?? 0}`);
+        debugLog(`Finish reason: ${result.finishReason}`);
 
-Please try again - invoke the tool correctly using the tool interface.`,
-              });
-              // Don't break - continue the loop to retry
-              continue;
-            }
-            
-            // Retry on general error finish reason (up to errorRetryCount times)
-            errorRetryCount++;
-            if (errorRetryCount <= MAX_ERROR_RETRIES) {
-              debugLog(`ERROR: LLM returned error finish reason (attempt ${errorRetryCount}/${MAX_ERROR_RETRIES}). Retrying...`);
-              // Add a small delay before retry to avoid hammering the API
-              await new Promise(resolve => setTimeout(resolve, 1000 * errorRetryCount));
-              continue;
-            }
-            
-            // Break the loop after max retries
-            debugLog(`ERROR: LLM returned error finish reason. Max retries (${MAX_ERROR_RETRIES}) exceeded.`);
-            outputs.push('Error: LLM API returned an error. Check API key and rate limits.');
-            break;
+        // Handle errors
+        if (result.finishReason === 'error') {
+          errorRetryCount++;
+          if (errorRetryCount <= MAX_ERROR_RETRIES) {
+            debugLog(`ERROR: LLM returned error (attempt ${errorRetryCount}/${MAX_ERROR_RETRIES}). Retrying...`);
+            await new Promise(resolve => setTimeout(resolve, 1000 * errorRetryCount));
+            continue;
           }
+          outputs.push('Error: LLM API returned an error. Check API key and rate limits.');
+          break;
         }
 
-        // Process the response
-        if (response.text) {
-          outputs.push(response.text);
-          onOutput(response.text);
-          messages.push({ role: 'assistant', content: response.text });
+        // Process text output
+        if (result.text) {
+          outputs.push(result.text);
+          onOutput(result.text);
         }
 
-        // Process tool calls - add to message history using proper AI SDK format
-        if (response.toolCalls && response.toolCalls.length > 0) {
-          debugLog(`response.toolResults type:`, typeof response.toolResults);
-          debugLog(`response.toolResults:`, JSON.stringify(response.toolResults));
-          
-          // Build assistant message with tool calls
-          const toolCallContents: Array<{ type: 'tool-call'; toolCallId: string; toolName: string; args: unknown }> = [];
-          const toolResultContents: Array<{ type: 'tool-result'; toolCallId: string; toolName: string; result: unknown }> = [];
-          
-          for (const toolCall of response.toolCalls) {
-            debugLog(`Tool call: ${toolCall.toolName}`, JSON.stringify(toolCall.args));
-            
-            // Emit tool call event
+        // Emit tool call events
+        if (result.toolCalls && result.toolCalls.length > 0) {
+          for (const tc of result.toolCalls) {
+            debugLog(`Tool call: ${tc.toolName}`, JSON.stringify(tc.input));
             if (onToolCall) {
-              onToolCall(toolCall.toolName, toolCall.args as Record<string, unknown>);
+              onToolCall(tc.toolName, tc.input as Record<string, unknown>);
             }
-            
-            // Find the tool result - toolResults is an array of results
-            const toolResultObj = response.toolResults?.[response.toolCalls.indexOf(toolCall)];
-            debugLog(`Tool result object (full):`, JSON.stringify(toolResultObj));
-            debugLog(`Tool result object keys:`, toolResultObj ? Object.keys(toolResultObj) : 'null');
-            // Extract the actual result from the tool result object
-            // The AI SDK returns {type, toolCallId, toolName, args, result}
-            const rawResult = (toolResultObj as { result?: unknown })?.result ?? toolResultObj;
-            // Clean Prolog markers ($tag, $t) from the result
-            const toolResult = cleanPrologMarkers(rawResult);
-            debugLog(`Tool result (extracted):`, toolResult !== undefined ? JSON.stringify(toolResult).substring(0, 500) : '(undefined)');
-
-            const callId = toolCall.toolCallId || `call_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-            toolCallContents.push({
-              type: 'tool-call',
-              toolCallId: callId,
-              toolName: toolCall.toolName,
-              args: toolCall.args,
-            });
-            toolResultContents.push({
-              type: 'tool-result',
-              toolCallId: callId,
-              toolName: toolCall.toolName,
-              result: toolResult ?? 'No result returned',
-            });
           }
           
-          // Add assistant message with tool calls
-          messages.push({
-            role: 'assistant',
-            content: toolCallContents,
-          } as CoreMessage);
-          
-          // Add tool results
-          messages.push({
-            role: 'tool',
-            content: toolResultContents,
-          } as CoreMessage);
-          
-          // Break immediately if finish was called
-          if (finished) {
-            break;
+          // Log tool results
+          if (result.toolResults) {
+            for (const tr of result.toolResults) {
+              debugLog(`Tool result for ${tr.toolName}:`, JSON.stringify(tr.output).substring(0, 500));
+            }
           }
         }
 
-        // If no tool calls were made, prompt the agent to take action
-        if (!response.toolCalls || response.toolCalls.length === 0) {
+        // Use response.messages to update message history (AI SDK v6 pattern)
+        // This is the key change - let the SDK handle message formatting
+        messages = [...messages, ...result.response.messages];
+
+        // If no tool calls and model stopped, prompt to continue or we're done
+        if (result.finishReason === 'stop' && (!result.toolCalls || result.toolCalls.length === 0)) {
           if (!finished) {
-            // Check if the model wrote text that looks like a tool call
-            if (response.text && /called\s+tool|calling\s+tool|finish\s*\(|set_result\s*\(|TOOL_INVOKED|\[TOOL_/i.test(response.text)) {
-              messages.push({
-                role: 'user',
-                content: 'ERROR: You wrote text about calling a tool instead of actually invoking it. You must USE the tool by making a proper tool call, not by writing about it. Try again - invoke the tool directly.',
-              });
-            } else {
-              messages.push({
-                role: 'user',
-                content: 'Please take action using the available tools, or call finish() when done.',
-              });
-            }
+            messages.push({
+              role: 'user',
+              content: 'Please take action using the available tools, or call finish() when done.',
+            });
           }
         }
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      debugLog(`ERROR in agent loop: ${message}`);
+      if (error instanceof Error && error.stack) {
+        debugLog(`Stack trace: ${error.stack}`);
+      }
       outputs.push(`Error: ${message}`);
       break;
     }
   }
+
+  debugLog(`Loop ended: finished=${finished}, success=${success}, iterations=${iteration}`);
 
   // If we hit max iterations without finishing, fail
   if (!finished) {
@@ -604,10 +493,7 @@ Please try again - invoke the tool correctly using the tool interface.`,
     outputs.push('Agent loop reached maximum iterations without completing');
   }
 
-  // For memory persistence between tasks, build a conversation that includes:
-  // 1. Previous conversation history (from memory) 
-  // 2. Current task as user message
-  // 3. Actual assistant responses (text only, not tool call details)
+  // Build persistent messages for memory
   const persistentMessages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
   
   // Keep previous conversation history
@@ -626,20 +512,16 @@ Please try again - invoke the tool correctly using the tool interface.`,
     content: `Subtask: ${taskDescription}`,
   });
   
-  // Extract actual assistant text responses from the NEW part of the conversation only
-  // (skip system prompt and old history - start after conversationHistory + system + subtask)
-  const newMessagesStartIndex = 1 + conversationHistory.length + 1; // system + history + subtask
+  // Extract assistant text responses from the conversation
   const assistantTextResponses: string[] = [];
-  for (let i = newMessagesStartIndex; i < messages.length; i++) {
-    const m = messages[i];
+  for (const m of messages) {
     if (m.role === 'assistant' && typeof m.content === 'string' && m.content.trim()) {
       assistantTextResponses.push(m.content);
     }
   }
   
-  // Add the result to persistent messages
+  // Add result to persistent messages
   if (success && Object.keys(variables).length > 0) {
-    // If we have stored variables, include them as the result
     const varSummary = Object.entries(variables)
       .map(([k, v]) => `${k}: ${v}`)
       .join(', ');
@@ -648,29 +530,10 @@ Please try again - invoke the tool correctly using the tool interface.`,
       content: `Task completed. Results: ${varSummary}`,
     });
   } else if (assistantTextResponses.length > 0) {
-    // Include actual assistant text responses from this task
     persistentMessages.push({
       role: 'assistant',
-      content: assistantTextResponses.join('\n\n'),
+      content: assistantTextResponses[assistantTextResponses.length - 1],
     });
-  } else if (success && outputs.length > 0) {
-    // Fallback: use outputs if we have them
-    const meaningfulOutputs = outputs.filter(o => 
-      !o.startsWith('Error:') && 
-      !o.includes('maximum iterations') &&
-      o.trim().length > 0
-    );
-    if (meaningfulOutputs.length > 0) {
-      persistentMessages.push({
-        role: 'assistant',
-        content: meaningfulOutputs.join('\n'),
-      });
-    } else {
-      persistentMessages.push({
-        role: 'assistant', 
-        content: 'Task completed successfully.',
-      });
-    }
   } else if (success) {
     persistentMessages.push({
       role: 'assistant', 
@@ -696,81 +559,78 @@ function buildSystemPrompt(
   outputVars: string[],
   tools: Map<string, ToolDefinition>
 ): string {
-  const hasAskUser = tools.has('ask_user');
+  const toolDescriptions: string[] = [];
   
-  const parts: string[] = [
-    `You are an AI agent executing a subtask within a larger workflow. Your job is to complete the following subtask:`,
-    '',
-    `Subtask: ${taskDescription}`,
-    '',
-    'Available tools:',
-    '',
-    '- finish(success: boolean): Signal task completion. Call finish(true) when done successfully, or finish(false) if the task cannot be completed.',
-  ];
-
-  // Only include ask_user if it's declared in the DML
-  if (hasAskUser) {
-    parts.push('- ask_user(prompt: string): Ask the user for input or clarification.');
-  }
-
+  // Add finish tool description
+  toolDescriptions.push('- finish(success: boolean): Signal task completion. Call finish(true) when done successfully, or finish(false) if the task cannot be completed.');
+  
+  // Add set_result tool if we have output variables
   if (outputVars.length > 0) {
     const varList = outputVars.map(v => `"${v}"`).join(', ');
-    parts.push(
-      `- set_result(variable: string, value: string): Set a result value for an output variable. The variable parameter must be exactly one of: ${varList}. The value must be a simple string.`
-    );
+    toolDescriptions.push(`- set_result(variable: string, value: string): Store a result value. Variable must be one of: ${varList}`);
   }
-
-  // Add user-defined tools, skipping reserved names that we handle internally
+  
+  // Add user-defined tools
   for (const [name, tool] of tools) {
-    if (name === 'ask_user') continue; // Already documented above
-    parts.push(`- ${name}: ${tool.description}`);
+    if (name === 'finish' || name === 'set_result') continue;
+    
+    // Build parameter signature from schema
+    const params = tool.parameters;
+    const props = (params.properties || {}) as Record<string, { type?: string; description?: string }>;
+    const required = (params.required || []) as string[];
+    
+    const paramList = Object.entries(props)
+      .map(([pname, pschema]) => {
+        const opt = required.includes(pname) ? '' : '?';
+        return `${pname}${opt}: ${pschema.type || 'any'}`;
+      })
+      .join(', ');
+    
+    toolDescriptions.push(`- ${name}(${paramList}): ${tool.description}`);
   }
+  
+  let prompt = `You are an AI agent executing a subtask within a larger workflow. Your job is to complete the following subtask:
 
-  parts.push('');
-  parts.push('Workflow:');
-  parts.push('1. Analyze the task and gather any needed information using available tools.');
+Subtask: ${taskDescription}
+
+Available tools:
+
+${toolDescriptions.join('\n')}
+
+Workflow:
+1. Analyze the task and gather any needed information using available tools.
+2. Once the task is complete, call finish(true).
+
+If you determine the task cannot be completed, call finish(false) immediately.`;
 
   if (outputVars.length > 0) {
     const varList = outputVars.map(v => `"${v}"`).join(', ');
-    parts.push(`2. Once you have the answer, call set_result() for each required variable: ${varList}`);
-    parts.push('3. Immediately after setting results, call finish(true) to complete the task.');
-  } else {
-    parts.push('2. Once the task is complete, call finish(true).');
+    prompt += `
+
+IMPORTANT: You MUST use set_result() to store values for: ${varList}
+Call set_result for each variable before calling finish.`;
   }
 
-  parts.push('');
-  parts.push('If you determine the task cannot be completed, call finish(false) immediately.');
-  parts.push('');
-  parts.push('CRITICAL INSTRUCTIONS:');
-  parts.push('- You MUST use the structured tool-calling interface to invoke tools.');
-  parts.push('- NEVER write code syntax like print(), default_api.X(), or function_name() in your text response.');
-  parts.push('- NEVER describe tool calls in text - actually invoke them using the tool interface.');
-  parts.push('- Each tool call should be a separate structured function call, not embedded in text.');
-  parts.push('- When storing values, pass simple strings without code formatting or escaping.');
-  parts.push('');
-  parts.push('EXAMPLES OF CORRECT TOOL USAGE:');
-  parts.push('');
-  parts.push('To complete a task successfully, invoke the finish tool with:');
-  parts.push('  Tool: finish');
-  parts.push('  Arguments: { "success": true }');
-  parts.push('');
-  if (outputVars.length > 0) {
-    parts.push('To set a result value, invoke the set_result tool with:');
-    parts.push('  Tool: set_result');
-    parts.push(`  Arguments: { "variable": "${outputVars[0]}", "value": "your result here" }`);
-    parts.push('');
-  }
-  if (hasAskUser) {
-    parts.push('To ask the user a question, invoke the ask_user tool with:');
-    parts.push('  Tool: ask_user');
-    parts.push('  Arguments: { "prompt": "What would you like me to do?" }');
-    parts.push('');
-  }
-  parts.push('WRONG (do NOT do this):');
-  parts.push('- print(finish(success=true))');
-  parts.push('- default_api.set_result(variable="X", value="Y")');
-  parts.push('- I will now call finish(true)');
-  parts.push('- ```finish(success=true)```');
+  prompt += `
 
-  return parts.join('\n');
+CRITICAL INSTRUCTIONS:
+- You MUST use the structured tool-calling interface to invoke tools.
+- NEVER write code syntax like print(), default_api.X(), or function_name() in your text response.
+- NEVER describe tool calls in text - actually invoke them using the tool interface.
+- Each tool call should be a separate structured function call, not embedded in text.
+- When storing values, pass simple strings without code formatting or escaping.
+
+EXAMPLES OF CORRECT TOOL USAGE:
+
+To complete a task successfully, invoke the finish tool with:
+  Tool: finish
+  Arguments: { "success": true }
+
+WRONG (do NOT do this):
+- print(finish(success=true))
+- default_api.set_result(variable="X", value="Y")
+- I will now call finish(true)
+- \`\`\`finish(success=true)\`\`\``;
+
+  return prompt;
 }

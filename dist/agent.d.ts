@@ -1,6 +1,10 @@
 /**
  * Agent Loop Implementation
  * Runs an LLM agent loop for task() predicate execution
+ *
+ * Based on AI SDK v6 agent patterns:
+ * - Uses Zod schemas for tool definitions
+ * - Uses result.response.messages for message history management
  */
 import type { ToolDefinition, MemoryMessage } from './types.js';
 export interface AgentLoopOptions {
@@ -12,7 +16,7 @@ export interface AgentLoopOptions {
         model: string;
         provider: string;
         temperature: number;
-        maxTokens: number;
+        maxOutputTokens: number;
         baseUrl?: string;
     };
     onOutput: (text: string) => void;
@@ -33,10 +37,6 @@ export interface AgentLoopResult {
         content: string;
     }>;
 }
-/**
- * Extract variable names from task description
- * Looks for patterns like "Store X in VariableName" or "Store it in VariableName"
- */
 /**
  * Run an agent loop for a task
  */

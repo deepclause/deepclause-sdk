@@ -24,10 +24,10 @@
     "cli": "tsx src/cli/index.ts"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^1.0.0",
-    "@ai-sdk/google": "^1.0.0",
-    "@ai-sdk/openai": "^1.0.0",
-    "ai": "^4.3.19",
+    "@ai-sdk/anthropic": "^3.0.35",
+    "@ai-sdk/google": "^3.0.20",
+    "@ai-sdk/openai": "^3.0.25",
+    "ai": "^6.0.67",
     "deepclause-agentvm": "^0.0.3",
     "swipl-wasm": "file:./vendor/swipl-wasm",
     "zod": "^3.23.0"

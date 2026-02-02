@@ -176,7 +176,7 @@ async function generateDML(systemPrompt, userMessage, model, provider, temperatu
         system: systemPrompt,
         prompt: userMessage,
         temperature: temperature ?? 0.3, // Lower temperature for more consistent code generation
-        maxTokens: 8192
+        maxOutputTokens: 8192
     });
     // Clean up the response - remove any markdown code fences if present
     let dml = result.text.trim();
