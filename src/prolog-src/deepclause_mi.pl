@@ -396,7 +396,8 @@ mi(Goal, StateIn, SessionId) :-
             engine_yield(error(ErrMsg)),
             fail
         )
-    ).
+    ),
+    !.  % Cut to prevent backtracking after goal completes
 
 %% ============================================================
 %% State Helpers

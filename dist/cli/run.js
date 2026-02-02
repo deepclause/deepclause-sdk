@@ -196,7 +196,9 @@ export async function run(file, args, options = {}) {
                     if (event.trace) {
                         result.trace = event.trace;
                     }
-                    break;
+                    // Explicitly break out of the for-await loop when finished
+                    // The generator should end but this ensures we stop processing
+                    return result;
                 case 'input_required':
                     // For CLI, we'd need to handle stdin - for now just skip
                     if (options.verbose) {

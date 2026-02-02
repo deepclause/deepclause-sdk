@@ -182,12 +182,13 @@ program
         temperature: options.temperature,
         params: options.param
       });
-      
+
+
       if (options.dryRun) {
         console.log(result.wouldExecute);
       } else {
-        // Show outputs (unless in headless mode with verbose already showing them)
-        if (!options.verbose && result.output.length > 0) {
+        // Show outputs only in headless mode (in interactive mode they were already shown)
+        if (options.headless && result.output.length > 0) {
           for (const out of result.output) {
             console.log(out);
           }

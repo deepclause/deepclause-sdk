@@ -134,9 +134,15 @@ export class DMLRunner {
                 }
                 // Step the engine
                 const step = this.stepEngine();
+                if (process.env.DEBUG_STEPS) {
+                    console.log('[MAIN_LOOP] step:', step.status, step.content?.substring(0, 50));
+                }
                 switch (step.status) {
                     case 'output':
                         if (step.content) {
+                            if (process.env.DEBUG_STEPS) {
+                                console.log('[MAIN_LOOP] yielding output:', step.content.substring(0, 50));
+                            }
                             yield { type: 'output', content: step.content };
                         }
                         break;
@@ -389,13 +395,13 @@ export class DMLRunner {
             streaming: this.options.streaming,
             debug: this.options.debug,
             onOutput: (_text) => { },
-            onStream: this.options.streaming ? (chunk, done) => {
+            onStream: (chunk, done) => {
                 streamQueue.push({ type: 'stream', content: chunk, done });
                 if (streamResolve) {
                     streamResolve();
                     streamResolve = null;
                 }
-            } : undefined,
+            },
             onToolCall: (toolName, args) => {
                 streamQueue.push({ type: 'tool_call', toolName, toolArgs: args });
                 if (streamResolve) {
@@ -440,12 +446,18 @@ export class DMLRunner {
             // Non-streaming mode - wait for completion
             const result = await resultPromise;
             // Drain tool_call events from queue (they were queued during agent execution)
+            if (process.env.DEBUG_QUEUE) {
+                console.log('[RUNNER] Non-streaming: streamQueue length before drain:', streamQueue.length);
+                if (streamQueue.length > 0) {
+                    console.log('[RUNNER] streamQueue contents:', streamQueue.map(e => `${e.type}:${e.content?.substring(0, 40)}`));
+                }
+            }
             while (streamQueue.length > 0) {
                 yield streamQueue.shift();
             }
-            // if (process.env.DEBUG_RUNNER) {
-            console.log('[RUNNER] Non-streaming agent result.outputs:', result.outputs);
-            //  }
+            if (process.env.DEBUG_QUEUE) {
+                console.log('[RUNNER] Non-streaming agent result.outputs:', result.outputs);
+            }
             // Stream any output from the agent
             for (const output of result.outputs) {
                 yield { type: 'output', content: output };
