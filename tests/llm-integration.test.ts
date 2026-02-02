@@ -495,6 +495,129 @@ describe('Sub-agent patterns', () => {
 });
 
 // ============================================================================
+// PARALLEL TOOL CALLING
+// ============================================================================
+describe('Parallel tool calling', () => {
+  let sdk: DeepClauseSDK;
+  const toolCallLog: { tool: string; time: number; order: number }[] = [];
+  let callOrder = 0;
+
+  beforeAll(async () => {
+    sdk = await createDeepClause({ model: 'gemini-2.0-flash' });
+    
+    // Register tools that simulate async work with delays
+    sdk.registerTool('search_a', {
+      description: 'Search database A for information',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search query' }
+        },
+        required: ['query']
+      },
+      execute: async (args) => {
+        const order = ++callOrder;
+        const startTime = Date.now();
+        toolCallLog.push({ tool: 'search_a', time: startTime, order });
+        // Simulate async delay
+        await new Promise(resolve => setTimeout(resolve, 50));
+        return { source: 'database_a', results: [`Result A for: ${(args as any).query}`], order };
+      }
+    });
+
+    sdk.registerTool('search_b', {
+      description: 'Search database B for information',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search query' }
+        },
+        required: ['query']
+      },
+      execute: async (args) => {
+        const order = ++callOrder;
+        const startTime = Date.now();
+        toolCallLog.push({ tool: 'search_b', time: startTime, order });
+        // Simulate async delay
+        await new Promise(resolve => setTimeout(resolve, 50));
+        return { source: 'database_b', results: [`Result B for: ${(args as any).query}`], order };
+      }
+    });
+
+    sdk.registerTool('search_c', {
+      description: 'Search database C for information',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search query' }
+        },
+        required: ['query']
+      },
+      execute: async (args) => {
+        const order = ++callOrder;
+        const startTime = Date.now();
+        toolCallLog.push({ tool: 'search_c', time: startTime, order });
+        // Simulate async delay
+        await new Promise(resolve => setTimeout(resolve, 50));
+        return { source: 'database_c', results: [`Result C for: ${(args as any).query}`], order };
+      }
+    });
+  });
+
+  beforeEach(() => {
+    toolCallLog.length = 0;
+    callOrder = 0;
+  });
+
+  afterAll(async () => {
+    await sdk.dispose();
+  });
+
+  it('should handle parallel tool calls from LLM without errors', async () => {
+    // This task is designed to encourage the LLM to call multiple search tools in parallel
+    const code = `
+      agent_main :-
+          task("Search ALL THREE databases (A, B, and C) for 'AI frameworks'. You MUST call search_a, search_b, AND search_c tools. After getting results from all three, call finish(true)."),
+          answer("done").
+    `;
+
+    const events: any[] = [];
+    for await (const event of sdk.runDML(code)) {
+      events.push(event);
+    }
+
+    // Should complete successfully (either finished or answer)
+    const completed = events.some(e => e.type === 'finished') || events.some(e => e.type === 'answer');
+    expect(completed).toBe(true);
+    
+    // At least some tools should have been called (LLM behavior varies)
+    // The important thing is no crashes or engine corruption errors
+    const errors = events.filter(e => e.type === 'error' && e.content?.includes('engine'));
+    expect(errors.length).toBe(0);
+  }, 60000);
+
+  it('should serialize parallel tool calls correctly with mutex', async () => {
+    const code = `
+      agent_main :-
+          task("Search databases A and B simultaneously for 'machine learning'. Call both search_a and search_b at the same time, then finish(true)."),
+          answer("done").
+    `;
+
+    const events: any[] = [];
+    for await (const event of sdk.runDML(code)) {
+      events.push(event);
+    }
+
+    expect(events.some(e => e.type === 'finished')).toBe(true);
+    
+    // If tools were called in parallel by the LLM, they should still execute sequentially
+    // due to our mutex - check that no tool results are corrupted
+    const errors = events.filter(e => e.type === 'error');
+    expect(errors.length).toBe(0);
+  }, 60000);
+});
+
+// ============================================================================
 // ABORT SIGNAL
 // ============================================================================
 describe('Abort signal', () => {

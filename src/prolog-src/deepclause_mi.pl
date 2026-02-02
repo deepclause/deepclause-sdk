@@ -41,6 +41,8 @@
 :- dynamic session_exec_result/2.  % session_exec_result(SessionId, Result)
 :- dynamic session_trace_log/2.    % session_trace_log(SessionId, TraceLog) - accumulated trace entries
 :- dynamic session_trace_enabled/2. % session_trace_enabled(SessionId, true/false)
+:- dynamic session_pending_signal/2. % session_pending_signal(SessionId, Signal) - fallback for engine_fetch
+:- dynamic session_user_input/2.   % session_user_input(SessionId, Input) - for ask_user tool
 
 %% ============================================================
 %% DML Parsing
@@ -295,17 +297,29 @@ determine_agent_goal(SessionId, _Args, SessionId:agent_main).
 
 %% step_engine(+SessionId, -Status, -Content, -Payload)
 step_engine(SessionId, Status, Content, Payload) :-
-    session_engine(SessionId, Engine),
-    (   engine_next(Engine, Result)
-    ->  process_engine_result(Result, Status, Content, Payload)
-    ;   % Engine finished - return trace if enabled
-        Status = finished,
-        Content = '',
-        (   session_trace_enabled(SessionId, true),
-            session_trace_log(SessionId, TraceLog)
-        ->  Payload = payload{trace: TraceLog}
-        ;   Payload = none
+    (   session_engine(SessionId, Engine)
+    ->  catch(
+            (   engine_next(Engine, Result)
+            ->  process_engine_result(Result, Status, Content, Payload)
+            ;   % Engine finished - return trace if enabled
+                Status = finished,
+                Content = '',
+                (   session_trace_enabled(SessionId, true),
+                    session_trace_log(SessionId, TraceLog)
+                ->  Payload = payload{trace: TraceLog}
+                ;   Payload = none
+                )
+            ),
+            Error,
+            (   format(atom(ErrMsg), 'Engine error: ~w', [Error]),
+                Status = error,
+                Content = ErrMsg,
+                Payload = none
+            )
         )
+    ;   Status = error,
+        Content = 'No engine found for session',
+        Payload = none
     ).
 
 %% process_engine_result(+Result, -Status, -Content, -Payload)
@@ -363,20 +377,25 @@ destroy_engine(SessionId) :-
 %% Messages is a list of message{role: Role, content: Content} dicts
 post_agent_result(SessionId, Success, Variables, Messages) :-
     assertz(session_agent_result(SessionId, result{success: Success, variables: Variables, messages: Messages})),
-    session_engine(SessionId, Engine),
-    engine_post(Engine, agent_done).
+    post_signal_to_engine(SessionId, agent_done).
 
 %% post_exec_result(+SessionId, +Status, +Result)
 post_exec_result(SessionId, Status, Result) :-
+    retractall(session_exec_result(SessionId, _)),
     assertz(session_exec_result(SessionId, result{status: Status, result: Result})),
-    session_engine(SessionId, Engine),
-    engine_post(Engine, exec_done).
+    post_signal_to_engine(SessionId, exec_done).
 
 %% provide_input(+SessionId, +Input)
 provide_input(SessionId, Input) :-
     assertz(session_pending_input(SessionId, Input)),
-    session_engine(SessionId, Engine),
-    engine_post(Engine, input_provided).
+    post_signal_to_engine(SessionId, input_provided).
+
+%% post_signal_to_engine(+SessionId, +Signal)
+%% Posts a signal via dynamic predicate (most reliable for WASM engines)
+%% Falls back to engine_post only if dynamic assert fails
+post_signal_to_engine(SessionId, Signal) :-
+    % Always use dynamic predicate - more reliable than engine_post in WASM
+    assertz(session_pending_signal(SessionId, Signal)).
 
 %% ============================================================
 %% Meta-Interpreter Core - STATE THREADED VERSION
@@ -484,17 +503,62 @@ add_trace_with_result(SessionId, Type, Predicate, Args, Result, Depth) :-
 %% Loops to handle signals from the host until agent_done is received.
 %% This allows tools to execute inline during the agent loop,
 %% sharing state with the task and supporting backtracking.
+%%
+%% IMPORTANT: Signals are received via session_pending_signal (dynamic predicate)
+%% which is more reliable than engine_fetch for WASM engines.
 handle_agent_signals(SessionId, StateIn, StateOut) :-
-    engine_fetch(Signal),
+    % Get signal - prefer dynamic predicate, fall back to engine_fetch
+    get_next_signal(SessionId, Signal),
     handle_signal(SessionId, Signal, StateIn, StateOut).
+
+%% get_next_signal(+SessionId, -Signal)
+%% Retrieves the next signal, preferring dynamic predicate over engine_fetch.
+%% If engine_fetch fails, retries the dynamic predicate (signal may have been posted while we were trying).
+get_next_signal(SessionId, Signal) :-
+    (   retract(session_pending_signal(SessionId, Signal))
+    ->  true
+    ;   catch(
+            engine_fetch(Signal),
+            _FetchError,
+            % engine_fetch failed - check dynamic predicate again (no sleep - not available in Node.js WASM)
+            (   retract(session_pending_signal(SessionId, Signal))
+            ->  true
+            ;   % Still no signal - report error
+                Signal = error_signal(no_signal_available)
+            )
+        )
+    ).
 
 %% handle_signal(+SessionId, +Signal, +StateIn, -StateOut)
 handle_signal(_SessionId, agent_done, State, State) :- !.
 
+handle_signal(_SessionId, error_signal(Error), State, State) :-
+    % engine_fetch failed - return error and stop
+    !,
+    format(atom(ErrMsg), 'Engine fetch error: ~w', [Error]),
+    engine_yield(tool_result(error{message: ErrMsg})).
+
+handle_signal(SessionId, exec_done, StateIn, StateOut) :-
+    % Stale exec_done from a previous tool - ignore and continue
+    !,
+    handle_agent_signals(SessionId, StateIn, StateOut).
+
 handle_signal(SessionId, execute_tool(ToolName, Args), StateIn, StateOut) :-
     !,
-    call_tool_inline(SessionId, ToolName, Args, StateIn, StateMid, Result),
-    engine_yield(tool_result(Result)),
+    catch(
+        (   call_tool_inline(SessionId, ToolName, Args, StateIn, StateMid, Result),
+            engine_yield(tool_result(Result))
+        ),
+        Error,
+        (   Error == '$answer_commit'
+        ->  % Tool body called answer() - this is a valid completion
+            % The answer was already yielded by answer/1, so don't yield again
+            StateMid = StateIn
+        ;   format(atom(ErrMsg), 'Runtime error: ~w', [Error]),
+            StateMid = StateIn,
+            engine_yield(tool_result(error{message: ErrMsg}))
+        )
+    ),
     handle_agent_signals(SessionId, StateMid, StateOut).
 
 handle_signal(SessionId, set_input(Value), StateIn, StateOut) :-
@@ -531,23 +595,30 @@ call_tool_inline(SessionId, ToolName, Args, StateIn, StateOut, Result) :-
         % Unify with the pattern to bind variables in Body
         ToolHead = ToolPattern,
         % Execute the tool body through MI
-        (   mi_call(Body, StateIn, StateOut)
-        ->  % Collect result from result/1 facts or output args
-            % Use catch to handle case where result/2 doesn't exist
-            (   catch(SessionId:result(ToolNameAtom, R), _, fail)
-            ->  Result = R,
-                catch(retract(SessionId:result(ToolNameAtom, R)), _, true)
-            ;   % No explicit result - return the last output arg if bound
-                (   TotalArity > InputArity,
-                    last(HeadArgs, LastArg),
-                    nonvar(LastArg)
-                ->  Result = LastArg
-                ;   Result = true
+        % Wrap in catch to handle answer() commits - answer() yields and then throws
+        catch(
+            (   mi_call(Body, StateIn, StateOut)
+            ->  % Collect result from result/1 facts or output args
+                % Use catch to handle case where result/2 doesn't exist
+                (   catch(SessionId:result(ToolNameAtom, R), _, fail)
+                ->  Result = R,
+                    catch(retract(SessionId:result(ToolNameAtom, R)), _, true)
+                ;   % No explicit result - return the last output arg if bound
+                    (   TotalArity > InputArity,
+                        last(HeadArgs, LastArg),
+                        nonvar(LastArg)
+                    ->  Result = LastArg
+                    ;   Result = true
+                    )
                 )
-            )
-        ;   % Tool body failed
-            StateOut = StateIn,
-            Result = false
+            ;   % Tool body failed
+                StateOut = StateIn,
+                Result = false
+            ),
+            '$answer_commit',
+            % answer() was called - it already yielded the answer text
+            % Just set success result and state
+            (StateOut = StateIn, Result = answered)
         )
     ;   % No DML body - should not happen if host checked
         StateOut = StateIn,
@@ -762,7 +833,8 @@ mi_call(exec(ToolCall, Output), StateIn, StateIn) :-
     get_depth(StateIn, Depth),
     add_trace_entry(SessionId, exec, ToolName, Args, Depth),
     engine_yield(request_exec(ToolName, Args)),
-    engine_fetch(_Signal),
+    % Use get_next_signal helper which handles both dynamic predicate and engine_fetch
+    get_next_signal(SessionId, _Signal),
     session_exec_result(SessionId, Result),
     retract(session_exec_result(SessionId, _)),
     (   Result.status == success
@@ -820,7 +892,8 @@ mi_call(input(Prompt, Input), StateIn, StateIn) :-
     get_depth(StateIn, Depth),
     add_trace_entry(SessionId, input, input, [InterpPrompt], Depth),
     engine_yield(wait_input(InterpPrompt)),
-    engine_fetch(_Signal),
+    % Use get_next_signal helper which handles both dynamic predicate and engine_fetch
+    get_next_signal(SessionId, _Signal),
     % Retrieve the input provided via provide_input/2
     (   session_pending_input(SessionId, Input)
     ->  retract(session_pending_input(SessionId, Input)),

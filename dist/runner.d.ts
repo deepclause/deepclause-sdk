@@ -31,7 +31,8 @@ export declare class DMLRunner {
     private engine;
     private sessionId;
     private currentMemory;
-    private toolExecutionLock;
+    private toolMutexLocked;
+    private toolMutexQueue;
     private toolExecutionDepth;
     constructor(swipl: SWIPLModule, options: RunnerOptions);
     /**
@@ -89,6 +90,11 @@ export declare class DMLRunner {
      */
     private buildAgentTools;
     /**
+     * Acquire the tool execution mutex
+     * Returns a release function to call when done
+     */
+    private acquireToolMutex;
+    /**
      * Execute a tool inline via the main Prolog engine
      * Posts execute_tool signal, handles yields (output, exec requests), returns tool_result
      * Tools now share state with the task() that calls them.
@@ -111,6 +117,11 @@ export declare class DMLRunner {
      * Post exec result back to Prolog
      */
     private postExecResult;
+    /**
+     * Post exec_done signal after tool execution (from exec/2 in DML).
+     * Uses post_signal_to_engine helper which has fallback to session_pending_signal.
+     */
+    private postExecDone;
     /**
      * Provide user input to waiting Prolog
      */

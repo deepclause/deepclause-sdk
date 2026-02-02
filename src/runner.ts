@@ -126,8 +126,9 @@ export class DMLRunner {
   private engine: unknown = null;
   private sessionId: string = '';
   private currentMemory: MemoryMessage[] = [];
-  // Mutex for serializing tool execution (AI SDK may call tools in parallel)
-  private toolExecutionLock: Promise<void> = Promise.resolve();
+  // Proper mutex for serializing tool execution (AI SDK may call tools in parallel)
+  private toolMutexLocked: boolean = false;
+  private toolMutexQueue: (() => void)[] = [];
   // Depth counter for re-entrant tool execution (nested task() calls)
   private toolExecutionDepth: number = 0;
 
@@ -873,6 +874,31 @@ export class DMLRunner {
   }
 
   /**
+   * Acquire the tool execution mutex
+   * Returns a release function to call when done
+   */
+  private acquireToolMutex(): Promise<() => void> {
+    return new Promise(resolve => {
+      const tryAcquire = () => {
+        if (!this.toolMutexLocked) {
+          this.toolMutexLocked = true;
+          resolve(() => {
+            this.toolMutexLocked = false;
+            const next = this.toolMutexQueue.shift();
+            if (next) {
+              // Use setImmediate/setTimeout to avoid stack overflow with many queued tools
+              setTimeout(next, 0);
+            }
+          });
+        } else {
+          this.toolMutexQueue.push(tryAcquire);
+        }
+      };
+      tryAcquire();
+    });
+  }
+
+  /**
    * Execute a tool inline via the main Prolog engine
    * Posts execute_tool signal, handles yields (output, exec requests), returns tool_result
    * Tools now share state with the task() that calls them.
@@ -885,43 +911,60 @@ export class DMLRunner {
     onOutput: (text: string) => void,
     options?: InternalRunOptions
   ): Promise<{ result: unknown; outputs: string[] }> {
+    const timestamp = () => new Date().toISOString().substr(11, 12);
+    
     if (process.env.DEBUG_RUNNER) {
       console.log('[RUNNER] executeToolInline called for:', toolName, '- depth:', this.toolExecutionDepth);
     }
     
-    // If we're already inside a tool execution (nested task()), skip the mutex
+    // Always log tool execution start for debugging parallel issues
+    if (process.env.DEBUG_TOOLS) {
+      console.log(`[TOOLS ${timestamp()}] >>> ENTER executeToolInline: ${toolName} (depth=${this.toolExecutionDepth}, queueLen=${this.toolMutexQueue.length}, locked=${this.toolMutexLocked})`);
+    }
+    
     // The mutex is only for parallel calls from the AI SDK, not for nested calls
     if (this.toolExecutionDepth > 0) {
-      if (process.env.DEBUG_RUNNER) {
-        console.log('[RUNNER] Nested tool call - skipping mutex for:', toolName);
+      if (process.env.DEBUG_TOOLS || process.env.DEBUG_RUNNER) {
+        console.log(`[TOOLS ${timestamp()}] Nested tool call - skipping mutex for: ${toolName}`);
       }
       this.toolExecutionDepth++;
       try {
         return await this.executeToolInlineImpl(toolName, args, registeredTools, onOutput, options);
       } finally {
         this.toolExecutionDepth--;
+        if (process.env.DEBUG_TOOLS) {
+          console.log(`[TOOLS ${timestamp()}] <<< EXIT (nested) executeToolInline: ${toolName}`);
+        }
       }
     }
     
     // Acquire mutex - wait for any previous tool execution to complete
-    const previousLock = this.toolExecutionLock;
-    let releaseLock: () => void;
-    this.toolExecutionLock = new Promise(resolve => { releaseLock = resolve; });
-    await previousLock;
+    if (process.env.DEBUG_TOOLS || process.env.DEBUG_RUNNER) {
+      console.log(`[TOOLS ${timestamp()}] Tool ${toolName} waiting for mutex... (queueLen=${this.toolMutexQueue.length})`);
+    }
     
-    if (process.env.DEBUG_RUNNER) {
-      console.log('[RUNNER] executeToolInline acquired mutex for:', toolName);
+    const releaseMutex = await this.acquireToolMutex();
+    
+    if (process.env.DEBUG_TOOLS || process.env.DEBUG_RUNNER) {
+      console.log(`[TOOLS ${timestamp()}] Tool ${toolName} ACQUIRED mutex`);
     }
     
     this.toolExecutionDepth++;
     try {
-      return await this.executeToolInlineImpl(toolName, args, registeredTools, onOutput, options);
+      if (process.env.DEBUG_TOOLS) {
+        console.log(`[TOOLS ${timestamp()}] Tool ${toolName} STARTING execution`);
+      }
+      const result = await this.executeToolInlineImpl(toolName, args, registeredTools, onOutput, options);
+      if (process.env.DEBUG_TOOLS) {
+        console.log(`[TOOLS ${timestamp()}] Tool ${toolName} COMPLETED with result:`, JSON.stringify(result.result).substring(0, 100));
+      }
+      return result;
     } finally {
       this.toolExecutionDepth--;
-      if (process.env.DEBUG_RUNNER) {
-        console.log('[RUNNER] executeToolInline releasing mutex for:', toolName);
+      if (process.env.DEBUG_TOOLS || process.env.DEBUG_RUNNER) {
+        console.log(`[TOOLS ${timestamp()}] Tool ${toolName} RELEASING mutex`);
       }
-      releaseLock!();
+      releaseMutex();
     }
   }
 
@@ -936,6 +979,11 @@ export class DMLRunner {
     options?: InternalRunOptions
   ): Promise<{ result: unknown; outputs: string[] }> {
     const outputs: string[] = [];
+    const timestamp = () => new Date().toISOString().substr(11, 12);
+    
+    if (process.env.DEBUG_TOOLS) {
+      console.log(`[TOOLS ${timestamp()}] executeToolInlineImpl START: ${toolName}`);
+    }
     
     // Convert args to Prolog list format
     const sortedArgs = Object.entries(args)
@@ -945,36 +993,46 @@ export class DMLRunner {
     // Post execute_tool signal to main engine
     const argsListStr = `[${sortedArgs.join(', ')}]`;
     
-    if (process.env.DEBUG_RUNNER) {
-      console.log('[RUNNER] About to post execute_tool signal:', toolName);
+    if (process.env.DEBUG_TOOLS || process.env.DEBUG_RUNNER) {
+      console.log(`[TOOLS ${timestamp()}] About to post execute_tool signal: ${toolName}`);
     }
     
-    try {
-      this.query(
-        `deepclause_mi:session_engine('${this.sessionId}', Engine),
-         engine_post(Engine, execute_tool("${toolName}", ${argsListStr}))`
-      );
-    } catch (err) {
-      console.error('[RUNNER] Failed to post execute_tool:', err);
-      return { result: { error: `Failed to execute tool: ${err}` }, outputs };
+    // ALWAYS use dynamic predicate for signaling - engine_post has reliability issues
+    // with WASM engines when multiple signals are posted in quick succession
+    const signalResult = this.query(
+      `assertz(deepclause_mi:session_pending_signal('${this.sessionId}', execute_tool("${toolName}", ${argsListStr})))`
+    );
+    
+    if (signalResult === null) {
+      console.error(`[TOOLS ${timestamp()}] Failed to post signal for ${toolName}`);
+      return { result: { error: `Failed to execute tool: signal assertion failed` }, outputs };
     }
     
-    if (process.env.DEBUG_RUNNER) {
-      console.log('[RUNNER] Posted execute_tool signal:', toolName, sortedArgs);
+    if (process.env.DEBUG_TOOLS || process.env.DEBUG_RUNNER) {
+      console.log(`[TOOLS ${timestamp()}] Signal posted for: ${toolName}`);
+    }
+    
+    if (process.env.DEBUG_TOOLS || process.env.DEBUG_RUNNER) {
+      console.log(`[TOOLS ${timestamp()}] Posted signal, now stepping engine for: ${toolName}`);
     }
     
     // Step engine and handle yields until we get tool_result
+    let stepCount = 0;
     while (true) {
+      stepCount++;
       const step = this.stepEngine();
       
-      if (process.env.DEBUG_RUNNER) {
-        console.log('[RUNNER] Tool inline step:', step.status, step.content, step.payload);
+      if (process.env.DEBUG_TOOLS || process.env.DEBUG_RUNNER) {
+        console.log(`[TOOLS ${timestamp()}] Tool ${toolName} step #${stepCount}: status=${step.status}, content=${step.content?.substring(0, 50)}`);
       }
       
       switch (step.status) {
         case 'tool_result': {
           // Tool execution completed
           const payload = step.payload as { result: unknown } | undefined;
+          if (process.env.DEBUG_TOOLS) {
+            console.log(`[TOOLS ${timestamp()}] Tool ${toolName} got tool_result, returning`);
+          }
           return { result: payload?.result, outputs };
         }
         
@@ -1012,26 +1070,14 @@ export class DMLRunner {
                   console.log('[RUNNER] Inline exec result:', execResult);
                 }
                 // Post result back to engine
-                const resultStr = this.toPrologTerm(execResult);
-                this.query(
-                  `assertz(deepclause_mi:session_exec_result('${this.sessionId}', result{status: success, result: ${resultStr}})),
-                   deepclause_mi:session_engine('${this.sessionId}', Engine),
-                   engine_post(Engine, exec_done)`
-                );
+                this.postExecDone('success', execResult);
               } catch (error) {
                 const errMsg = error instanceof Error ? error.message : String(error);
-                this.query(
-                  `assertz(deepclause_mi:session_exec_result('${this.sessionId}', result{status: error, result: "${errMsg}"})),
-                   deepclause_mi:session_engine('${this.sessionId}', Engine),
-                   engine_post(Engine, exec_done)`
-                );
+                console.error(`${payload.toolName} failed:`, error);
+                this.postExecDone('error', errMsg);
               }
             } else {
-              this.query(
-                `assertz(deepclause_mi:session_exec_result('${this.sessionId}', result{status: error, result: "Tool not found: ${payload.toolName}"})),
-                 deepclause_mi:session_engine('${this.sessionId}', Engine),
-                 engine_post(Engine, exec_done)`
-              );
+              this.postExecDone('error', `Tool not found: ${payload.toolName}`);
             }
           }
           break;
@@ -1070,13 +1116,21 @@ export class DMLRunner {
           return { result: { error: step.content }, outputs };
         }
         
+        case 'answer': {
+          // Tool body called answer() - treat as a tool result
+          // The answer text becomes the result
+          return { result: step.content ?? true, outputs };
+        }
+        
         case 'finished': {
           // Engine finished without tool_result - shouldn't happen
           return { result: { error: 'Tool execution ended unexpectedly' }, outputs };
         }
         
         default: {
+          // Unknown step - return error to prevent infinite loop
           console.warn('[RUNNER] Unexpected step during tool execution:', step.status);
+          return { result: { error: `Unexpected step: ${step.status}` }, outputs };
         }
       }
     }
@@ -1143,9 +1197,49 @@ export class DMLRunner {
         `deepclause_mi:post_exec_result('${this.sessionId}', success, ${termStr})`
       );
     } else {
+      const escapedErr = this.toPrologTerm(result.error ?? 'Unknown error');
       this.query(
-        `deepclause_mi:post_exec_result('${this.sessionId}', failure, "${result.error}")`
+        `deepclause_mi:post_exec_result('${this.sessionId}', failure, ${escapedErr})`
       );
+    }
+  }
+
+  /**
+   * Post exec_done signal after tool execution (from exec/2 in DML).
+   * Uses post_signal_to_engine helper which has fallback to session_pending_signal.
+   */
+  private postExecDone(status: 'success' | 'error', result: unknown): void {
+    const resultStr = this.toPrologTerm(result);
+    
+    // Try to assert result and post signal using the Prolog helper (has fallback)
+    try {
+      this.query(
+        `retractall(deepclause_mi:session_exec_result('${this.sessionId}', _)),
+         assertz(deepclause_mi:session_exec_result('${this.sessionId}', result{status: ${status}, result: ${resultStr}})),
+         deepclause_mi:post_signal_to_engine('${this.sessionId}', exec_done)`
+      );
+    } catch (err) {
+      // If the combined query fails, try to at least post exec_done with an error
+      console.error('[RUNNER] Failed to post exec result:', err);
+      try {
+        // Fallback: assert a simple error result and post exec_done via helper
+        const fallbackErr = this.toPrologTerm('Internal error posting result');
+        this.query(
+          `retractall(deepclause_mi:session_exec_result('${this.sessionId}', _)),
+           assertz(deepclause_mi:session_exec_result('${this.sessionId}', result{status: error, result: ${fallbackErr}})),
+           deepclause_mi:post_signal_to_engine('${this.sessionId}', exec_done)`
+        );
+      } catch (fallbackErr) {
+        // Last resort: try using the dynamic predicate directly
+        console.error('[RUNNER] Fallback also failed:', fallbackErr);
+        try {
+          this.query(
+            `assertz(deepclause_mi:session_pending_signal('${this.sessionId}', exec_done))`
+          );
+        } catch {
+          console.error('[RUNNER] Could not post exec_done - engine may be in bad state');
+        }
+      }
     }
   }
 
