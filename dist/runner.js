@@ -68,6 +68,11 @@ function prologTypeToJsonType(prologType) {
 }
 /**
  * DML execution engine
+ *
+ * ARCHITECTURE NOTE:
+ * DML-defined tools now run in ISOLATED Prolog engines, not sharing state
+ * with the parent task. This simplifies parallel tool execution (AI SDK
+ * may call multiple tools concurrently) and eliminates race conditions.
  */
 export class DMLRunner {
     swipl;
@@ -75,11 +80,6 @@ export class DMLRunner {
     engine = null;
     sessionId = '';
     currentMemory = [];
-    // Proper mutex for serializing tool execution (AI SDK may call tools in parallel)
-    toolMutexLocked = false;
-    toolMutexQueue = [];
-    // Depth counter for re-entrant tool execution (nested task() calls)
-    toolExecutionDepth = 0;
     constructor(swipl, options) {
         this.swipl = swipl;
         this.options = options;
@@ -377,11 +377,11 @@ export class DMLRunner {
                 },
             });
         }
-        // Build available tools for agent
+        // Build available tools for agent - SIMPLIFIED: tools run in isolated engines
         const availableTools = this.buildAgentTools(userTools, options.toolPolicy, 
-        // executeToolInline callback - runs tool in main engine with shared state
+        // executeToolIsolated callback - runs tool in separate engine (no state sharing)
         async (toolName, args) => {
-            return this.executeToolInline(toolName, args, augmentedTools, onToolOutput, options);
+            return this.executeToolIsolated(toolName, args, augmentedTools, onToolOutput);
         });
         // Queue for streaming events
         const streamQueue = [];
@@ -708,225 +708,121 @@ export class DMLRunner {
         return result;
     }
     /**
-     * Acquire the tool execution mutex
-     * Returns a release function to call when done
+     * Execute a DML-defined tool in isolation using its own engine
+     *
+     * SIMPLIFIED: Tools now run in their own isolated Prolog engine, not sharing
+     * state with the parent task. This eliminates:
+     * - Race conditions from parallel tool calls
+     * - Complex signal-based coordination
+     * - Mutex requirements
+     *
+     * The tool can still call exec() for external tools (TypeScript registered tools).
+     * We step the tool engine and handle request_exec signals.
      */
-    acquireToolMutex() {
-        return new Promise(resolve => {
-            const tryAcquire = () => {
-                if (!this.toolMutexLocked) {
-                    this.toolMutexLocked = true;
-                    resolve(() => {
-                        this.toolMutexLocked = false;
-                        const next = this.toolMutexQueue.shift();
-                        if (next) {
-                            // Use setImmediate/setTimeout to avoid stack overflow with many queued tools
-                            setTimeout(next, 0);
-                        }
-                    });
-                }
-                else {
-                    this.toolMutexQueue.push(tryAcquire);
-                }
-            };
-            tryAcquire();
-        });
-    }
-    /**
-     * Execute a tool inline via the main Prolog engine
-     * Posts execute_tool signal, handles yields (output, exec requests), returns tool_result
-     * Tools now share state with the task() that calls them.
-     * Uses a mutex to serialize concurrent tool calls (AI SDK may execute multiple tools in parallel).
-     */
-    async executeToolInline(toolName, args, registeredTools, onOutput, options) {
-        const timestamp = () => new Date().toISOString().substr(11, 12);
-        if (process.env.DEBUG_RUNNER) {
-            console.log('[RUNNER] executeToolInline called for:', toolName, '- depth:', this.toolExecutionDepth);
-        }
-        // Always log tool execution start for debugging parallel issues
-        if (process.env.DEBUG_TOOLS) {
-            console.log(`[TOOLS ${timestamp()}] >>> ENTER executeToolInline: ${toolName} (depth=${this.toolExecutionDepth}, queueLen=${this.toolMutexQueue.length}, locked=${this.toolMutexLocked})`);
-        }
-        // The mutex is only for parallel calls from the AI SDK, not for nested calls
-        if (this.toolExecutionDepth > 0) {
-            if (process.env.DEBUG_TOOLS || process.env.DEBUG_RUNNER) {
-                console.log(`[TOOLS ${timestamp()}] Nested tool call - skipping mutex for: ${toolName}`);
-            }
-            this.toolExecutionDepth++;
-            try {
-                return await this.executeToolInlineImpl(toolName, args, registeredTools, onOutput, options);
-            }
-            finally {
-                this.toolExecutionDepth--;
-                if (process.env.DEBUG_TOOLS) {
-                    console.log(`[TOOLS ${timestamp()}] <<< EXIT (nested) executeToolInline: ${toolName}`);
-                }
-            }
-        }
-        // Acquire mutex - wait for any previous tool execution to complete
-        if (process.env.DEBUG_TOOLS || process.env.DEBUG_RUNNER) {
-            console.log(`[TOOLS ${timestamp()}] Tool ${toolName} waiting for mutex... (queueLen=${this.toolMutexQueue.length})`);
-        }
-        const releaseMutex = await this.acquireToolMutex();
-        if (process.env.DEBUG_TOOLS || process.env.DEBUG_RUNNER) {
-            console.log(`[TOOLS ${timestamp()}] Tool ${toolName} ACQUIRED mutex`);
-        }
-        this.toolExecutionDepth++;
-        try {
-            if (process.env.DEBUG_TOOLS) {
-                console.log(`[TOOLS ${timestamp()}] Tool ${toolName} STARTING execution`);
-            }
-            const result = await this.executeToolInlineImpl(toolName, args, registeredTools, onOutput, options);
-            if (process.env.DEBUG_TOOLS) {
-                console.log(`[TOOLS ${timestamp()}] Tool ${toolName} COMPLETED with result:`, JSON.stringify(result.result).substring(0, 100));
-            }
-            return result;
-        }
-        finally {
-            this.toolExecutionDepth--;
-            if (process.env.DEBUG_TOOLS || process.env.DEBUG_RUNNER) {
-                console.log(`[TOOLS ${timestamp()}] Tool ${toolName} RELEASING mutex`);
-            }
-            releaseMutex();
-        }
-    }
-    /**
-     * Internal implementation of executeToolInline (called with mutex held)
-     */
-    async executeToolInlineImpl(toolName, args, registeredTools, onOutput, options) {
+    async executeToolIsolated(toolName, args, registeredTools, onOutput) {
         const outputs = [];
-        const timestamp = () => new Date().toISOString().substr(11, 12);
-        if (process.env.DEBUG_TOOLS) {
-            console.log(`[TOOLS ${timestamp()}] executeToolInlineImpl START: ${toolName}`);
+        if (process.env.DEBUG_RUNNER) {
+            console.log('[RUNNER] executeToolIsolated called for:', toolName);
         }
-        // Convert args to Prolog list format
+        // Convert args to Prolog list format (sorted by key name for consistent ordering)
         const sortedArgs = Object.entries(args)
             .sort(([a], [b]) => a.localeCompare(b))
             .map(([, v]) => this.toPrologTerm(v));
-        // Post execute_tool signal to main engine
         const argsListStr = `[${sortedArgs.join(', ')}]`;
-        if (process.env.DEBUG_TOOLS || process.env.DEBUG_RUNNER) {
-            console.log(`[TOOLS ${timestamp()}] About to post execute_tool signal: ${toolName}`);
+        // Create tool engine
+        const createGoal = `deepclause_mi:create_tool_engine('${this.sessionId}', "${toolName}", ${argsListStr}, ToolEngineId)`;
+        if (process.env.DEBUG_RUNNER) {
+            console.log('[RUNNER] Creating tool engine:', createGoal);
         }
-        // ALWAYS use dynamic predicate for signaling - engine_post has reliability issues
-        // with WASM engines when multiple signals are posted in quick succession
-        const signalResult = this.query(`assertz(deepclause_mi:session_pending_signal('${this.sessionId}', execute_tool("${toolName}", ${argsListStr})))`);
-        if (signalResult === null) {
-            console.error(`[TOOLS ${timestamp()}] Failed to post signal for ${toolName}`);
-            return { result: { error: `Failed to execute tool: signal assertion failed` }, outputs };
+        const createResult = this.query(createGoal);
+        if (createResult === null) {
+            return { result: { error: `Failed to create tool engine for ${toolName}` }, outputs };
         }
-        if (process.env.DEBUG_TOOLS || process.env.DEBUG_RUNNER) {
-            console.log(`[TOOLS ${timestamp()}] Signal posted for: ${toolName}`);
+        const toolEngineId = String(toJsValue(createResult.ToolEngineId));
+        if (process.env.DEBUG_RUNNER) {
+            console.log('[RUNNER] Tool engine created:', toolEngineId);
         }
-        if (process.env.DEBUG_TOOLS || process.env.DEBUG_RUNNER) {
-            console.log(`[TOOLS ${timestamp()}] Posted signal, now stepping engine for: ${toolName}`);
-        }
-        // Step engine and handle yields until we get tool_result
-        let stepCount = 0;
-        while (true) {
-            stepCount++;
-            const step = this.stepEngine();
-            if (process.env.DEBUG_TOOLS || process.env.DEBUG_RUNNER) {
-                console.log(`[TOOLS ${timestamp()}] Tool ${toolName} step #${stepCount}: status=${step.status}, content=${step.content?.substring(0, 50)}`);
-            }
-            switch (step.status) {
-                case 'tool_result': {
-                    // Tool execution completed
-                    const payload = step.payload;
-                    if (process.env.DEBUG_TOOLS) {
-                        console.log(`[TOOLS ${timestamp()}] Tool ${toolName} got tool_result, returning`);
-                    }
-                    return { result: payload?.result, outputs };
+        try {
+            // Step the tool engine until it finishes
+            while (true) {
+                const stepGoal = `deepclause_mi:step_tool_engine('${toolEngineId}', Status, Content, Payload)`;
+                const stepResult = this.query(stepGoal);
+                if (stepResult === null) {
+                    return { result: { error: `Failed to step tool engine` }, outputs };
                 }
-                case 'output': {
-                    // Tool body emitted output
-                    if (step.content) {
-                        outputs.push(step.content);
-                        onOutput(step.content);
-                    }
-                    break;
+                const status = String(toJsValue(stepResult.Status));
+                const content = String(toJsValue(stepResult.Content) ?? '');
+                const payload = toJsValue(stepResult.Payload);
+                if (process.env.DEBUG_RUNNER) {
+                    console.log('[RUNNER] Tool engine step:', status, content?.substring(0, 100));
                 }
-                case 'log': {
-                    // Log message - ignore for now
-                    break;
-                }
-                case 'request_exec': {
-                    // Tool body needs to call an external tool via exec()
-                    const payload = step.payload;
-                    if (payload) {
+                switch (status) {
+                    case 'finished': {
+                        // Tool completed - extract result from payload
+                        const toolResult = payload?.result ?? true;
                         if (process.env.DEBUG_RUNNER) {
-                            console.log('[RUNNER] request_exec for tool:', payload.toolName);
-                            console.log('[RUNNER] Available tools:', Array.from(registeredTools.keys()));
+                            console.log('[RUNNER] Tool finished with result:', JSON.stringify(toolResult).substring(0, 200));
                         }
-                        const tool = registeredTools.get(payload.toolName);
-                        if (tool) {
-                            const mappedArgs = this.argsToObject(payload.args, tool);
-                            if (process.env.DEBUG_RUNNER) {
-                                console.log('[RUNNER] Mapped args for', payload.toolName, ':', mappedArgs);
-                            }
-                            try {
-                                const execResult = await tool.execute(mappedArgs);
-                                if (process.env.DEBUG_RUNNER) {
-                                    console.log('[RUNNER] Inline exec result:', execResult);
-                                }
-                                // Post result back to engine
-                                this.postExecDone('success', execResult);
-                            }
-                            catch (error) {
-                                const errMsg = error instanceof Error ? error.message : String(error);
-                                console.error(`${payload.toolName} failed:`, error);
-                                this.postExecDone('error', errMsg);
-                            }
+                        return { result: toolResult, outputs };
+                    }
+                    case 'request_exec': {
+                        // Tool is calling exec() - handle it inline
+                        const execToolName = String(payload?.toolName ?? '');
+                        const execArgs = payload?.args;
+                        if (process.env.DEBUG_RUNNER) {
+                            console.log('[RUNNER] Tool exec request:', execToolName, execArgs);
+                        }
+                        // Find and execute the registered tool
+                        const tool = registeredTools.get(execToolName);
+                        if (!tool) {
+                            // Tool not found - post failure and continue
+                            const postGoal = `deepclause_mi:post_exec_result('${this.sessionId}', failure, "Tool not found: ${execToolName}")`;
+                            this.query(postGoal);
                         }
                         else {
-                            this.postExecDone('error', `Tool not found: ${payload.toolName}`);
+                            try {
+                                const argsObj = this.argsToObject(execArgs, tool);
+                                const execResult = await tool.execute(argsObj);
+                                const postGoal = `deepclause_mi:post_exec_result('${this.sessionId}', success, ${this.toPrologTerm(execResult)})`;
+                                this.query(postGoal);
+                            }
+                            catch (error) {
+                                const message = error instanceof Error ? error.message : String(error);
+                                const postGoal = `deepclause_mi:post_exec_result('${this.sessionId}', failure, "${message.replace(/"/g, '\\"')}")`;
+                                this.query(postGoal);
+                            }
                         }
+                        break;
                     }
-                    break;
-                }
-                case 'request_agent_loop': {
-                    // Tool body contains a nested task() - run the agent loop
-                    if (!options) {
-                        console.warn('[RUNNER] Cannot run nested task() - no options available');
-                        return { result: { error: 'Nested task() requires agent loop options' }, outputs };
+                    case 'output': {
+                        outputs.push(content);
+                        onOutput(content);
+                        break;
                     }
-                    if (process.env.DEBUG_RUNNER) {
-                        console.log('[RUNNER] Nested task() in tool - running agent loop');
-                    }
-                    // Run nested agent loop and collect results
-                    // Note: This is synchronous from the Prolog perspective - we consume all events
-                    for await (const event of this.handleAgentLoop(step.payload, '', options)) {
+                    case 'log': {
                         if (process.env.DEBUG_RUNNER) {
-                            console.log('[RUNNER] Nested agent loop event:', event.type, event.content?.substring(0, 50));
+                            console.log('[RUNNER] Tool log:', content);
                         }
-                        if (event.type === 'output' && event.content) {
-                            outputs.push(event.content);
-                            onOutput(event.content);
+                        break;
+                    }
+                    case 'error': {
+                        return { result: { error: content }, outputs };
+                    }
+                    default: {
+                        if (process.env.DEBUG_RUNNER) {
+                            console.log('[RUNNER] Unknown tool engine status:', status);
                         }
-                        // Other event types (stream, tool_call, etc.) are also forwarded
+                        return { result: { error: `Unknown tool engine status: ${status}` }, outputs };
                     }
-                    if (process.env.DEBUG_RUNNER) {
-                        console.log('[RUNNER] Nested agent loop completed, continuing tool execution');
-                    }
-                    break;
                 }
-                case 'error': {
-                    return { result: { error: step.content }, outputs };
-                }
-                case 'answer': {
-                    // Tool body called answer() - treat as a tool result
-                    // The answer text becomes the result
-                    return { result: step.content ?? true, outputs };
-                }
-                case 'finished': {
-                    // Engine finished without tool_result - shouldn't happen
-                    return { result: { error: 'Tool execution ended unexpectedly' }, outputs };
-                }
-                default: {
-                    // Unknown step - return error to prevent infinite loop
-                    console.warn('[RUNNER] Unexpected step during tool execution:', step.status);
-                    return { result: { error: `Unexpected step: ${step.status}` }, outputs };
-                }
+            }
+        }
+        finally {
+            // Clean up tool engine
+            const destroyGoal = `deepclause_mi:destroy_tool_engine('${toolEngineId}')`;
+            this.query(destroyGoal);
+            if (process.env.DEBUG_RUNNER) {
+                console.log('[RUNNER] Tool engine destroyed:', toolEngineId);
             }
         }
     }
@@ -974,40 +870,6 @@ export class DMLRunner {
         else {
             const escapedErr = this.toPrologTerm(result.error ?? 'Unknown error');
             this.query(`deepclause_mi:post_exec_result('${this.sessionId}', failure, ${escapedErr})`);
-        }
-    }
-    /**
-     * Post exec_done signal after tool execution (from exec/2 in DML).
-     * Uses post_signal_to_engine helper which has fallback to session_pending_signal.
-     */
-    postExecDone(status, result) {
-        const resultStr = this.toPrologTerm(result);
-        // Try to assert result and post signal using the Prolog helper (has fallback)
-        try {
-            this.query(`retractall(deepclause_mi:session_exec_result('${this.sessionId}', _)),
-         assertz(deepclause_mi:session_exec_result('${this.sessionId}', result{status: ${status}, result: ${resultStr}})),
-         deepclause_mi:post_signal_to_engine('${this.sessionId}', exec_done)`);
-        }
-        catch (err) {
-            // If the combined query fails, try to at least post exec_done with an error
-            console.error('[RUNNER] Failed to post exec result:', err);
-            try {
-                // Fallback: assert a simple error result and post exec_done via helper
-                const fallbackErr = this.toPrologTerm('Internal error posting result');
-                this.query(`retractall(deepclause_mi:session_exec_result('${this.sessionId}', _)),
-           assertz(deepclause_mi:session_exec_result('${this.sessionId}', result{status: error, result: ${fallbackErr}})),
-           deepclause_mi:post_signal_to_engine('${this.sessionId}', exec_done)`);
-            }
-            catch (fallbackErr) {
-                // Last resort: try using the dynamic predicate directly
-                console.error('[RUNNER] Fallback also failed:', fallbackErr);
-                try {
-                    this.query(`assertz(deepclause_mi:session_pending_signal('${this.sessionId}', exec_done))`);
-                }
-                catch {
-                    console.error('[RUNNER] Could not post exec_done - engine may be in bad state');
-                }
-            }
         }
     }
     /**

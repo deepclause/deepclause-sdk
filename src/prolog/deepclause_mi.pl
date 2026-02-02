@@ -23,7 +23,11 @@
     post_agent_result/4,
     post_exec_result/3,
     provide_input/2,
-    mi/3
+    mi/3,
+    % Tool engine predicates for isolated tool execution
+    create_tool_engine/4,
+    step_tool_engine/4,
+    destroy_tool_engine/1
 ]).
 
 :- use_module(deepclause_strings).
@@ -496,35 +500,31 @@ add_trace_with_result(SessionId, Type, Predicate, Args, Result, Depth) :-
     ).
 
 %% ============================================================
-%% Agent Signal Loop - Handles tool execution during agent loops
+%% Agent Signal Loop - SIMPLIFIED
 %% ============================================================
+%%
+%% With isolated tool execution, the agent signal loop is much simpler.
+%% It only needs to wait for agent_done from the host after a task() completes.
+%% Tool calls are handled separately via execute_tool_isolated/4.
 
 %% handle_agent_signals(+SessionId, +StateIn, -StateOut)
-%% Loops to handle signals from the host until agent_done is received.
-%% This allows tools to execute inline during the agent loop,
-%% sharing state with the task and supporting backtracking.
-%%
-%% IMPORTANT: Signals are received via session_pending_signal (dynamic predicate)
-%% which is more reliable than engine_fetch for WASM engines.
+%% Wait for agent_done signal from host after task() request.
+%% State passes through unchanged (tool results don't modify task state).
 handle_agent_signals(SessionId, StateIn, StateOut) :-
-    % Get signal - prefer dynamic predicate, fall back to engine_fetch
     get_next_signal(SessionId, Signal),
     handle_signal(SessionId, Signal, StateIn, StateOut).
 
 %% get_next_signal(+SessionId, -Signal)
 %% Retrieves the next signal, preferring dynamic predicate over engine_fetch.
-%% If engine_fetch fails, retries the dynamic predicate (signal may have been posted while we were trying).
 get_next_signal(SessionId, Signal) :-
     (   retract(session_pending_signal(SessionId, Signal))
     ->  true
     ;   catch(
             engine_fetch(Signal),
             _FetchError,
-            % engine_fetch failed - check dynamic predicate again (no sleep - not available in Node.js WASM)
             (   retract(session_pending_signal(SessionId, Signal))
             ->  true
-            ;   % Still no signal - report error
-                Signal = error_signal(no_signal_available)
+            ;   Signal = error_signal(no_signal_available)
             )
         )
     ).
@@ -533,45 +533,22 @@ get_next_signal(SessionId, Signal) :-
 handle_signal(_SessionId, agent_done, State, State) :- !.
 
 handle_signal(_SessionId, error_signal(Error), State, State) :-
-    % engine_fetch failed - return error and stop
     !,
     format(atom(ErrMsg), 'Engine fetch error: ~w', [Error]),
-    engine_yield(tool_result(error{message: ErrMsg})).
+    engine_yield(error(ErrMsg)).
 
 handle_signal(SessionId, exec_done, StateIn, StateOut) :-
-    % Stale exec_done from a previous tool - ignore and continue
+    % Stale signal - ignore and continue waiting
     !,
     handle_agent_signals(SessionId, StateIn, StateOut).
 
-handle_signal(SessionId, execute_tool(ToolName, Args), StateIn, StateOut) :-
+handle_signal(SessionId, _Unknown, StateIn, StateOut) :-
+    % Unknown signal - ignore and continue waiting
     !,
-    catch(
-        (   call_tool_inline(SessionId, ToolName, Args, StateIn, StateMid, Result),
-            engine_yield(tool_result(Result))
-        ),
-        Error,
-        (   Error == '$answer_commit'
-        ->  % Tool body called answer() - this is a valid completion
-            % The answer was already yielded by answer/1, so don't yield again
-            StateMid = StateIn
-        ;   format(atom(ErrMsg), 'Runtime error: ~w', [Error]),
-            StateMid = StateIn,
-            engine_yield(tool_result(error{message: ErrMsg}))
-        )
-    ),
-    handle_agent_signals(SessionId, StateMid, StateOut).
-
-handle_signal(SessionId, set_input(Value), StateIn, StateOut) :-
-    !,
-    % Store user input - used by ask_user tool
-    assertz(session_user_input(SessionId, Value)),
     handle_agent_signals(SessionId, StateIn, StateOut).
 
-handle_signal(SessionId, Unknown, StateIn, StateOut) :-
-    % Unknown signal, just continue
-    format(user_error, 'Unknown signal: ~w~n', [Unknown]),
-    handle_agent_signals(SessionId, StateIn, StateOut).
-
+%% call_tool_inline/6 is DEPRECATED - kept for backwards compatibility only
+%% New code should use execute_tool_isolated/4 instead.
 %% call_tool_inline(+SessionId, +ToolName, +Args, +StateIn, -StateOut, -Result)
 %% Executes a DML-defined tool inline in the current engine.
 %% The tool body runs through the meta-interpreter, sharing state.
@@ -623,6 +600,110 @@ call_tool_inline(SessionId, ToolName, Args, StateIn, StateOut, Result) :-
     ;   % No DML body - should not happen if host checked
         StateOut = StateIn,
         format(atom(Result), 'Tool ~w not found', [ToolName])
+    ).
+
+%% ============================================================
+%% ISOLATED Tool Execution (Engine-based for exec() support)
+%% ============================================================
+%%
+%% Tools run in their own engine to support exec() calls.
+%% TypeScript creates the engine, steps it, handles request_exec,
+%% and collects the result when the engine finishes.
+%% exec() results are posted via the SESSION's exec_result mechanism.
+
+%% Tool engine dynamic predicates
+:- dynamic tool_engine/2.        % tool_engine(ToolEngineId, Engine)
+
+%% create_tool_engine(+SessionId, +ToolName, +Args, -ToolEngineId)
+%% Creates an engine to execute a DML tool. Returns a unique engine ID.
+create_tool_engine(SessionId, ToolName, Args, ToolEngineId) :-
+    atom_string(ToolNameAtom, ToolName),
+    % Generate unique tool engine ID
+    gensym(tool_engine_, ToolEngineId),
+    (   clause(SessionId:tool(ToolPattern), Body),
+        ToolPattern =.. [ToolNameAtom|PatternArgs]
+    ->  length(PatternArgs, TotalArity),
+        length(Args, InputArity),
+        length(HeadArgs, TotalArity),
+        fill_args(HeadArgs, Args, InputArity),
+        ToolHead =.. [ToolNameAtom|HeadArgs],
+        ToolHead = ToolPattern,
+        (session_params(SessionId, Params) -> true ; Params = params{}),
+        InitialState = state{memory: [], params: Params, context_stack: [], depth: 0},
+        % Create goal that will yield the result
+        Goal = (
+            nb_setval(current_session_id, SessionId),
+            catch(
+                (mi_call(Body, InitialState, _FinalState),
+                 extract_tool_result_simple(TotalArity, InputArity, HeadArgs, ToolResult),
+                 engine_yield(tool_finished(ToolResult))),
+                Error,
+                (handle_tool_engine_error(Error, ErrResult),
+                 engine_yield(tool_finished(ErrResult)))
+            )
+        ),
+        engine_create(_, Goal, Engine),
+        assertz(tool_engine(ToolEngineId, Engine))
+    ;   % Tool not found - create engine that just yields error
+        engine_create(_, engine_yield(tool_finished(error{message: "Tool not found"})), Engine),
+        assertz(tool_engine(ToolEngineId, Engine))
+    ).
+
+%% handle_tool_engine_error(+Error, -Result)
+handle_tool_engine_error('$answer_commit', true) :- !.
+handle_tool_engine_error(Error, error{message: ErrMsg}) :-
+    format(atom(ErrMsg), '~w', [Error]).
+
+%% step_tool_engine(+ToolEngineId, -Status, -Content, -Payload)
+%% Steps the tool engine, similar to step_engine but for tools.
+step_tool_engine(ToolEngineId, Status, Content, Payload) :-
+    (   tool_engine(ToolEngineId, Engine)
+    ->  catch(
+            (   engine_next(Engine, Result)
+            ->  process_tool_engine_result(Result, Status, Content, Payload)
+            ;   % Engine exhausted without yielding - treat as failure
+                Status = finished,
+                Content = '',
+                Payload = payload{result: false}
+            ),
+            Error,
+            (   format(atom(ErrMsg), 'Tool engine error: ~w', [Error]),
+                Status = error,
+                Content = ErrMsg,
+                Payload = none
+            )
+        )
+    ;   Status = error,
+        Content = 'No tool engine found',
+        Payload = none
+    ).
+
+%% process_tool_engine_result(+Result, -Status, -Content, -Payload)
+process_tool_engine_result(tool_finished(ToolResult), finished, '', payload{result: ToolResult}) :- !.
+process_tool_engine_result(request_exec(Tool, Args), request_exec, '',
+    payload{toolName: Tool, args: Args}) :- !.
+process_tool_engine_result(output(Text), output, Text, none) :- !.
+process_tool_engine_result(log(Text), log, Text, none) :- !.
+process_tool_engine_result(Other, error, Msg, none) :-
+    format(atom(Msg), 'Unknown tool engine result: ~w', [Other]).
+
+%% destroy_tool_engine(+ToolEngineId)
+destroy_tool_engine(ToolEngineId) :-
+    (   tool_engine(ToolEngineId, Engine)
+    ->  catch(engine_destroy(Engine), _, true)
+    ;   true
+    ),
+    retractall(tool_engine(ToolEngineId, _)).
+
+%% Helper predicates (shared with old isolated execution)
+
+%% extract_tool_result_simple(+TotalArity, +InputArity, +HeadArgs, -Result)
+extract_tool_result_simple(TotalArity, InputArity, HeadArgs, Result) :-
+    (   TotalArity > InputArity,
+        last(HeadArgs, LastArg),
+        nonvar(LastArg)
+    ->  Result = LastArg
+    ;   Result = true
     ).
 
 %% fill_args(+HeadArgs, +InputArgs, +Count)

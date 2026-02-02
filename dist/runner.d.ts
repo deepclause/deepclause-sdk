@@ -24,6 +24,11 @@ export interface InternalRunOptions {
 }
 /**
  * DML execution engine
+ *
+ * ARCHITECTURE NOTE:
+ * DML-defined tools now run in ISOLATED Prolog engines, not sharing state
+ * with the parent task. This simplifies parallel tool execution (AI SDK
+ * may call multiple tools concurrently) and eliminates race conditions.
  */
 export declare class DMLRunner {
     private swipl;
@@ -31,9 +36,6 @@ export declare class DMLRunner {
     private engine;
     private sessionId;
     private currentMemory;
-    private toolMutexLocked;
-    private toolMutexQueue;
-    private toolExecutionDepth;
     constructor(swipl: SWIPLModule, options: RunnerOptions);
     /**
      * Get the current conversation memory
@@ -90,21 +92,18 @@ export declare class DMLRunner {
      */
     private buildAgentTools;
     /**
-     * Acquire the tool execution mutex
-     * Returns a release function to call when done
+     * Execute a DML-defined tool in isolation using its own engine
+     *
+     * SIMPLIFIED: Tools now run in their own isolated Prolog engine, not sharing
+     * state with the parent task. This eliminates:
+     * - Race conditions from parallel tool calls
+     * - Complex signal-based coordination
+     * - Mutex requirements
+     *
+     * The tool can still call exec() for external tools (TypeScript registered tools).
+     * We step the tool engine and handle request_exec signals.
      */
-    private acquireToolMutex;
-    /**
-     * Execute a tool inline via the main Prolog engine
-     * Posts execute_tool signal, handles yields (output, exec requests), returns tool_result
-     * Tools now share state with the task() that calls them.
-     * Uses a mutex to serialize concurrent tool calls (AI SDK may execute multiple tools in parallel).
-     */
-    private executeToolInline;
-    /**
-     * Internal implementation of executeToolInline (called with mutex held)
-     */
-    private executeToolInlineImpl;
+    private executeToolIsolated;
     /**
      * Extract memory from payload (now passed via state threading)
      */
@@ -117,11 +116,6 @@ export declare class DMLRunner {
      * Post exec result back to Prolog
      */
     private postExecResult;
-    /**
-     * Post exec_done signal after tool execution (from exec/2 in DML).
-     * Uses post_signal_to_engine helper which has fallback to session_pending_signal.
-     */
-    private postExecDone;
     /**
      * Provide user input to waiting Prolog
      */
