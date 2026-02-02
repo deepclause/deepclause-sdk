@@ -608,7 +608,16 @@ mi_call(task(Desc), StateIn, StateOut) :-
     handle_agent_signals(SessionId, StateIn, StateAfterAgent),
     session_agent_result(SessionId, Result),
     retract(session_agent_result(SessionId, _)),
-    Result.success == true,
+    % Check success and warn on failure
+    (   Result.success == true
+    ->  true
+    ;   (   get_dict(error, Result, ErrorMsg), ErrorMsg \= ""
+        ->  format(atom(WarnMsg), 'Warning: task/1 failed: ~w', [ErrorMsg])
+        ;   format(atom(WarnMsg), 'Warning: task/1 failed (success=false)', [])
+        ),
+        engine_yield(output(WarnMsg)),
+        fail
+    ),
     % Use full messages from agent loop result
     (   get_dict(messages, Result, Messages), Messages \= []
     ->  % Replace memory with all messages from agent (includes system, history, and new messages)
@@ -647,7 +656,16 @@ mi_call(prompt(Desc), StateIn, StateOut) :-
     handle_agent_signals(SessionId, StateIn, StateOut),
     session_agent_result(SessionId, Result),
     retract(session_agent_result(SessionId, _)),
-    Result.success == true.
+    % Check success and warn on failure
+    (   Result.success == true
+    ->  true
+    ;   (   get_dict(error, Result, ErrorMsg), ErrorMsg \= ""
+        ->  format(atom(WarnMsg), 'Warning: prompt/1 failed: ~w', [ErrorMsg])
+        ;   format(atom(WarnMsg), 'Warning: prompt/1 failed (success=false)', [])
+        ),
+        engine_yield(output(WarnMsg)),
+        fail
+    ).
     % Don't modify memory - but state may have changed from tool calls
 
 %% mi_call(prompt_named(Desc, Vars, VarNames), +StateIn, -StateOut)
@@ -659,6 +677,7 @@ mi_call(prompt_named(Desc, Vars, VarNames), StateIn, StateOut) :-
 %% mi_call_prompt_n(+Desc, +Vars, +VarNames, +StateIn, -StateOut)
 %% Like mi_call_task_n but uses empty memory and doesn't update memory
 mi_call_prompt_n(Desc, Vars, VarNames, StateIn, StateOut) :-
+    !,  % Cut to make this predicate deterministic - no backtracking once started
     get_params(StateIn, Params),
     interpolate_desc(Desc, Params, InterpDesc),
     get_session_id(SessionId),
@@ -669,12 +688,24 @@ mi_call_prompt_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     handle_agent_signals(SessionId, StateIn, StateOut),
     session_agent_result(SessionId, Result),
     retract(session_agent_result(SessionId, _)),
-    Result.success == true,
+    % Check success and warn on failure
+    (   Result.success == true
+    ->  true
+    ;   length(VarNames, Arity),
+        ActualArity is Arity + 1,
+        (   get_dict(error, Result, ErrorMsg), ErrorMsg \= ""
+        ->  format(atom(WarnMsg), 'Warning: prompt/~w failed: ~w', [ActualArity, ErrorMsg])
+        ;   format(atom(WarnMsg), 'Warning: prompt/~w failed (success=false)', [ActualArity])
+        ),
+        engine_yield(output(WarnMsg)),
+        fail
+    ),
     bind_task_variables(Result.variables, VarNames, Vars).
     % Don't modify memory - but state may have changed from tool calls
 
 %% mi_call_task_n(+Desc, +Vars, +VarNames, +StateIn, -StateOut)
 mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
+    !,  % Cut to make this predicate deterministic - no backtracking once started
     get_params(StateIn, Params),
     interpolate_desc(Desc, Params, InterpDesc),
     get_session_id(SessionId),
@@ -685,7 +716,18 @@ mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     handle_agent_signals(SessionId, StateIn, StateAfterAgent),
     session_agent_result(SessionId, Result),
     retract(session_agent_result(SessionId, _)),
-    Result.success == true,
+    % Check success and warn on failure
+    (   Result.success == true
+    ->  true
+    ;   length(VarNames, Arity),
+        ActualArity is Arity + 1,
+        (   get_dict(error, Result, ErrorMsg), ErrorMsg \= ""
+        ->  format(atom(WarnMsg), 'Warning: task/~w failed: ~w', [ActualArity, ErrorMsg])
+        ;   format(atom(WarnMsg), 'Warning: task/~w failed (success=false)', [ActualArity])
+        ),
+        engine_yield(output(WarnMsg)),
+        fail
+    ),
     bind_task_variables(Result.variables, VarNames, Vars),
     % Use full messages from agent loop result
     (   get_dict(messages, Result, Messages), Messages \= []
@@ -877,24 +919,29 @@ mi_call((A, B), StateIn, StateOut) :-
     mi_call(A, StateIn, State1),
     mi_call(B, State1, StateOut).
 
-%% mi_call((A ; B), +StateIn, -StateOut)
-%% Disjunction - BACKTRACKABLE! On failure, StateIn is restored
-mi_call((A ; B), StateIn, StateOut) :-
-    (   mi_call(A, StateIn, StateOut)
-    ;   mi_call(B, StateIn, StateOut)
-    ).
-
 %% mi_call((Cond -> Then ; Else), +StateIn, -StateOut)
+%% MUST come before disjunction clause - if-then-else is syntactically a disjunction!
 mi_call((Cond -> Then ; Else), StateIn, StateOut) :-
+    !,  % Commit to this clause for if-then-else patterns
     (   mi_call(Cond, StateIn, State1)
     ->  mi_call(Then, State1, StateOut)
     ;   mi_call(Else, StateIn, StateOut)
     ).
 
 %% mi_call((Cond -> Then), +StateIn, -StateOut)
+%% Soft cut without else branch
 mi_call((Cond -> Then), StateIn, StateOut) :-
+    !,  % Commit to this clause
     (   mi_call(Cond, StateIn, State1)
     ->  mi_call(Then, State1, StateOut)
+    ).
+
+%% mi_call((A ; B), +StateIn, -StateOut)
+%% Disjunction - BACKTRACKABLE! On failure, StateIn is restored
+%% NOTE: This clause must come AFTER if-then-else clauses
+mi_call((A ; B), StateIn, StateOut) :-
+    (   mi_call(A, StateIn, StateOut)
+    ;   mi_call(B, StateIn, StateOut)
     ).
 
 %% mi_call(\+(Goal), +StateIn, -StateOut)
@@ -1353,7 +1400,7 @@ mi_call_dispatch(Goal, StateIn, StateOut) :-
     get_depth(StateIn, Depth),
     Goal =.. [Functor|Args],
     add_trace_entry(SessionId, call, Functor, Args, Depth),
-    % NO CUT HERE! This allows backtracking through clause/2
+    % Find a matching clause - allows backtracking to try multiple clauses
     clause(SessionId:Goal, Body),
     NewDepth is Depth + 1,
     set_depth(StateIn, NewDepth, State1),

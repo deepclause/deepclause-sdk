@@ -4,6 +4,8 @@
  */
 import { generateText, streamText, tool as aiTool, jsonSchema } from 'ai';
 import { createModelProvider } from './prolog/bridge.js';
+/** Maximum number of retries for LLM error finish reasons */
+const MAX_ERROR_RETRIES = 3;
 /**
  * Clean Prolog dict markers ($tag, $t) from tool results
  * This makes the data more readable for the LLM
@@ -51,6 +53,7 @@ export async function runAgentLoop(options) {
     const variables = {};
     let finished = false;
     let success = false;
+    let errorRetryCount = 0;
     // Build the AI SDK tools - use CoreTool type for compatibility
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const aiTools = {};
@@ -250,7 +253,16 @@ Please try again - invoke the tool correctly using the tool interface.`,
                             // Don't break - continue the loop to retry
                             continue;
                         }
-                        // Break the loop on other errors to avoid infinite loop
+                        // Retry on general error finish reason (up to errorRetryCount times)
+                        errorRetryCount++;
+                        if (errorRetryCount <= MAX_ERROR_RETRIES) {
+                            debugLog(`ERROR: LLM returned error finish reason (attempt ${errorRetryCount}/${MAX_ERROR_RETRIES}). Retrying...`);
+                            // Add a small delay before retry to avoid hammering the API
+                            await new Promise(resolve => setTimeout(resolve, 1000 * errorRetryCount));
+                            continue;
+                        }
+                        // Break the loop after max retries
+                        debugLog(`ERROR: LLM returned error finish reason. Max retries (${MAX_ERROR_RETRIES}) exceeded.`);
                         outputs.push('Error: LLM API returned an error. Check API key and rate limits.');
                         break;
                     }
@@ -381,7 +393,16 @@ Please try again - invoke the tool correctly using the tool interface.`,
                             // Don't break - continue the loop to retry
                             continue;
                         }
-                        debugLog(`ERROR: LLM returned error finish reason. This usually means the API call failed.`);
+                        // Retry on general error finish reason (up to errorRetryCount times)
+                        errorRetryCount++;
+                        if (errorRetryCount <= MAX_ERROR_RETRIES) {
+                            debugLog(`ERROR: LLM returned error finish reason (attempt ${errorRetryCount}/${MAX_ERROR_RETRIES}). Retrying...`);
+                            // Add a small delay before retry to avoid hammering the API
+                            await new Promise(resolve => setTimeout(resolve, 1000 * errorRetryCount));
+                            continue;
+                        }
+                        // Break the loop after max retries
+                        debugLog(`ERROR: LLM returned error finish reason. Max retries (${MAX_ERROR_RETRIES}) exceeded.`);
                         outputs.push('Error: LLM API returned an error. Check API key and rate limits.');
                         break;
                     }
