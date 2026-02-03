@@ -1,0 +1,137 @@
+% ============================================================================
+% Knowledge Base Agent - Demonstrates tools with task() and global state
+% ============================================================================
+%
+% This example shows:
+%   1. Prolog facts as a knowledge base
+%   2. Tools that use task() internally for LLM reasoning
+%   3. Dynamic state modification with assert/retract
+%   4. Combining symbolic reasoning with LLM capabilities
+%
+% Usage:
+%   deepclause run dml-examples/knowledge-agent.dml
+%
+% ============================================================================
+
+% --- Knowledge Base (Prolog facts) ---
+
+% Products with prices (using strings for LLM compatibility)
+product("laptop", 999).
+product("phone", 699).
+product("tablet", 449).
+product("headphones", 199).
+product("keyboard", 89).
+
+% Product categories
+category("laptop", "electronics").
+category("phone", "electronics").
+category("tablet", "electronics").
+category("headphones", "accessories").
+category("keyboard", "accessories").
+
+% Discount rules
+discount_rule("bulk", "10% off for 3+ items").
+discount_rule("student", "15% off with valid student ID").
+discount_rule("holiday", "20% off during holiday sales").
+
+% Dynamic facts for cart (can be modified at runtime)
+:- dynamic cart_item/2.  % cart_item(Product, Quantity)
+
+% --- Tools that combine Prolog knowledge with LLM reasoning ---
+
+% Ask user - wrapper for the ask_user external tool
+tool(ask_user(Prompt, Response), "Ask the user a question and get their response") :-
+    exec(ask_user(prompt: Prompt), Result),
+    get_dict(user_response, Result, Response).
+
+% Query products - returns raw data (LLM will format it naturally)
+tool(list_products(Products), "List all available products with prices. Returns list of product-price pairs.") :-
+    findall(product(Name, Price), product(Name, Price), Products).
+
+% Add to cart - pure Prolog logic
+tool(add_to_cart(Product, Qty, Status), "Add a product to the shopping cart") :-
+    (   product(Product, _)
+    ->  (   retract(cart_item(Product, OldQty))
+        ->  NewQty is OldQty + Qty
+        ;   NewQty = Qty
+        ),
+        assert(cart_item(Product, NewQty)),
+        format(string(Status), "Added ~s x~w to cart", [Product, NewQty])
+    ;   format(string(Status), "Product '~s' not found", [Product])
+    ).
+
+% Show cart with total - returns raw data
+tool(show_cart(Items, Total), "Show current cart contents and total. Returns items list and total price.") :-
+    findall(cart_item(P, Qty, Price, Subtotal), (
+        cart_item(P, Qty),
+        product(P, Price),
+        Subtotal is Price * Qty
+    ), Items),
+    sum_subtotals(Items, Total).
+
+% Get recommendation - returns raw data for LLM to reason about
+tool(get_recommendation(Category, Products, Discounts), "Get products in a category and available discounts for LLM to make recommendation") :-
+    findall(product(P, Price), (category(P, Category), product(P, Price)), Products),
+    findall(discount(Type, Rule), discount_rule(Type, Rule), Discounts).
+
+% Check discount - returns rule info for LLM to explain
+tool(check_discount(DiscountType, Rule, CartItems, Total), "Check if a discount type exists and get cart info for calculation") :-
+    (   discount_rule(DiscountType, Rule)
+    ->  findall(cart_item(P, Qty, Price), (cart_item(P, Qty), product(P, Price)), CartItems),
+        findall(S, (cart_item(P, Q), product(P, Pr), S is Pr * Q), Subtotals),
+        sum_list(Subtotals, Total)
+    ;   Rule = "Unknown discount type",
+        CartItems = [],
+        Total = 0
+    ).
+
+% --- Helper predicates ---
+
+sum_subtotals([], 0).
+sum_subtotals([cart_item(_, _, _, S)|Rest], Total) :-
+    sum_subtotals(Rest, RestTotal),
+    Total is S + RestTotal.
+
+sum_list([], 0).
+sum_list([H|T], Sum) :- sum_list(T, Rest), Sum is H + Rest.
+
+% --- Main Agent ---
+
+agent_main :-
+    system("You are a helpful shopping assistant. You have access to a product catalog
+and shopping cart. Use the available tools to help customers:
+- list_products: Show available products
+- add_to_cart(product, quantity): Add items to cart  
+- show_cart: Get cart items and total
+- get_recommendation(category): Get products and discounts for a category
+- check_discount(type): Get discount rule and cart info (bulk, student, holiday)
+
+Tools return raw data - format it nicely when presenting to the user."),
+
+    output("════════════════════════════════════════════"),
+    output("  Welcome to the Knowledge Base Shop!"),
+    output("════════════════════════════════════════════"),
+    
+    % Interactive shopping session
+    shopping_loop.
+
+% Simple interaction loop - runs until user says done
+shopping_loop :-
+    task("Help the customer with their shopping.
+Use ask_user to find out what they want to do.
+Use the available tools to assist them:
+- list_products returns raw product data - format it nicely
+- add_to_cart(product, qty) adds items  
+- show_cart returns items list and total - format nicely
+- get_recommendation(category) returns products and discounts - make a recommendation
+- check_discount(type) returns rule and cart info - calculate and explain savings
+
+When finished with their request, call finish(true) to continue the conversation.
+If the user says they're done, want to checkout, or goodbye, call finish(false) to end."),
+    !,  % User wants to continue
+    shopping_loop.
+
+shopping_loop :-
+    % Task failed (user said done) - end gracefully
+    output("\nThank you for shopping with us!"),
+    answer("Goodbye!").

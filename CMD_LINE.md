@@ -539,8 +539,8 @@ DeepClause has a layered tool system with different types of tools serving diffe
 │     Defined in DML, available to LLM during task()                    │
 │     └── Wrap external tools with custom logic/descriptions            │
 │                                                                       │
-│  3. AGENT-INTERNAL TOOLS (built into agent loop)                      │
-│     Always available to LLM during task(), cannot be overridden       │
+│  3. LLM-INTERNAL TOOLS (NOT Prolog predicates!)                       │
+│     Only callable by the LLM inside task(), not from DML code         │
 │     ├── finish(success) - REQUIRED to complete task                   │
 │     └── set_result(var, value) - store output variable values         │
 │                                                                       │
@@ -560,16 +560,32 @@ These are always available via `exec/2`:
 
 **Tip:** For Python code execution, use `vm_exec(command: "python3 -c 'your_code'")` or `vm_exec(command: "python3 script.py")`.
 
-### Agent-Internal Tools
+### LLM-Internal Tools (NOT Prolog Predicates)
 
-These are **automatically available** to the LLM during every `task()` call:
+These are **only callable by the LLM** during `task()` execution. They are NOT Prolog predicates and cannot be called directly from DML code:
 
 | Tool | Description |
 |------|-------------|
 | `finish(success)` | **Required** - Signal task completion. Pass `true` for success, `false` for failure. |
 | `set_result(variable, value)` | Store a value for an output variable. Used with `task(Desc, Var)`. |
 
-**Important:** The LLM must call `finish()` to complete any task. The `set_result()` tool is only present when the task has output variables.
+**Important:** The DML code does NOT call these directly. When you write `task("Do something", Result)`, the LLM internally uses `set_result` to populate `Result`, and `finish` to complete. The result is returned to your DML code via Prolog unification.
+
+**Wrong (these are not predicates):**
+```prolog
+agent_main :-
+    task("Generate code", Code),
+    set_result(output, Code),   % ERROR: set_result is not a predicate!
+    finish(success).            % ERROR: finish is not a predicate!
+```
+
+**Correct:**
+```prolog
+agent_main :-
+    task("Generate code", Code),  % Code is bound by LLM via set_result internally
+    output(Code),                  % output/1 IS a predicate
+    answer("Done!").               % answer/1 IS a predicate
+```
 
 ### State and Isolation
 

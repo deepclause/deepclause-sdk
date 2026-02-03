@@ -23,13 +23,19 @@
     post_agent_result/4,
     post_exec_result/3,
     provide_input/2,
-    mi/3
+    mi/3,
+    % Tool engine predicates for isolated tool execution
+    create_tool_engine/4,
+    step_tool_engine/4,
+    destroy_tool_engine/1,
+    post_tool_agent_result/5
 ]).
 
 :- use_module(deepclause_strings).
 
 %% Allow mi_call/3 clauses to be non-contiguous
 :- discontiguous mi_call/3.
+:- discontiguous transform_task_calls/3.
 
 %% Dynamic predicates for session state (engine management only, not memory!)
 :- dynamic session_engine/2.       % session_engine(SessionId, Engine)
@@ -146,7 +152,21 @@ transform_task_calls(prompt(Desc, V1, V2), Bindings, prompt_named(Desc, [V1, V2]
 transform_task_calls(prompt(Desc, V1, V2, V3), Bindings, prompt_named(Desc, [V1, V2, V3], Names)) :- !,
     maplist(var_to_name(Bindings), [V1, V2, V3], Names).
 
-%% Default: no transformation needed
+%% Recurse into arbitrary compound terms (like with_tools/2, without_tools/2, etc.)
+transform_task_calls(Term, Bindings, TransformedTerm) :-
+    compound(Term),
+    \+ is_list(Term),  % Don't decompose lists
+    Term =.. [Functor|Args],
+    Args \= [],  % Has at least one argument
+    !,
+    maplist(transform_task_calls_arg(Bindings), Args, TransformedArgs),
+    TransformedTerm =.. [Functor|TransformedArgs].
+
+%% Helper to transform each argument
+transform_task_calls_arg(Bindings, Arg, TransformedArg) :-
+    transform_task_calls(Arg, Bindings, TransformedArg).
+
+%% Default: atoms and numbers pass through unchanged
 transform_task_calls(Term, _, Term).
 
 %% var_to_name(+Bindings, +Var, -Name)
@@ -326,9 +346,12 @@ step_engine(SessionId, Status, Content, Payload) :-
 process_engine_result(output(Text), output, Text, none) :- !.
 process_engine_result(log(Text), log, Text, none) :- !.
 process_engine_result(answer(Text), answer, Text, none) :- !.
-%% Note: Memory is now passed in the payload for the agent loop
+%% Note: Memory and tool scope are now passed in the payload for the agent loop
+process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope), request_agent_loop, '', 
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope}) :- !.
+%% Legacy 4-arg format (no tool scope)
 process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory), request_agent_loop, '', 
-    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory}) :- !.
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: none}) :- !.
 process_engine_result(request_exec(Tool, Args), request_exec, '',
     payload{toolName: Tool, args: Args}) :- !.
 %% Tool result from inline tool execution
@@ -391,14 +414,11 @@ provide_input(SessionId, Input) :-
     post_signal_to_engine(SessionId, input_provided).
 
 %% post_signal_to_engine(+SessionId, +Signal)
-%% Posts a signal to the engine, with fallback to dynamic predicate
+%% Posts a signal via dynamic predicate (most reliable for WASM engines)
+%% Falls back to engine_post only if dynamic assert fails
 post_signal_to_engine(SessionId, Signal) :-
-    (   session_engine(SessionId, Engine),
-        catch(engine_post(Engine, Signal), _, fail)
-    ->  true
-    ;   % Fallback: use dynamic predicate
-        assertz(session_pending_signal(SessionId, Signal))
-    ).
+    % Always use dynamic predicate - more reliable than engine_post in WASM
+    assertz(session_pending_signal(SessionId, Signal)).
 
 %% ============================================================
 %% Meta-Interpreter Core - STATE THREADED VERSION
@@ -456,6 +476,32 @@ set_memory(StateIn, Memory, StateOut) :-
     StateOut = StateIn.put(memory, Memory).
 
 %% ============================================================
+%% Tool Scope Helpers
+%% ============================================================
+%% Tool scoping allows manual control over which tools are available
+%% in nested tasks. The scope is stored in state and passed through
+%% the request_agent_loop payload.
+
+%% get_tool_scope(+State, -Scope)
+%% Returns the current tool scope, or 'none' if not set
+get_tool_scope(State, Scope) :-
+    (   get_dict(tool_scope, State, Scope)
+    ->  true
+    ;   Scope = none
+    ).
+
+%% set_tool_scope(+StateIn, +Scope, -StateOut)
+set_tool_scope(StateIn, Scope, StateOut) :-
+    StateOut = StateIn.put(tool_scope, Scope).
+
+%% clear_tool_scope(+StateIn, -StateOut)
+clear_tool_scope(StateIn, StateOut) :-
+    (   get_dict(tool_scope, StateIn, _)
+    ->  del_dict(tool_scope, StateIn, _, StateOut)
+    ;   StateOut = StateIn
+    ).
+
+%% ============================================================
 %% Trace Helpers
 %% ============================================================
 
@@ -499,71 +545,55 @@ add_trace_with_result(SessionId, Type, Predicate, Args, Result, Depth) :-
     ).
 
 %% ============================================================
-%% Agent Signal Loop - Handles tool execution during agent loops
+%% Agent Signal Loop - SIMPLIFIED
 %% ============================================================
+%%
+%% With isolated tool execution, the agent signal loop is much simpler.
+%% It only needs to wait for agent_done from the host after a task() completes.
+%% Tool calls are handled separately via execute_tool_isolated/4.
 
 %% handle_agent_signals(+SessionId, +StateIn, -StateOut)
-%% Loops to handle signals from the host until agent_done is received.
-%% This allows tools to execute inline during the agent loop,
-%% sharing state with the task and supporting backtracking.
+%% Wait for agent_done signal from host after task() request.
+%% State passes through unchanged (tool results don't modify task state).
 handle_agent_signals(SessionId, StateIn, StateOut) :-
-    % Check if there's a pending signal in the dynamic predicate
+    get_next_signal(SessionId, Signal),
+    handle_signal(SessionId, Signal, StateIn, StateOut).
+
+%% get_next_signal(+SessionId, -Signal)
+%% Retrieves the next signal, preferring dynamic predicate over engine_fetch.
+get_next_signal(SessionId, Signal) :-
     (   retract(session_pending_signal(SessionId, Signal))
     ->  true
-    ;   % No pending signal, try engine_fetch with catch
-        catch(
+    ;   catch(
             engine_fetch(Signal),
-            FetchError,
-            (   format(user_error, 'engine_fetch error: ~w~n', [FetchError]),
-                Signal = error_signal(FetchError)
+            _FetchError,
+            (   retract(session_pending_signal(SessionId, Signal))
+            ->  true
+            ;   Signal = error_signal(no_signal_available)
             )
         )
-    ),
-    handle_signal(SessionId, Signal, StateIn, StateOut).
+    ).
 
 %% handle_signal(+SessionId, +Signal, +StateIn, -StateOut)
 handle_signal(_SessionId, agent_done, State, State) :- !.
 
 handle_signal(_SessionId, error_signal(Error), State, State) :-
-    % engine_fetch failed - return error and stop
     !,
     format(atom(ErrMsg), 'Engine fetch error: ~w', [Error]),
-    engine_yield(tool_result(error{message: ErrMsg})).
+    engine_yield(error(ErrMsg)).
 
 handle_signal(SessionId, exec_done, StateIn, StateOut) :-
-    % Stale exec_done from a previous tool - ignore and continue
+    % Stale signal - ignore and continue waiting
     !,
     handle_agent_signals(SessionId, StateIn, StateOut).
 
-handle_signal(SessionId, execute_tool(ToolName, Args), StateIn, StateOut) :-
+handle_signal(SessionId, _Unknown, StateIn, StateOut) :-
+    % Unknown signal - ignore and continue waiting
     !,
-    catch(
-        (   call_tool_inline(SessionId, ToolName, Args, StateIn, StateMid, Result),
-            engine_yield(tool_result(Result))
-        ),
-        Error,
-        (   Error == '$answer_commit'
-        ->  % Tool body called answer() - this is a valid completion
-            % The answer was already yielded by answer/1, so don't yield again
-            StateMid = StateIn
-        ;   format(atom(ErrMsg), 'Runtime error: ~w', [Error]),
-            StateMid = StateIn,
-            engine_yield(tool_result(error{message: ErrMsg}))
-        )
-    ),
-    handle_agent_signals(SessionId, StateMid, StateOut).
-
-handle_signal(SessionId, set_input(Value), StateIn, StateOut) :-
-    !,
-    % Store user input - used by ask_user tool
-    assertz(session_user_input(SessionId, Value)),
     handle_agent_signals(SessionId, StateIn, StateOut).
 
-handle_signal(SessionId, Unknown, StateIn, StateOut) :-
-    % Unknown signal, just continue
-    format(user_error, 'Unknown signal: ~w~n', [Unknown]),
-    handle_agent_signals(SessionId, StateIn, StateOut).
-
+%% call_tool_inline/6 is DEPRECATED - kept for backwards compatibility only
+%% New code should use execute_tool_isolated/4 instead.
 %% call_tool_inline(+SessionId, +ToolName, +Args, +StateIn, -StateOut, -Result)
 %% Executes a DML-defined tool inline in the current engine.
 %% The tool body runs through the meta-interpreter, sharing state.
@@ -617,6 +647,134 @@ call_tool_inline(SessionId, ToolName, Args, StateIn, StateOut, Result) :-
         format(atom(Result), 'Tool ~w not found', [ToolName])
     ).
 
+%% ============================================================
+%% ISOLATED Tool Execution (Engine-based for exec() support)
+%% ============================================================
+%%
+%% Tools run in their own engine to support exec() calls.
+%% TypeScript creates the engine, steps it, handles request_exec,
+%% and collects the result when the engine finishes.
+%% exec() results are posted via the SESSION's exec_result mechanism.
+
+%% Tool engine dynamic predicates
+:- dynamic tool_engine/2.        % tool_engine(ToolEngineId, Engine)
+
+%% create_tool_engine(+SessionId, +ToolName, +Args, -ToolEngineId)
+%% Creates an engine to execute a DML tool. Returns a unique engine ID.
+create_tool_engine(SessionId, ToolName, Args, ToolEngineId) :-
+    atom_string(ToolNameAtom, ToolName),
+    % Generate unique tool engine ID
+    gensym(tool_engine_, ToolEngineId),
+    (   clause(SessionId:tool(ToolPattern), Body),
+        ToolPattern =.. [ToolNameAtom|PatternArgs]
+    ->  length(PatternArgs, TotalArity),
+        length(Args, InputArity),
+        length(HeadArgs, TotalArity),
+        fill_args(HeadArgs, Args, InputArity),
+        ToolHead =.. [ToolNameAtom|HeadArgs],
+        ToolHead = ToolPattern,
+        (session_params(SessionId, Params) -> true ; Params = params{}),
+        InitialState = state{memory: [], params: Params, context_stack: [], depth: 0},
+        % Create goal that will yield the result
+        Goal = (
+            nb_setval(current_session_id, SessionId),
+            catch(
+                (mi_call(Body, InitialState, _FinalState),
+                 extract_tool_result_simple(TotalArity, InputArity, HeadArgs, ToolResult),
+                 engine_yield(tool_finished(ToolResult))),
+                Error,
+                (handle_tool_engine_error(Error, ErrResult),
+                 engine_yield(tool_finished(ErrResult)))
+            )
+        ),
+        engine_create(_, Goal, Engine),
+        assertz(tool_engine(ToolEngineId, Engine))
+    ;   % Tool not found - create engine that just yields error
+        engine_create(_, engine_yield(tool_finished(error{message: "Tool not found"})), Engine),
+        assertz(tool_engine(ToolEngineId, Engine))
+    ).
+
+%% handle_tool_engine_error(+Error, -Result)
+handle_tool_engine_error('$answer_commit', true) :- !.
+handle_tool_engine_error(Error, error{message: ErrMsg}) :-
+    format(atom(ErrMsg), '~w', [Error]).
+
+%% step_tool_engine(+ToolEngineId, -Status, -Content, -Payload)
+%% Steps the tool engine, similar to step_engine but for tools.
+step_tool_engine(ToolEngineId, Status, Content, Payload) :-
+    (   tool_engine(ToolEngineId, Engine)
+    ->  catch(
+            (   engine_next(Engine, Result)
+            ->  process_tool_engine_result(Result, Status, Content, Payload)
+            ;   % Engine exhausted without yielding - treat as failure
+                Status = finished,
+                Content = '',
+                Payload = payload{result: false}
+            ),
+            Error,
+            (   format(atom(ErrMsg), 'Tool engine error: ~w', [Error]),
+                Status = error,
+                Content = ErrMsg,
+                Payload = none
+            )
+        )
+    ;   Status = error,
+        Content = 'No tool engine found',
+        Payload = none
+    ).
+
+%% process_tool_engine_result(+Result, -Status, -Content, -Payload)
+process_tool_engine_result(tool_finished(ToolResult), finished, '', payload{result: ToolResult}) :- !.
+process_tool_engine_result(request_exec(Tool, Args), request_exec, '',
+    payload{toolName: Tool, args: Args}) :- !.
+process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope), request_agent_loop, '',
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope}) :- !.
+%% Legacy 4-arg format (no tool scope)
+process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory), request_agent_loop, '',
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: none}) :- !.
+process_tool_engine_result(output(Text), output, Text, none) :- !.
+process_tool_engine_result(log(Text), log, Text, none) :- !.
+process_tool_engine_result(Other, error, Msg, none) :-
+    format(atom(Msg), 'Unknown tool engine result: ~w', [Other]).
+
+%% destroy_tool_engine(+ToolEngineId)
+destroy_tool_engine(ToolEngineId) :-
+    (   tool_engine(ToolEngineId, Engine)
+    ->  catch(engine_destroy(Engine), _, true)
+    ;   true
+    ),
+    retractall(tool_engine(ToolEngineId, _)).
+
+%% post_tool_agent_result(+SessionId, +ToolEngineId, +Success, +Variables, +Messages)
+%% Posts the result of a nested agent loop back to the tool engine.
+%% Also stores in session_agent_result so the meta-interpreter can retrieve it.
+:- dynamic tool_engine_agent_result/2.  % tool_engine_agent_result(ToolEngineId, Result)
+
+post_tool_agent_result(SessionId, ToolEngineId, Success, Variables, Messages) :-
+    Result = result{success: Success, variables: Variables, messages: Messages},
+    % Store in tool_engine_agent_result (for future use)
+    retractall(tool_engine_agent_result(ToolEngineId, _)),
+    assertz(tool_engine_agent_result(ToolEngineId, Result)),
+    % Also store in session_agent_result so task() in the meta-interpreter can read it
+    retractall(session_agent_result(SessionId, _)),
+    assertz(session_agent_result(SessionId, Result)),
+    % Signal the tool engine that agent result is ready
+    (   tool_engine(ToolEngineId, Engine)
+    ->  catch(engine_post(Engine, agent_done), _, true)
+    ;   true
+    ).
+
+%% Helper predicates (shared with old isolated execution)
+
+%% extract_tool_result_simple(+TotalArity, +InputArity, +HeadArgs, -Result)
+extract_tool_result_simple(TotalArity, InputArity, HeadArgs, Result) :-
+    (   TotalArity > InputArity,
+        last(HeadArgs, LastArg),
+        nonvar(LastArg)
+    ->  Result = LastArg
+    ;   Result = true
+    ).
+
 %% fill_args(+HeadArgs, +InputArgs, +Count)
 %% Fill the first Count elements of HeadArgs with InputArgs
 fill_args(_, [], 0) :- !.
@@ -665,8 +823,9 @@ mi_call(task(Desc), StateIn, StateOut) :-
     add_trace_entry(SessionId, llm_call, task, [InterpDesc], Depth),
     collect_user_tools(SessionId, UserTools),
     get_memory(StateIn, Memory),
-    % Yield request with current memory
-    engine_yield(request_agent_loop(InterpDesc, [], UserTools, Memory)),
+    get_tool_scope(StateIn, ToolScope),
+    % Yield request with current memory and tool scope
+    engine_yield(request_agent_loop(InterpDesc, [], UserTools, Memory, ToolScope)),
     % Handle signals (tool calls) until agent_done
     handle_agent_signals(SessionId, StateIn, StateAfterAgent),
     session_agent_result(SessionId, Result),
@@ -713,8 +872,9 @@ mi_call(prompt(Desc), StateIn, StateOut) :-
     interpolate_desc(Desc, Params, InterpDesc),
     get_session_id(SessionId),
     collect_user_tools(SessionId, UserTools),
+    get_tool_scope(StateIn, ToolScope),
     % Use empty memory instead of current memory
-    engine_yield(request_agent_loop(InterpDesc, [], UserTools, [])),
+    engine_yield(request_agent_loop(InterpDesc, [], UserTools, [], ToolScope)),
     % Handle signals (tool calls) until agent_done - still need for tool execution
     handle_agent_signals(SessionId, StateIn, StateOut),
     session_agent_result(SessionId, Result),
@@ -745,8 +905,9 @@ mi_call_prompt_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     interpolate_desc(Desc, Params, InterpDesc),
     get_session_id(SessionId),
     collect_user_tools(SessionId, UserTools),
+    get_tool_scope(StateIn, ToolScope),
     % Use empty memory instead of current memory
-    engine_yield(request_agent_loop(InterpDesc, VarNames, UserTools, [])),
+    engine_yield(request_agent_loop(InterpDesc, VarNames, UserTools, [], ToolScope)),
     % Handle signals (tool calls) until agent_done - still need for tool execution
     handle_agent_signals(SessionId, StateIn, StateOut),
     session_agent_result(SessionId, Result),
@@ -774,7 +935,8 @@ mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     get_session_id(SessionId),
     collect_user_tools(SessionId, UserTools),
     get_memory(StateIn, Memory),
-    engine_yield(request_agent_loop(InterpDesc, VarNames, UserTools, Memory)),
+    get_tool_scope(StateIn, ToolScope),
+    engine_yield(request_agent_loop(InterpDesc, VarNames, UserTools, Memory, ToolScope)),
     % Handle signals (tool calls) until agent_done
     handle_agent_signals(SessionId, StateIn, StateAfterAgent),
     session_agent_result(SessionId, Result),
@@ -825,7 +987,8 @@ mi_call(exec(ToolCall, Output), StateIn, StateIn) :-
     get_depth(StateIn, Depth),
     add_trace_entry(SessionId, exec, ToolName, Args, Depth),
     engine_yield(request_exec(ToolName, Args)),
-    engine_fetch(_Signal),
+    % Use get_next_signal helper which handles both dynamic predicate and engine_fetch
+    get_next_signal(SessionId, _Signal),
     session_exec_result(SessionId, Result),
     retract(session_exec_result(SessionId, _)),
     (   Result.status == success
@@ -834,6 +997,35 @@ mi_call(exec(ToolCall, Output), StateIn, StateIn) :-
     ;   add_trace_entry(SessionId, fail, ToolName, Args, Depth),
         fail
     ).
+
+%% ============================================================
+%% Tool Scoping Predicates
+%% ============================================================
+%% These predicates allow manual control over which tools are available
+%% to nested task() calls. They set a scope in the state which is passed
+%% to the TypeScript runner and used to filter available tools.
+%%
+%% Example:
+%%   tool(smart_format(Items, Output)) :-
+%%       with_tools([summarize, calculate], (
+%%           task("Format this nicely", Output)
+%%       )).
+
+%% mi_call(with_tools(ToolList, Goal), +StateIn, -StateOut)
+%% Run Goal with only the specified tools available to nested tasks
+mi_call(with_tools(ToolList, Goal), StateIn, StateOut) :-
+    !,
+    set_tool_scope(StateIn, whitelist(ToolList), ScopedState),
+    mi_call(Goal, ScopedState, StateWithScope),
+    clear_tool_scope(StateWithScope, StateOut).
+
+%% mi_call(without_tools(ToolList, Goal), +StateIn, -StateOut)
+%% Run Goal with the specified tools excluded from nested tasks
+mi_call(without_tools(ToolList, Goal), StateIn, StateOut) :-
+    !,
+    set_tool_scope(StateIn, blacklist(ToolList), ScopedState),
+    mi_call(Goal, ScopedState, StateWithScope),
+    clear_tool_scope(StateWithScope, StateOut).
 
 %% ============================================================
 %% Memory Predicates - NOW BACKTRACKABLE VIA STATE!
@@ -883,7 +1075,8 @@ mi_call(input(Prompt, Input), StateIn, StateIn) :-
     get_depth(StateIn, Depth),
     add_trace_entry(SessionId, input, input, [InterpPrompt], Depth),
     engine_yield(wait_input(InterpPrompt)),
-    engine_fetch(_Signal),
+    % Use get_next_signal helper which handles both dynamic predicate and engine_fetch
+    get_next_signal(SessionId, _Signal),
     % Retrieve the input provided via provide_input/2
     (   session_pending_input(SessionId, Input)
     ->  retract(session_pending_input(SessionId, Input)),
@@ -1338,7 +1531,15 @@ mi_call(throw(Error), _StateIn, _StateOut) :-
 %% ============================================================
 
 %% mi_call(Module:Goal, +StateIn, -StateOut)
-%% Module-qualified goals - use clause/2 for backtracking
+%% Module-qualified goals - handle special predicates and user-defined predicates
+
+% First check if the unqualified Goal is a special MI predicate - if so, handle it directly
+mi_call(_Module:Goal, StateIn, StateOut) :-
+    is_mi_special_predicate(Goal),
+    !,
+    mi_call(Goal, StateIn, StateOut).
+
+% For regular module-qualified goals, use clause/2 for backtracking
 mi_call(Module:Goal, StateIn, StateOut) :-
     predicate_property(Module:Goal, defined),
     !,  % CUT: If predicate is defined, don't fallback to call/1
@@ -1369,6 +1570,7 @@ is_mi_special_predicate(task(_,_)).
 is_mi_special_predicate(task(_,_,_)).
 is_mi_special_predicate(task(_,_,_,_)).
 is_mi_special_predicate(task(_,_,_,_,_)).
+is_mi_special_predicate(task_named(_,_,_)).   %% Transformed form of task/N
 is_mi_special_predicate(exec(_,_)).
 is_mi_special_predicate(param(_,_)).
 is_mi_special_predicate(param(_,_,_)).
@@ -1377,6 +1579,10 @@ is_mi_special_predicate(prompt(_)).
 is_mi_special_predicate(prompt(_,_)).
 is_mi_special_predicate(prompt(_,_,_)).
 is_mi_special_predicate(prompt(_,_,_,_)).
+is_mi_special_predicate(prompt_named(_,_,_)). %% Transformed form of prompt/N
+%% Tool scoping predicates
+is_mi_special_predicate(with_tools(_,_)).
+is_mi_special_predicate(without_tools(_,_)).
 %% Context stack management
 is_mi_special_predicate(push_context).
 is_mi_special_predicate(push_context(_)).

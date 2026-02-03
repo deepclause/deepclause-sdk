@@ -1,0 +1,68 @@
+% ============================================================================
+% Nested Task Test - Tests task() inside tool bodies
+% ============================================================================
+%
+% This example verifies that task() and prompt() work inside tool definitions.
+% This enables powerful patterns where tools combine Prolog logic with LLM reasoning.
+%
+% Features demonstrated:
+%   1. Automatic call stack exclusion (prevents tool recursion)
+%   2. Manual tool scoping via with_tools/2 and without_tools/2
+%
+% Usage:
+%   deepclause run dml-examples/nested-task-test.dml
+%
+% ============================================================================
+
+% A tool that uses task() internally to format output
+tool(format_list(Items, FormattedOutput), "Format a list of items nicely using LLM") :-
+    format(string(Desc), "Format this list nicely for display: ~w", [Items]),
+    task(Desc, FormattedOutput).
+
+% A tool that uses prompt() for simple transformation
+tool(summarize(Text, Summary), "Summarize text using LLM") :-
+    format(string(Desc), "Summarize this in one sentence: ~w", [Text]),
+    prompt(Desc, Summary).
+
+% A tool that combines Prolog computation with LLM explanation
+tool(explain_calculation(A, B, Explanation), "Calculate A + B and have LLM explain it") :-
+    Sum is A + B,
+    format(string(Desc), "Explain this calculation to a child: ~w + ~w = ~w", [A, B, Sum]),
+    task(Desc, Explanation).
+
+% A tool that uses with_tools to explicitly allow only specific tools
+tool(smart_format(Items, Output), "Format with explicit tool access") :-
+    % This nested task can only use the 'summarize' tool, not format_list or explain_calculation
+    with_tools([summarize], (
+        format(string(Desc), "Format this list: ~w. You can use the summarize tool if needed.", [Items]),
+        task(Desc, Output)
+    )).
+
+% A tool that uses without_tools to exclude specific tools
+tool(safe_analyze(Data, Analysis), "Analyze without dangerous operations") :-
+    % This nested task cannot use explain_calculation
+    without_tools([explain_calculation], (
+        format(string(Desc), "Analyze this data: ~w", [Data]),
+        task(Desc, Analysis)
+    )).
+
+% Main agent
+agent_main :-
+    output("Testing nested task() in tools with tool scoping..."),
+    output(""),
+    
+    % Test 1: Basic nested task (call stack exclusion prevents recursion)
+    task("Use the format_list tool to format this list: [apple, banana, cherry, date]. 
+Then show the formatted result to the user.", FormattedResult),
+    output("Test 1 - Format list (call stack prevents recursion):"),
+    output(FormattedResult),
+    output(""),
+    
+    % Test 2: Prolog computation + LLM explanation
+    task("Use the explain_calculation tool to explain 7 + 5. Show the explanation.", CalcExplanation),
+    output("Test 2 - Explain calculation:"),
+    output(CalcExplanation),
+    output(""),
+    
+    output("All tests passed!"),
+    answer("Test complete").

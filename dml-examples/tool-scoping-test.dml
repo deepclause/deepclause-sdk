@@ -1,0 +1,75 @@
+% ============================================================================
+% Tool Scoping Test - Tests with_tools and without_tools
+% ============================================================================
+%
+% This example specifically tests manual tool scoping via with_tools/2
+% and without_tools/2 predicates.
+%
+% Usage:
+%   deepclause run dml-examples/tool-scoping-test.dml
+%
+% ============================================================================
+
+% Basic tools
+tool(tool_a(Input, Output), "Tool A - transforms input") :-
+    format(string(Desc), "Transform '~w' using method A", [Input]),
+    with_tools([], task(Desc, Output)).
+
+tool(tool_b(Input, Output), "Tool B - transforms input") :-
+    format(string(Desc), "Transform '~w' using method B", [Input]),
+    with_tools([], task(Desc, Output)).
+
+tool(tool_c(Input, Output), "Tool C - transforms input") :-
+    format(string(Desc), "Transform '~w' using method C", [Input]),
+    with_tools([], task(Desc, Output)).
+
+% A tool that uses with_tools to limit available tools
+tool(restricted_task(Input, Output), "Only allows tool_a") :-
+    with_tools([tool_a], (
+        format(string(Desc), "Process '~w'. You can ONLY use tool_a. Do NOT use tool_b or tool_c.", [Input]),
+        task(Desc, Output)
+    )).
+
+% A tool that uses without_tools to exclude specific tools
+tool(mostly_unrestricted(Input, Output), "Excludes tool_c only") :-
+    without_tools([tool_c], (
+        format(string(Desc), "Process '~w'. You can use any tool EXCEPT tool_c.", [Input]),
+        task(Desc, Output)
+    )).
+
+% A tool that demonstrates tool scoping - wraps a task with limited tools
+tool(tool_scoping(Input, Output), "Demonstrates tool scoping by limiting nested task to only tool_a and tool_b") :-
+    with_tools([tool_a, tool_b], (
+        format(string(Desc), "Process '~w'. You have access to tool_a and tool_b only. Try using them.", [Input]),
+        task(Desc, Output)
+    )).
+
+% Main agent
+agent_main :-
+
+    
+    % Test with_tools - should only see tool_a
+    task("Use the restricted_task tool to process 'hello'. It should only have access to tool_a.", Result1),
+    output("Test 1 - restricted_task (only tool_a allowed):"),
+    output(Result1),
+    output("%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%"),
+    
+    % Test tool_scoping - should see tool_a and tool_b
+    task("Use the tool_scoping tool to process 'world'. It should have access to both tool_a and tool_b.", Result2),
+    output("Test 2 - tool_scoping (tool_a and tool_b allowed):"),
+    output(Result2),
+    output("%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%"),
+    
+    output("Testing manual tool scoping..."),
+    output(""),
+
+    % Test with_tools directly in agent_main - should only see tool_c
+    output("Test 3 - with_tools directly in agent_main (only tool_c allowed):"),
+    with_tools([tool_c], (
+        task("Transform 'test' using any available tool. You should only have access to tool_c.", Result3)
+    )),
+    output(Result3),
+    output(""),
+    
+    output("Tests complete!"),
+    answer("Done").

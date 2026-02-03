@@ -377,11 +377,19 @@ export class DMLRunner {
                 },
             });
         }
+        // Callback to emit tool call events
+        const emitToolCall = (toolName, args) => {
+            streamQueue.push({ type: 'tool_call', toolName, toolArgs: args });
+            if (streamResolve) {
+                streamResolve();
+                streamResolve = null;
+            }
+        };
         // Build available tools for agent - SIMPLIFIED: tools run in isolated engines
         const availableTools = this.buildAgentTools(userTools, options.toolPolicy, 
         // executeToolIsolated callback - runs tool in separate engine (no state sharing)
         async (toolName, args) => {
-            return this.executeToolIsolated(toolName, args, augmentedTools, onToolOutput);
+            return this.executeToolIsolated(toolName, args, augmentedTools, onToolOutput, [], emitToolCall);
         });
         // Queue for streaming events
         const streamQueue = [];
@@ -724,8 +732,11 @@ export class DMLRunner {
      *
      * The tool can still call exec() for external tools (TypeScript registered tools).
      * We step the tool engine and handle request_exec signals.
+     *
+     * @param excludedTools - Tools currently on the call stack (for recursion prevention)
+     * @param onToolCall - Callback to emit tool call events from nested tasks
      */
-    async executeToolIsolated(toolName, args, registeredTools, onOutput) {
+    async executeToolIsolated(toolName, args, registeredTools, onOutput, excludedTools = [], onToolCall) {
         const outputs = [];
         if (process.env.DEBUG_RUNNER) {
             console.log('[RUNNER] executeToolIsolated called for:', toolName);
@@ -797,6 +808,149 @@ export class DMLRunner {
                                 const postGoal = `deepclause_mi:post_exec_result('${this.sessionId}', failure, "${message.replace(/"/g, '\\"')}")`;
                                 this.query(postGoal);
                             }
+                        }
+                        break;
+                    }
+                    case 'request_agent_loop': {
+                        // Tool is calling task() or prompt() - run nested agent loop
+                        const taskDescription = String(payload?.taskDescription ?? '');
+                        // Parse output vars
+                        let outputVars = [];
+                        const rawOutputVars = toJsValue(payload?.outputVars);
+                        if (Array.isArray(rawOutputVars)) {
+                            outputVars = rawOutputVars.map(v => String(v));
+                        }
+                        // Parse userTools for the nested agent
+                        const userTools = [];
+                        const rawUserTools = toJsValue(payload?.userTools);
+                        if (Array.isArray(rawUserTools)) {
+                            for (const tool of rawUserTools) {
+                                const toolObj = toJsValue(tool);
+                                const toolInfo = this.parseUserToolInfo(toolObj);
+                                if (toolInfo) {
+                                    userTools.push(toolInfo);
+                                }
+                            }
+                        }
+                        // Parse tool scope (manual scoping via with_tools/without_tools)
+                        // Prolog term format: {$t: 't', whitelist: [[toolList]]} or {$t: 't', blacklist: [[toolList]]}
+                        const rawToolScope = toJsValue(payload?.toolScope);
+                        let toolScopeType = 'none';
+                        let toolScopeList = [];
+                        if (rawToolScope && typeof rawToolScope === 'object' && '$t' in rawToolScope) {
+                            const compound = rawToolScope;
+                            // Check for {$t: 't', whitelist: ...} or {$t: 't', blacklist: ...}
+                            if ('whitelist' in compound) {
+                                toolScopeType = 'whitelist';
+                                // Extract tools from the nested array structure: [[toolList]]
+                                const args = toJsValue(compound.whitelist);
+                                if (Array.isArray(args) && args.length > 0) {
+                                    const inner = toJsValue(args[0]);
+                                    if (Array.isArray(inner) && inner.length > 0) {
+                                        const toolList = toJsValue(inner[0]);
+                                        if (Array.isArray(toolList)) {
+                                            toolScopeList = toolList.map(t => String(t));
+                                        }
+                                    }
+                                }
+                            }
+                            else if ('blacklist' in compound) {
+                                toolScopeType = 'blacklist';
+                                const args = toJsValue(compound.blacklist);
+                                if (Array.isArray(args) && args.length > 0) {
+                                    const inner = toJsValue(args[0]);
+                                    if (Array.isArray(inner) && inner.length > 0) {
+                                        const toolList = toJsValue(inner[0]);
+                                        if (Array.isArray(toolList)) {
+                                            toolScopeList = toolList.map(t => String(t));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        else if (typeof rawToolScope === 'string') {
+                            // Simple atom 'none'
+                            if (rawToolScope !== 'none') {
+                                if (process.env.DEBUG_RUNNER) {
+                                    console.log('[RUNNER] Unexpected toolScope format:', rawToolScope);
+                                }
+                            }
+                        }
+                        // Build the call stack exclusion list (current tool + previously excluded)
+                        const nestedExcludedTools = [...excludedTools, toolName];
+                        // Filter tools based on:
+                        // 1. Call stack exclusion (prevent recursion)
+                        // 2. Manual scope (if specified via with_tools/without_tools)
+                        let filteredTools = userTools.filter(t => !nestedExcludedTools.includes(t.name));
+                        if (toolScopeType === 'whitelist') {
+                            // Only include tools in the whitelist
+                            filteredTools = filteredTools.filter(t => toolScopeList.includes(t.name));
+                        }
+                        else if (toolScopeType === 'blacklist') {
+                            // Exclude tools in the blacklist
+                            filteredTools = filteredTools.filter(t => !toolScopeList.includes(t.name));
+                        }
+                        // Extract memory
+                        const memory = this.extractMemoryFromPayload(payload);
+                        if (process.env.DEBUG_RUNNER) {
+                            console.log('[RUNNER] Tool agent loop request:', taskDescription.substring(0, 100));
+                            console.log('[RUNNER] Tool agent outputVars:', outputVars);
+                            console.log('[RUNNER] Call stack excluded tools:', nestedExcludedTools);
+                            console.log('[RUNNER] Tool scope:', toolScopeType, toolScopeList);
+                            console.log('[RUNNER] Available tools for nested agent:', filteredTools.map(t => t.name));
+                        }
+                        // Build tools for nested agent with filtered tool list
+                        const nestedToolCallback = async (nestedToolName, nestedArgs) => {
+                            return this.executeToolIsolated(nestedToolName, nestedArgs, registeredTools, onOutput, nestedExcludedTools, onToolCall);
+                        };
+                        const availableTools = this.buildAgentTools(filteredTools, null, // No policy override for nested
+                        nestedToolCallback);
+                        try {
+                            // Run the nested agent loop
+                            const result = await runAgentLoop({
+                                taskDescription,
+                                outputVars,
+                                memory,
+                                tools: availableTools,
+                                modelOptions: {
+                                    model: this.options.model,
+                                    provider: this.options.provider,
+                                    temperature: this.options.temperature,
+                                    maxOutputTokens: this.options.maxTokens,
+                                    baseUrl: this.options.baseUrl,
+                                },
+                                streaming: false, // Nested loops don't stream
+                                debug: this.options.debug,
+                                onOutput: (text) => {
+                                    outputs.push(text);
+                                    onOutput(text);
+                                },
+                                onStream: () => { }, // No streaming for nested
+                                onToolCall: onToolCall ?? (() => { }), // Forward tool call events to parent
+                                onAskUser: async () => {
+                                    // Nested agent loops don't support ask_user directly
+                                    // If needed, the tool should use exec(ask_user, ...) instead
+                                    return '';
+                                },
+                            });
+                            if (process.env.DEBUG_RUNNER) {
+                                console.log('[RUNNER] Nested agent loop completed:', result.success);
+                            }
+                            // Post result back to tool engine
+                            this.postToolAgentResult(toolEngineId, result);
+                        }
+                        catch (error) {
+                            const message = error instanceof Error ? error.message : String(error);
+                            if (process.env.DEBUG_RUNNER) {
+                                console.log('[RUNNER] Nested agent loop error:', message);
+                            }
+                            // Post failure result
+                            this.postToolAgentResult(toolEngineId, {
+                                success: false,
+                                outputs: [],
+                                variables: {},
+                                messages: memory,
+                            });
                         }
                         break;
                     }
@@ -877,6 +1031,20 @@ export class DMLRunner {
             const escapedErr = this.toPrologTerm(result.error ?? 'Unknown error');
             this.query(`deepclause_mi:post_exec_result('${this.sessionId}', failure, ${escapedErr})`);
         }
+    }
+    /**
+     * Post tool engine agent loop result back to Prolog
+     */
+    postToolAgentResult(toolEngineId, result) {
+        // Keys need to be quoted because they start with uppercase (Var1, Var2, etc.)
+        const varsStr = Object.entries(result.variables)
+            .map(([k, v]) => `'${k}': ${this.toPrologTerm(v)}`)
+            .join(', ');
+        // Convert messages to Prolog list format
+        const messagesStr = result.messages
+            .map(m => `message{role: ${m.role}, content: ${this.toPrologTerm(m.content)}}`)
+            .join(', ');
+        this.query(`deepclause_mi:post_tool_agent_result('${this.sessionId}', '${toolEngineId}', ${result.success}, vars{${varsStr}}, [${messagesStr}])`);
     }
     /**
      * Provide user input to waiting Prolog

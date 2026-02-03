@@ -1,0 +1,114 @@
+% ============================================================================
+% Coding Agent - Idiomatic Prolog Style
+% ============================================================================
+%
+% This agent uses Prolog's natural success/failure semantics:
+%   - Tasks succeed or fail based on agent actions
+%   - Multiple clauses handle different cases
+%   - Backtracking provides automatic retry logic
+%   - No boolean flags - predicates ARE the control flow
+%
+% Usage:
+%   deepclause run dml-examples/coding-agent.dml "Calculate fibonacci numbers"
+%
+% ============================================================================
+
+% --- Tool Definitions ---
+
+tool(save_file(Path, Content), "Save content to a file") :-
+    format(atom(Cmd), "cat > '~w' << 'PYEOF'\n~w\nPYEOF", [Path, Content]),
+    exec(vm_exec(command: Cmd), _).
+
+tool(run_python(Path, Output), "Run a Python script, returns stdout/stderr") :-
+    format(atom(Cmd), "python3 '~w' 2>&1", [Path]),
+    exec(vm_exec(command: Cmd), Result),
+    get_dict(stdout, Result, Output).
+
+tool(run_shell(Command, Output), "Run a shell command") :-
+    exec(vm_exec(command: Command), Result),
+    get_dict(stdout, Result, Output).
+
+% --- Entry Point ---
+
+agent_main(Request) :-
+    system("You are an expert Python programmer. You have tools to save and run code.
+Write clean Python with type hints and doctests. Save to /tmp/solution.py."),
+    
+    output("══════════════════════════════════════════════════"),
+    output("  Coding Agent"),
+    output("══════════════════════════════════════════════════"),
+    
+    % Try to solve with up to 3 attempts via backtracking
+    solve(Request, 3).
+
+% --- Main Logic: solve/2 uses failure-driven iteration ---
+
+% Base case: no attempts left
+solve(_, 0) :- !,
+    answer("✗ All attempts exhausted. Could not generate working code."),
+    fail.
+
+% Recursive case: try to write and run code
+solve(Request, AttemptsLeft) :-
+    AttemptsLeft > 0,
+    Attempt is 4 - AttemptsLeft,
+    format(string(Msg), "\\n▶ Attempt ~d", [Attempt]),
+    output(Msg),
+    
+    % Try the full pipeline - if any step fails, we catch it
+    (   write_and_run(Request, Code, Output)
+    ->  % Success path
+        output("\\n✓ Code works!"),
+        report_success(Request, Code, Output)
+    ;   % Failure path - retry with fewer attempts
+        output("\\n⚠ Failed, retrying..."),
+        NewAttempts is AttemptsLeft - 1,
+        solve(Request, NewAttempts)
+    ).
+
+% --- Pipeline: each predicate succeeds or fails ---
+
+% Write code and run it - succeeds only if code runs without errors
+write_and_run(Request, Code, Output) :-
+    write_code(Request, Code),
+    run_code(Code, Output),
+    validate_output(Output).
+
+% Ask LLM to write code - always succeeds (LLM generates something)
+write_code(Request, Code) :-
+    output("  Writing code..."),
+    task("Write Python code for: {Request}
+
+Requirements:
+- Type hints and docstrings
+- Test cases in if __name__ == '__main__'
+- Print results clearly
+
+Save to /tmp/solution.py using save_file, then store the code in Code.", Code).
+
+% Run the saved code - always succeeds but Output may contain errors
+run_code(_Code, Output) :-
+    output("  Running code..."),
+    task("Run the code at /tmp/solution.py using run_python.
+Store the output in Output.", Output).
+
+% Validate output - FAILS if output contains Python errors
+validate_output(Output) :-
+    \+ contains_error(Output).
+
+% Error detection predicates
+contains_error(Output) :- sub_string(Output, _, _, _, "Traceback"), !.
+contains_error(Output) :- sub_string(Output, _, _, _, "Error:"), !.
+contains_error(Output) :- sub_string(Output, _, _, _, "Exception"), !.
+
+% --- Success Reporting ---
+
+report_success(_Request, Code, Output) :-
+    output("══════════════════════════════════════════════════"),
+    output("  ✓ SUCCESS"),
+    output("══════════════════════════════════════════════════"),
+    output("\nGenerated Code:"),
+    output(Code),
+    output("\nExecution Output:"),
+    output(Output),
+    answer("Code generation complete.").

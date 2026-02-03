@@ -27,13 +27,15 @@
     % Tool engine predicates for isolated tool execution
     create_tool_engine/4,
     step_tool_engine/4,
-    destroy_tool_engine/1
+    destroy_tool_engine/1,
+    post_tool_agent_result/5
 ]).
 
 :- use_module(deepclause_strings).
 
 %% Allow mi_call/3 clauses to be non-contiguous
 :- discontiguous mi_call/3.
+:- discontiguous transform_task_calls/3.
 
 %% Dynamic predicates for session state (engine management only, not memory!)
 :- dynamic session_engine/2.       % session_engine(SessionId, Engine)
@@ -150,7 +152,21 @@ transform_task_calls(prompt(Desc, V1, V2), Bindings, prompt_named(Desc, [V1, V2]
 transform_task_calls(prompt(Desc, V1, V2, V3), Bindings, prompt_named(Desc, [V1, V2, V3], Names)) :- !,
     maplist(var_to_name(Bindings), [V1, V2, V3], Names).
 
-%% Default: no transformation needed
+%% Recurse into arbitrary compound terms (like with_tools/2, without_tools/2, etc.)
+transform_task_calls(Term, Bindings, TransformedTerm) :-
+    compound(Term),
+    \+ is_list(Term),  % Don't decompose lists
+    Term =.. [Functor|Args],
+    Args \= [],  % Has at least one argument
+    !,
+    maplist(transform_task_calls_arg(Bindings), Args, TransformedArgs),
+    TransformedTerm =.. [Functor|TransformedArgs].
+
+%% Helper to transform each argument
+transform_task_calls_arg(Bindings, Arg, TransformedArg) :-
+    transform_task_calls(Arg, Bindings, TransformedArg).
+
+%% Default: atoms and numbers pass through unchanged
 transform_task_calls(Term, _, Term).
 
 %% var_to_name(+Bindings, +Var, -Name)
@@ -330,9 +346,12 @@ step_engine(SessionId, Status, Content, Payload) :-
 process_engine_result(output(Text), output, Text, none) :- !.
 process_engine_result(log(Text), log, Text, none) :- !.
 process_engine_result(answer(Text), answer, Text, none) :- !.
-%% Note: Memory is now passed in the payload for the agent loop
+%% Note: Memory and tool scope are now passed in the payload for the agent loop
+process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope), request_agent_loop, '', 
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope}) :- !.
+%% Legacy 4-arg format (no tool scope)
 process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory), request_agent_loop, '', 
-    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory}) :- !.
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: none}) :- !.
 process_engine_result(request_exec(Tool, Args), request_exec, '',
     payload{toolName: Tool, args: Args}) :- !.
 %% Tool result from inline tool execution
@@ -455,6 +474,32 @@ set_context_stack(StateIn, Stack, StateOut) :-
 %% set_memory(+StateIn, +Memory, -StateOut)
 set_memory(StateIn, Memory, StateOut) :-
     StateOut = StateIn.put(memory, Memory).
+
+%% ============================================================
+%% Tool Scope Helpers
+%% ============================================================
+%% Tool scoping allows manual control over which tools are available
+%% in nested tasks. The scope is stored in state and passed through
+%% the request_agent_loop payload.
+
+%% get_tool_scope(+State, -Scope)
+%% Returns the current tool scope, or 'none' if not set
+get_tool_scope(State, Scope) :-
+    (   get_dict(tool_scope, State, Scope)
+    ->  true
+    ;   Scope = none
+    ).
+
+%% set_tool_scope(+StateIn, +Scope, -StateOut)
+set_tool_scope(StateIn, Scope, StateOut) :-
+    StateOut = StateIn.put(tool_scope, Scope).
+
+%% clear_tool_scope(+StateIn, -StateOut)
+clear_tool_scope(StateIn, StateOut) :-
+    (   get_dict(tool_scope, StateIn, _)
+    ->  del_dict(tool_scope, StateIn, _, StateOut)
+    ;   StateOut = StateIn
+    ).
 
 %% ============================================================
 %% Trace Helpers
@@ -682,6 +727,11 @@ step_tool_engine(ToolEngineId, Status, Content, Payload) :-
 process_tool_engine_result(tool_finished(ToolResult), finished, '', payload{result: ToolResult}) :- !.
 process_tool_engine_result(request_exec(Tool, Args), request_exec, '',
     payload{toolName: Tool, args: Args}) :- !.
+process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope), request_agent_loop, '',
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope}) :- !.
+%% Legacy 4-arg format (no tool scope)
+process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory), request_agent_loop, '',
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: none}) :- !.
 process_tool_engine_result(output(Text), output, Text, none) :- !.
 process_tool_engine_result(log(Text), log, Text, none) :- !.
 process_tool_engine_result(Other, error, Msg, none) :-
@@ -694,6 +744,25 @@ destroy_tool_engine(ToolEngineId) :-
     ;   true
     ),
     retractall(tool_engine(ToolEngineId, _)).
+
+%% post_tool_agent_result(+SessionId, +ToolEngineId, +Success, +Variables, +Messages)
+%% Posts the result of a nested agent loop back to the tool engine.
+%% Also stores in session_agent_result so the meta-interpreter can retrieve it.
+:- dynamic tool_engine_agent_result/2.  % tool_engine_agent_result(ToolEngineId, Result)
+
+post_tool_agent_result(SessionId, ToolEngineId, Success, Variables, Messages) :-
+    Result = result{success: Success, variables: Variables, messages: Messages},
+    % Store in tool_engine_agent_result (for future use)
+    retractall(tool_engine_agent_result(ToolEngineId, _)),
+    assertz(tool_engine_agent_result(ToolEngineId, Result)),
+    % Also store in session_agent_result so task() in the meta-interpreter can read it
+    retractall(session_agent_result(SessionId, _)),
+    assertz(session_agent_result(SessionId, Result)),
+    % Signal the tool engine that agent result is ready
+    (   tool_engine(ToolEngineId, Engine)
+    ->  catch(engine_post(Engine, agent_done), _, true)
+    ;   true
+    ).
 
 %% Helper predicates (shared with old isolated execution)
 
@@ -754,8 +823,9 @@ mi_call(task(Desc), StateIn, StateOut) :-
     add_trace_entry(SessionId, llm_call, task, [InterpDesc], Depth),
     collect_user_tools(SessionId, UserTools),
     get_memory(StateIn, Memory),
-    % Yield request with current memory
-    engine_yield(request_agent_loop(InterpDesc, [], UserTools, Memory)),
+    get_tool_scope(StateIn, ToolScope),
+    % Yield request with current memory and tool scope
+    engine_yield(request_agent_loop(InterpDesc, [], UserTools, Memory, ToolScope)),
     % Handle signals (tool calls) until agent_done
     handle_agent_signals(SessionId, StateIn, StateAfterAgent),
     session_agent_result(SessionId, Result),
@@ -802,8 +872,9 @@ mi_call(prompt(Desc), StateIn, StateOut) :-
     interpolate_desc(Desc, Params, InterpDesc),
     get_session_id(SessionId),
     collect_user_tools(SessionId, UserTools),
+    get_tool_scope(StateIn, ToolScope),
     % Use empty memory instead of current memory
-    engine_yield(request_agent_loop(InterpDesc, [], UserTools, [])),
+    engine_yield(request_agent_loop(InterpDesc, [], UserTools, [], ToolScope)),
     % Handle signals (tool calls) until agent_done - still need for tool execution
     handle_agent_signals(SessionId, StateIn, StateOut),
     session_agent_result(SessionId, Result),
@@ -834,8 +905,9 @@ mi_call_prompt_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     interpolate_desc(Desc, Params, InterpDesc),
     get_session_id(SessionId),
     collect_user_tools(SessionId, UserTools),
+    get_tool_scope(StateIn, ToolScope),
     % Use empty memory instead of current memory
-    engine_yield(request_agent_loop(InterpDesc, VarNames, UserTools, [])),
+    engine_yield(request_agent_loop(InterpDesc, VarNames, UserTools, [], ToolScope)),
     % Handle signals (tool calls) until agent_done - still need for tool execution
     handle_agent_signals(SessionId, StateIn, StateOut),
     session_agent_result(SessionId, Result),
@@ -863,7 +935,8 @@ mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     get_session_id(SessionId),
     collect_user_tools(SessionId, UserTools),
     get_memory(StateIn, Memory),
-    engine_yield(request_agent_loop(InterpDesc, VarNames, UserTools, Memory)),
+    get_tool_scope(StateIn, ToolScope),
+    engine_yield(request_agent_loop(InterpDesc, VarNames, UserTools, Memory, ToolScope)),
     % Handle signals (tool calls) until agent_done
     handle_agent_signals(SessionId, StateIn, StateAfterAgent),
     session_agent_result(SessionId, Result),
@@ -924,6 +997,35 @@ mi_call(exec(ToolCall, Output), StateIn, StateIn) :-
     ;   add_trace_entry(SessionId, fail, ToolName, Args, Depth),
         fail
     ).
+
+%% ============================================================
+%% Tool Scoping Predicates
+%% ============================================================
+%% These predicates allow manual control over which tools are available
+%% to nested task() calls. They set a scope in the state which is passed
+%% to the TypeScript runner and used to filter available tools.
+%%
+%% Example:
+%%   tool(smart_format(Items, Output)) :-
+%%       with_tools([summarize, calculate], (
+%%           task("Format this nicely", Output)
+%%       )).
+
+%% mi_call(with_tools(ToolList, Goal), +StateIn, -StateOut)
+%% Run Goal with only the specified tools available to nested tasks
+mi_call(with_tools(ToolList, Goal), StateIn, StateOut) :-
+    !,
+    set_tool_scope(StateIn, whitelist(ToolList), ScopedState),
+    mi_call(Goal, ScopedState, StateWithScope),
+    clear_tool_scope(StateWithScope, StateOut).
+
+%% mi_call(without_tools(ToolList, Goal), +StateIn, -StateOut)
+%% Run Goal with the specified tools excluded from nested tasks
+mi_call(without_tools(ToolList, Goal), StateIn, StateOut) :-
+    !,
+    set_tool_scope(StateIn, blacklist(ToolList), ScopedState),
+    mi_call(Goal, ScopedState, StateWithScope),
+    clear_tool_scope(StateWithScope, StateOut).
 
 %% ============================================================
 %% Memory Predicates - NOW BACKTRACKABLE VIA STATE!
@@ -1429,7 +1531,15 @@ mi_call(throw(Error), _StateIn, _StateOut) :-
 %% ============================================================
 
 %% mi_call(Module:Goal, +StateIn, -StateOut)
-%% Module-qualified goals - use clause/2 for backtracking
+%% Module-qualified goals - handle special predicates and user-defined predicates
+
+% First check if the unqualified Goal is a special MI predicate - if so, handle it directly
+mi_call(_Module:Goal, StateIn, StateOut) :-
+    is_mi_special_predicate(Goal),
+    !,
+    mi_call(Goal, StateIn, StateOut).
+
+% For regular module-qualified goals, use clause/2 for backtracking
 mi_call(Module:Goal, StateIn, StateOut) :-
     predicate_property(Module:Goal, defined),
     !,  % CUT: If predicate is defined, don't fallback to call/1
@@ -1460,6 +1570,7 @@ is_mi_special_predicate(task(_,_)).
 is_mi_special_predicate(task(_,_,_)).
 is_mi_special_predicate(task(_,_,_,_)).
 is_mi_special_predicate(task(_,_,_,_,_)).
+is_mi_special_predicate(task_named(_,_,_)).   %% Transformed form of task/N
 is_mi_special_predicate(exec(_,_)).
 is_mi_special_predicate(param(_,_)).
 is_mi_special_predicate(param(_,_,_)).
@@ -1468,6 +1579,10 @@ is_mi_special_predicate(prompt(_)).
 is_mi_special_predicate(prompt(_,_)).
 is_mi_special_predicate(prompt(_,_,_)).
 is_mi_special_predicate(prompt(_,_,_,_)).
+is_mi_special_predicate(prompt_named(_,_,_)). %% Transformed form of prompt/N
+%% Tool scoping predicates
+is_mi_special_predicate(with_tools(_,_)).
+is_mi_special_predicate(without_tools(_,_)).
 %% Context stack management
 is_mi_special_predicate(push_context).
 is_mi_special_predicate(push_context(_)).

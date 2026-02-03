@@ -484,13 +484,22 @@ export class DMLRunner {
       });
     }
 
+    // Callback to emit tool call events
+    const emitToolCall = (toolName: string, args: Record<string, unknown>) => {
+      streamQueue.push({ type: 'tool_call', toolName, toolArgs: args });
+      if (streamResolve) {
+        streamResolve();
+        streamResolve = null;
+      }
+    };
+
     // Build available tools for agent - SIMPLIFIED: tools run in isolated engines
     const availableTools = this.buildAgentTools(
       userTools, 
       options.toolPolicy,
       // executeToolIsolated callback - runs tool in separate engine (no state sharing)
       async (toolName: string, args: Record<string, unknown>) => {
-        return this.executeToolIsolated(toolName, args, augmentedTools, onToolOutput);
+        return this.executeToolIsolated(toolName, args, augmentedTools, onToolOutput, [], emitToolCall);
       }
     );
 
@@ -890,12 +899,17 @@ export class DMLRunner {
    * 
    * The tool can still call exec() for external tools (TypeScript registered tools).
    * We step the tool engine and handle request_exec signals.
+   * 
+   * @param excludedTools - Tools currently on the call stack (for recursion prevention)
+   * @param onToolCall - Callback to emit tool call events from nested tasks
    */
   private async executeToolIsolated(
     toolName: string,
     args: Record<string, unknown>,
     registeredTools: Map<string, ToolDefinition>,
     onOutput: (text: string) => void,
+    excludedTools: string[] = [],
+    onToolCall?: (toolName: string, args: Record<string, unknown>) => void,
   ): Promise<{ result: unknown; outputs: string[] }> {
     const outputs: string[] = [];
     
@@ -981,6 +995,165 @@ export class DMLRunner {
                 const postGoal = `deepclause_mi:post_exec_result('${this.sessionId}', failure, "${message.replace(/"/g, '\\"')}")`;
                 this.query(postGoal);
               }
+            }
+            break;
+          }
+          
+          case 'request_agent_loop': {
+            // Tool is calling task() or prompt() - run nested agent loop
+            const taskDescription = String(payload?.taskDescription ?? '');
+            
+            // Parse output vars
+            let outputVars: string[] = [];
+            const rawOutputVars = toJsValue(payload?.outputVars);
+            if (Array.isArray(rawOutputVars)) {
+              outputVars = rawOutputVars.map(v => String(v));
+            }
+            
+            // Parse userTools for the nested agent
+            const userTools: UserToolInfo[] = [];
+            const rawUserTools = toJsValue(payload?.userTools);
+            if (Array.isArray(rawUserTools)) {
+              for (const tool of rawUserTools) {
+                const toolObj = toJsValue(tool) as Record<string, unknown>;
+                const toolInfo = this.parseUserToolInfo(toolObj);
+                if (toolInfo) {
+                  userTools.push(toolInfo);
+                }
+              }
+            }
+            
+            // Parse tool scope (manual scoping via with_tools/without_tools)
+            // Prolog term format: {$t: 't', whitelist: [[toolList]]} or {$t: 't', blacklist: [[toolList]]}
+            const rawToolScope = toJsValue(payload?.toolScope);
+            let toolScopeType: 'none' | 'whitelist' | 'blacklist' = 'none';
+            let toolScopeList: string[] = [];
+            
+            if (rawToolScope && typeof rawToolScope === 'object' && '$t' in rawToolScope) {
+              const compound = rawToolScope as Record<string, unknown>;
+              // Check for {$t: 't', whitelist: ...} or {$t: 't', blacklist: ...}
+              if ('whitelist' in compound) {
+                toolScopeType = 'whitelist';
+                // Extract tools from the nested array structure: [[toolList]]
+                const args = toJsValue(compound.whitelist);
+                if (Array.isArray(args) && args.length > 0) {
+                  const inner = toJsValue(args[0]);
+                  if (Array.isArray(inner) && inner.length > 0) {
+                    const toolList = toJsValue(inner[0]);
+                    if (Array.isArray(toolList)) {
+                      toolScopeList = toolList.map(t => String(t));
+                    }
+                  }
+                }
+              } else if ('blacklist' in compound) {
+                toolScopeType = 'blacklist';
+                const args = toJsValue(compound.blacklist);
+                if (Array.isArray(args) && args.length > 0) {
+                  const inner = toJsValue(args[0]);
+                  if (Array.isArray(inner) && inner.length > 0) {
+                    const toolList = toJsValue(inner[0]);
+                    if (Array.isArray(toolList)) {
+                      toolScopeList = toolList.map(t => String(t));
+                    }
+                  }
+                }
+              }
+            } else if (typeof rawToolScope === 'string') {
+              // Simple atom 'none'
+              if (rawToolScope !== 'none') {
+                if (process.env.DEBUG_RUNNER) {
+                  console.log('[RUNNER] Unexpected toolScope format:', rawToolScope);
+                }
+              }
+            }
+            
+            // Build the call stack exclusion list (current tool + previously excluded)
+            const nestedExcludedTools = [...excludedTools, toolName];
+            
+            // Filter tools based on:
+            // 1. Call stack exclusion (prevent recursion)
+            // 2. Manual scope (if specified via with_tools/without_tools)
+            let filteredTools = userTools.filter(t => !nestedExcludedTools.includes(t.name));
+            
+            if (toolScopeType === 'whitelist') {
+              // Only include tools in the whitelist
+              filteredTools = filteredTools.filter(t => toolScopeList.includes(t.name));
+            } else if (toolScopeType === 'blacklist') {
+              // Exclude tools in the blacklist
+              filteredTools = filteredTools.filter(t => !toolScopeList.includes(t.name));
+            }
+            
+            // Extract memory
+            const memory = this.extractMemoryFromPayload(payload as Record<string, unknown>);
+            
+            if (process.env.DEBUG_RUNNER) {
+              console.log('[RUNNER] Tool agent loop request:', taskDescription.substring(0, 100));
+              console.log('[RUNNER] Tool agent outputVars:', outputVars);
+              console.log('[RUNNER] Call stack excluded tools:', nestedExcludedTools);
+              console.log('[RUNNER] Tool scope:', toolScopeType, toolScopeList);
+              console.log('[RUNNER] Available tools for nested agent:', filteredTools.map(t => t.name));
+            }
+            
+            // Build tools for nested agent with filtered tool list
+            const nestedToolCallback = async (nestedToolName: string, nestedArgs: Record<string, unknown>) => {
+              return this.executeToolIsolated(
+                nestedToolName, nestedArgs, registeredTools, onOutput, nestedExcludedTools, onToolCall
+              );
+            };
+            
+            const availableTools = this.buildAgentTools(
+              filteredTools,
+              null, // No policy override for nested
+              nestedToolCallback
+            );
+            
+            try {
+              // Run the nested agent loop
+              const result = await runAgentLoop({
+                taskDescription,
+                outputVars,
+                memory,
+                tools: availableTools,
+                modelOptions: {
+                  model: this.options.model,
+                  provider: this.options.provider,
+                  temperature: this.options.temperature,
+                  maxOutputTokens: this.options.maxTokens,
+                  baseUrl: this.options.baseUrl,
+                },
+                streaming: false, // Nested loops don't stream
+                debug: this.options.debug,
+                onOutput: (text) => {
+                  outputs.push(text);
+                  onOutput(text);
+                },
+                onStream: () => {}, // No streaming for nested
+                onToolCall: onToolCall ?? (() => {}), // Forward tool call events to parent
+                onAskUser: async () => { 
+                  // Nested agent loops don't support ask_user directly
+                  // If needed, the tool should use exec(ask_user, ...) instead
+                  return ''; 
+                },
+              });
+              
+              if (process.env.DEBUG_RUNNER) {
+                console.log('[RUNNER] Nested agent loop completed:', result.success);
+              }
+              
+              // Post result back to tool engine
+              this.postToolAgentResult(toolEngineId, result);
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              if (process.env.DEBUG_RUNNER) {
+                console.log('[RUNNER] Nested agent loop error:', message);
+              }
+              // Post failure result
+              this.postToolAgentResult(toolEngineId, {
+                success: false,
+                outputs: [],
+                variables: {},
+                messages: memory,
+              });
             }
             break;
           }
@@ -1087,6 +1260,33 @@ export class DMLRunner {
         `deepclause_mi:post_exec_result('${this.sessionId}', failure, ${escapedErr})`
       );
     }
+  }
+
+  /**
+   * Post tool engine agent loop result back to Prolog
+   */
+  private postToolAgentResult(
+    toolEngineId: string,
+    result: {
+      success: boolean;
+      outputs: string[];
+      variables: Record<string, unknown>;
+      messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+    }
+  ): void {
+    // Keys need to be quoted because they start with uppercase (Var1, Var2, etc.)
+    const varsStr = Object.entries(result.variables)
+      .map(([k, v]) => `'${k}': ${this.toPrologTerm(v)}`)
+      .join(', ');
+
+    // Convert messages to Prolog list format
+    const messagesStr = result.messages
+      .map(m => `message{role: ${m.role}, content: ${this.toPrologTerm(m.content)}}`)
+      .join(', ');
+
+    this.query(
+      `deepclause_mi:post_tool_agent_result('${this.sessionId}', '${toolEngineId}', ${result.success}, vars{${varsStr}}, [${messagesStr}])`
+    );
   }
 
   /**

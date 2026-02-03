@@ -102,6 +102,9 @@ export declare class DMLRunner {
      *
      * The tool can still call exec() for external tools (TypeScript registered tools).
      * We step the tool engine and handle request_exec signals.
+     *
+     * @param excludedTools - Tools currently on the call stack (for recursion prevention)
+     * @param onToolCall - Callback to emit tool call events from nested tasks
      */
     private executeToolIsolated;
     /**
@@ -116,6 +119,10 @@ export declare class DMLRunner {
      * Post exec result back to Prolog
      */
     private postExecResult;
+    /**
+     * Post tool engine agent loop result back to Prolog
+     */
+    private postToolAgentResult;
     /**
      * Provide user input to waiting Prolog
      */

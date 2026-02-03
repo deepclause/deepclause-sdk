@@ -182,6 +182,30 @@ tool(safe_divide(A, B, Result)) :-
     ->  Result = error("Division by zero")
     ;   exec(calculator(expression: A/B), Result)
     ).
+```
+
+#### Using `task()` Inside Tools
+
+Tools can use `task()` and `prompt()` internally to combine Prolog logic with LLM reasoning:
+
+```prolog
+% A tool that computes then explains
+:- tool(explain_calculation(A, B), "Calculate and explain the result").
+
+tool(explain_calculation(A, B, Explanation)) :-
+    Sum is A + B,  % Prolog computation
+    format(string(Desc), "Explain ~w + ~w = ~w to a child", [A, B, Sum]),
+    task(Desc, Explanation).  % LLM explanation
+
+% A tool that uses LLM for formatting
+:- tool(format_data(Data), "Format data nicely using LLM").
+
+tool(format_data(Data, FormattedOutput)) :-
+    format(string(Desc), "Format this data nicely: ~w", [Data]),
+    task(Desc, FormattedOutput).
+```
+
+**Important:** When `task()` runs inside a tool, the nested agent does NOT have access to DML tools (to prevent infinite recursion). It only has access to `finish` and `set_result`.
 
 ---
 

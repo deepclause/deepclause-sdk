@@ -83,18 +83,20 @@ DML Code → Prolog Engine → Yield Request → Runner Handler → Resume Engin
 **Responsibilities**:
 - Build system prompts with task description and available tools
 - Run iterative LLM calls until task completion
-- Handle built-in agent tools: `finish()`, `set_result()`
+- Handle built-in LLM tools: `finish()`, `set_result()`
 - Convert registered tools to AI SDK format
 - Support streaming responses
 - Maintain conversation history within a task
 - Return messages for memory persistence
 
-**Built-in Agent Tools** (available during `task()` execution):
+**Built-in LLM Tools** (available to the LLM during `task()` execution):
 
 | Tool | Description |
 |------|-------------|
 | `finish(success)` | Signal task completion (true/false) - **required** |
 | `set_result(variable, value)` | Store result value for output variables |
+
+**Note:** These are tools the LLM calls, not Prolog predicates. They cannot be called directly from DML code.
 
 **Agent Loop Cycle**:
 ```
@@ -183,16 +185,18 @@ agent_main(Topic) :-
     task("Research {Topic} using the search tool.").
 ```
 
-#### Agent-Internal Tools (built into agent loop)
+#### Agent-Internal Tools (LLM-only, not Prolog predicates)
 
-These tools are **always available** to the LLM during `task()` execution and are handled directly by the agent loop:
+These tools are **only available to the LLM** during `task()` execution. They are NOT Prolog predicates and cannot be called directly from DML code:
 
 | Tool | Description |
 |------|-------------|
 | `finish(success)` | **Required** - Signal task completion (true/false) |
 | `set_result(variable, value)` | Store result in an output variable |
 
-These cannot be overridden by user-defined tools.
+These are handled by the agent loop and cannot be overridden by user-defined tools.
+
+**Important:** When a `task()` has output variables (e.g., `task(Desc, Result)`), the LLM uses `set_result` internally to populate them. The DML code receives the result through Prolog unification, not by calling `set_result` directly.
 
 #### State Isolation Summary
 
@@ -218,6 +222,25 @@ These cannot be overridden by user-defined tools.
 1. Tools cannot corrupt the main program state
 2. Backtracking in the main program doesn't re-execute tools
 3. LLM tool calls are predictable and repeatable
+
+#### Nested Agent Loops in Tools
+
+Tools can use `task()` and `prompt()` internally to combine Prolog logic with LLM reasoning:
+
+```prolog
+tool(explain_calculation(A, B, Explanation)) :-
+    Sum is A + B,  % Prolog computation
+    format(string(Desc), "Explain ~w + ~w = ~w to a child", [A, B, Sum]),
+    task(Desc, Explanation).  % LLM explanation
+```
+
+When `task()` runs inside a tool:
+1. The tool engine yields `request_agent_loop` with the task description
+2. TypeScript runs a nested agent loop via `runAgentLoop()`
+3. The result is posted back via `post_tool_agent_result()`
+4. The tool engine resumes with the result bound to the output variable
+
+**Important:** Nested agent loops do NOT have access to DML tools (to prevent infinite recursion). They only have access to `finish` and `set_result`.
 
 ---
 
@@ -379,13 +402,13 @@ Tools are registered in TypeScript and exposed to both:
 DML (DeepClause Markup Language) is Prolog with extensions:
 
 ```prolog
-% Entry point
+% Entry point - task() returns results via Prolog unification
 agent_main(Topic) :-
     system("You are a research assistant"),
     task("Research the topic: ~w", [Topic]),
-    task("Write a summary of your findings", Summary),
-    set_result(summary, Summary),
-    finish(success).
+    task("Write a summary of your findings", Summary),  % Summary bound by LLM
+    output(Summary),   % output/1 is a Prolog predicate
+    answer("Done!").   % answer/1 is a Prolog predicate
 
 % String interpolation
 task("Hello ~w!", [Name]).
@@ -393,18 +416,18 @@ task("Hello ~w!", [Name]).
 % Parameter access  
 param(api_key, Key).
 
-% External tools via exec/2
+% External tools via exec/2 (Prolog predicate)
 exec(web_search(query: Topic), SearchResults),  % Brave web search
 exec(vm_exec(command: "python3 script.py"), ExecResult),  % AgentVM code execution
-
-% Agent-internal tools
-set_result(variable_name, value),  % Store output variable
-finish(success).  % Required: Mark completion
 
 % Tool definitions (LLM-accessible wrappers)
 tool(search(Query, Results), "Search the web for information") :-
     exec(web_search(query: Query), Results).
 ```
+
+**Prolog predicates** (callable from DML): `task/N`, `system/1`, `user/1`, `output/1`, `answer/1`, `exec/2`, `param/2`
+
+**LLM-internal tools** (only callable by LLM inside task): `finish()`, `set_result()`, plus any `tool/2` definitions
 
 ---
 
@@ -443,23 +466,22 @@ Provider is auto-detected from model name or can be explicitly specified.
 ```typescript
 const sdk = await createDeepClause({ model: 'gemini-2.0-flash' });
 
-// Tools are pre-registered: web_search, news_search, vm_exec, ask_user, set_result, finish
+// External tools are pre-registered: web_search, news_search, vm_exec, ask_user
+// LLM-internal tools (finish, set_result) are automatic inside task()
 
 const dml = `
 agent_main(Topic) :-
     system("You are a research analyst with web search capabilities"),
     task("Search for information about: ~w", [Topic]),
     task("Write a comprehensive report based on your research", Report),
-    % Save report using AgentVM
-    exec(vm_exec(command: "cat > /tmp/report.md"), _),
-    set_result(report, Report),
-    finish(success).
+    % Report is bound by the LLM via set_result internally
+    output(Report),
+    answer("Research complete!").
 `;
 
 for await (const event of sdk.runDML(dml, { args: ["AI trends"] })) {
   if (event.type === 'stream') process.stdout.write(event.content);
   if (event.type === 'answer') console.log(event.content);
-  if (event.type === 'finished') console.log('Report:', event.results?.report);
 }
 ```
 

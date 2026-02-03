@@ -52,17 +52,19 @@ agent_main :-
     task("Find related articles about {Topic}, store URLs in Articles", Articles).
 ```
 
-### 1.3 Agent Loop Tools
+### 1.3 Agent Loop Tools (LLM-Only, Not Prolog Predicates)
 
-When `task()` runs, the LLM agent has access to these built-in tools:
+When `task()` runs, the LLM agent has access to these built-in tools. **These are NOT Prolog predicates** - they can only be called by the LLM inside a task, not from DML code directly:
 
 | Tool | Description |
 |------|-------------|
 | `finish(true)` | Complete task successfully, `task()` succeeds |
 | `finish(false)` | Complete task with failure, `task()` fails (triggers backtracking) |
 | `ask_user(prompt)` | Pause and wait for user input, stays in agent loop |
-| `store(variable, value)` | Store a value in one of the task's output variables |
+| `set_result(variable, value)` | Store a value in one of the task's output variables |
 | Any `tool(...)` predicate | User-defined tool wrappers from the DML source file |
+
+**Note:** Results from `task()` are returned via Prolog unification, not by calling `set_result` in DML code.
 
 ### 1.4 External Tool Execution
 
