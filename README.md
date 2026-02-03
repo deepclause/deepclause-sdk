@@ -123,12 +123,12 @@ deepclause run .deepclause/tools/explain.dml "function fib(n) { return n < 2 ? n
 
 ## Use Cases
 
-### Coding agents building their own tools
+### Reliable tools for coding agents
 
-AI coding assistants can compile task descriptions on the fly:
+Give your AI coding assistant more deterministic, inspectable tools instead of hoping prompts work:
 
 ```bash
-# Agent writes a task description
+# Define a tool the agent can use
 cat > .deepclause/tools/api-docs.md << 'EOF'
 # API Documentation Lookup
 Search for API documentation and summarize usage patterns.
@@ -144,14 +144,14 @@ Search for API documentation and summarize usage patterns.
 - Summarize usage patterns and examples
 EOF
 
-# Compile it
+# Compile it once
 deepclause compile .deepclause/tools/api-docs.md
 
-# Use it whenever needed
+# Now your coding agent can run it reliably
 deepclause run .deepclause/tools/api-docs.dml "Stripe PaymentIntent"
 ```
 
-The compiled `.dml` files are deterministic—same input, same execution path. The agent builds up a library of reliable tools.
+The compiled `.dml` files execute the same way every time—no prompt variance, no skipped steps. Build up a library of tools your agent can trust.
 
 ### Automation pipelines
 
@@ -235,6 +235,8 @@ Skills can use these built-in tools:
 
 Configure tools in `.deepclause/config.json`.
 
+MCP support is on the roadmap.
+
 ## CLI Reference
 
 ```bash
@@ -251,7 +253,7 @@ deepclause set-model <model>       # Change default model
 
 ```bash
 deepclause run skill.dml "input" \
-  --model google/gemini-2.5-flash \   # Override model
+  --model google/gemini-2.5-flash \   # Override model (e.g. use cheaper model for execution, SOTA model for planning/compilation)
   --stream \                           # Stream output
   --verbose \                          # Show tool calls
   --workspace ./data                   # Set working directory
@@ -328,7 +330,7 @@ agent_main(Question) :-
     answer("Done").
 ```
 
-If `validate_answer` fails, Prolog backtracks and tries the second clause. No explicit if/else needed.
+If `validate_answer` fails, Prolog backtracks and tries the second clause. No explicit if/else needed. Backtracking resets the execution state (including LLM context) to the original choice point!
 
 ### Recursion: Processing Lists
 
