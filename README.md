@@ -12,6 +12,15 @@ DeepClause takes a different approach: **compile task descriptions into Prolog-b
 Markdown description  →  compile  →  Logic program (DML)  →  run  →  Output
 ```
 
+## Sandboxed by Default
+
+Everything runs in WebAssembly—no native code execution, no container setup required:
+
+- **[AgentVM](https://github.com/deepclause/agentvm)**: A lightweight WASM-based Linux environment for shell commands, file operations, and Python/Node execution
+- **Prolog runtime**: The logic engine itself runs in WASM (SWI-Prolog compiled to WebAssembly)
+
+This means that DML tools and agents can execute arbitrary shell commands without escaping to your host system.
+
 ## Spec-Driven Development That Compiles
 
 [Spec-driven development](https://martinfowler.com/articles/exploring-gen-ai/sdd-3-tools.html) proposes writing specifications before code, with the spec becoming the source of truth. Current SDD tools (Kiro, spec-kit, Tessl) generate elaborate markdown artifacts that are then fed to coding agents—but the output is still non-deterministic, and you end up reviewing both specs *and* generated code.
