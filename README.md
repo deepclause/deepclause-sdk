@@ -24,8 +24,11 @@ cat > api-client.md << 'EOF'
 # API Client Generator
 Generate a TypeScript API client from an OpenAPI spec URL.
 
+## Arguments
+- SpecUrl: URL to an OpenAPI/Swagger JSON specification
+
 ## Behavior
-- Fetch the OpenAPI spec
+- Fetch the OpenAPI spec from SpecUrl
 - Extract endpoints and types
 - Generate typed client code
 - Write to output file
@@ -61,17 +64,23 @@ Unlike traditional SDD where specs guide but don't control, DeepClause specs **b
 # Install
 npm install -g deepclause-sdk
 
-# Set API key
+# Set API key (or ANTHROPIC_API_KEY, GOOGLE_API_KEY, etc.)
 export OPENAI_API_KEY="sk-..."
 
 # Initialize in your project
 deepclause init
+
+# Configure the model for compilation
+deepclause set-model openai/gpt-4o
 
 # Create a task description
 cat > .deepclause/tools/explain.md << 'EOF'
 # Code Explainer
 
 Explain what a piece of code does in plain English.
+
+## Arguments
+- Code: The source code to explain
 
 ## Behavior
 - Break down the code into logical sections
@@ -97,7 +106,16 @@ AI coding assistants can compile task descriptions on the fly:
 cat > .deepclause/tools/api-docs.md << 'EOF'
 # API Documentation Lookup
 Search for API documentation and summarize usage patterns.
-Use web_search to find official docs.
+
+## Arguments
+- Query: The API or library name to look up
+
+## Tools needed
+- web_search
+
+## Behavior
+- Search for official documentation
+- Summarize usage patterns and examples
 EOF
 
 # Compile it
@@ -129,12 +147,14 @@ Check `.dml` files into version control. The logic is inspectable—you can see 
 # Web Research
 Search the web and synthesize findings into a report.
 
+## Arguments
+- Question: The research question to investigate
+
 ## Tools needed
 - web_search
 
 ## Behavior
-- Take a research question as input
-- Search for 3-5 authoritative sources
+- Search for 3-5 authoritative sources on the Question
 - Extract key findings from each
 - Write a summary with inline citations
 ```
@@ -144,11 +164,14 @@ Search the web and synthesize findings into a report.
 # Code Review
 Review code for bugs, security issues, and style.
 
+## Arguments
+- FilePath: Path to the file to review
+
 ## Tools needed
 - vm_exec (to read files)
 
 ## Behavior
-- Read the specified file
+- Read the file at FilePath
 - Check for common bugs and anti-patterns
 - Identify security concerns
 - Suggest improvements
@@ -160,11 +183,14 @@ Review code for bugs, security issues, and style.
 # CSV Analyzer
 Analyze a CSV file and describe its contents.
 
+## Arguments
+- FilePath: Path to the CSV file to analyze
+
 ## Tools needed  
 - vm_exec (to run Python)
 
 ## Behavior
-- Load the CSV with pandas
+- Load the CSV at FilePath with pandas
 - Describe the schema (columns, types, row count)
 - Identify interesting patterns
 - Generate summary statistics
@@ -215,6 +241,21 @@ deepclause run skill.dml "input" \
   "agentvm": { "network": true }
 }
 ```
+
+### Model at Compile Time vs Run Time
+
+The model specified in `config.json` (or via `--model`) is used during **compilation** to generate the DML program. At **run time**, you can use a different model:
+
+```bash
+# Compile with GPT-4o (better at understanding intent)
+deepclause set-model openai/gpt-4o
+deepclause compile research.md
+
+# Run with a faster/cheaper model
+deepclause run research.dml "quantum computing" --model google/gemini-2.5-flash
+```
+
+This lets you use a more capable model for the one-time compilation step, then execute with a faster or cheaper model for repeated runs.
 
 ### Supported Models
 
