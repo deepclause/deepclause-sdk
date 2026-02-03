@@ -18,6 +18,7 @@ node dist/cli/index.js run dml-examples/<example>.dml
 
 - **`test.dml`** - Simple test program
 - **`vm-exec.dml`** - Demonstrates executing external tools via `exec/2`
+- **`conversational-agent.dml`** - Minimal conversational agent with web search and code execution
 
 ### Agent Patterns
 

@@ -1,0 +1,34 @@
+% ============================================================================
+% Conversational Agent - Minimal example with search and VM execution
+% ============================================================================
+%
+% A simple conversational agent that can search the web and execute code.
+% Runs in interactive dialog mode.
+%
+% Usage:
+%   deepclause run dml-examples/conversational-agent.dml
+%
+% ============================================================================
+
+% Tool: Search the web
+tool(search(Query, Results), "Search the web for information") :-
+    exec(web_search(query: Query), Results).
+
+% Tool: Execute code in a sandboxed VM
+tool(run_code(Code, Output), "Execute shell commands or code in a sandboxed Linux VM") :-
+    exec(vm_exec(command: Code), Output).
+
+% Tool: Ask the user for input
+tool(ask(Prompt, Response), "Ask the user a question and get their response") :-
+    exec(ask_user(prompt: Prompt), Result),
+    Response = Result.user_response.
+
+% Main agent - interactive dialog loop
+agent_main :-
+    system("You are a helpful assistant with access to web search and code execution."),
+    system("Use the search tool to find current information."),
+    system("Use the run_code tool to execute Python, shell commands, or any code."),
+    system("Use the ask tool to ask the user questions or get more information."),
+    system("When the user says goodbye or wants to exit, use finish(true) to end the conversation."),
+    task("Start a conversation with the user. Ask how you can help them today, then assist with their requests. Continue the dialog until they want to stop."),
+    answer("Goodbye!").

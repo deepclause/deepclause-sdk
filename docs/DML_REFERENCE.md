@@ -149,14 +149,11 @@ exec(get_time, CurrentTime)
 
 ### Tool Definitions
 
-Define tools in DML that the LLM can call during `task()`. Tools wrap `exec/2` calls to registered TypeScript tools:
+Define tools in DML that the LLM can call during `task()`. Tools use the `tool/2` predicate with a description:
 
 ```prolog
-% Declare tool schema - makes it available to the LLM
-:- tool(calculate(Expression), "Calculate a mathematical expression").
-
-% Implement the tool - called when LLM uses it
-tool(calculate(Expression, Result)) :-
+% Define a tool - makes it available to the LLM with description
+tool(calculate(Expression, Result), "Calculate a mathematical expression") :-
     exec(calculator(expression: Expression), Result).
 
 agent_main :-
@@ -165,21 +162,17 @@ agent_main :-
     answer("Done").
 ```
 
-Tool declarations have the form:
+Tool definitions have the form:
 ```prolog
-:- tool(name(Arg1, Arg2, ...), "Description").
+tool(name(Arg1, Arg2, ..., Result), "Description") :- Body.
 ```
 
-Tool implementations match:
-```prolog
-tool(name(Arg1, Arg2, ..., Result)) :- ...
+The last argument is typically the output. The description is shown to the LLM.
 ```
 
 You can add Prolog logic in tool implementations:
 ```prolog
-:- tool(safe_divide(A, B), "Safely divide two numbers").
-
-tool(safe_divide(A, B, Result)) :-
+tool(safe_divide(A, B, Result), "Safely divide two numbers") :-
     (   B =:= 0
     ->  Result = error("Division by zero")
     ;   exec(calculator(expression: A/B), Result)
@@ -401,14 +394,14 @@ throw(Error)
 
 ## String Interpolation
 
-Text arguments support `{{variable}}` interpolation with parameters:
+Text arguments support `{variable}` interpolation with parameters:
 
 ```prolog
 agent_main :-
     param(topic, "Research topic", Topic),
     system("You are a research assistant."),
-    task("Research the topic: {{topic}}"),  % Topic is interpolated
-    answer("Research on {{topic}} complete!").
+    task("Research the topic: {topic}"),  % Topic is interpolated
+    answer("Research on {topic} complete!").
 ```
 
 ---
@@ -480,6 +473,8 @@ agent_main :-
     process_items([apple, banana, cherry]),
     answer("All items processed").
 ```
+
+Not all builtin SWI Prolog predicates are guaranteed to work at this stage!
 
 ### Arithmetic
 ```prolog

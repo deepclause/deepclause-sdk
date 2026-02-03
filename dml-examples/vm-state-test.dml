@@ -1,0 +1,39 @@
+% Test VM state persistence - check if cwd, files, env vars persist across exec calls
+
+agent_main :-
+    output("Test 1: Create a directory and cd into it"),
+    exec(vm_exec(command: "mkdir -p /tmp/testdir && cd /tmp/testdir && pwd"), R1),
+    format(string(Out1), "Result: ~w", [R1]),
+    output(Out1),
+    
+    output(""),
+    output("Test 2: Check pwd without cd (is it still in /tmp/testdir?)"),
+    exec(vm_exec(command: "pwd"), R2),
+    format(string(Out2), "Result: ~w", [R2]),
+    output(Out2),
+    
+    output(""),
+    output("Test 3: Create a file"),
+    exec(vm_exec(command: "echo hello > /tmp/testdir/test.txt"), R3),
+    format(string(Out3), "Result: ~w", [R3]),
+    output(Out3),
+    
+    output(""),
+    output("Test 4: Read the file (does it persist?)"),
+    exec(vm_exec(command: "cat /tmp/testdir/test.txt"), R4),
+    format(string(Out4), "Result: ~w", [R4]),
+    output(Out4),
+    
+    output(""),
+    output("Test 5: Set env var"),
+    exec(vm_exec(command: "export MYVAR=hello && echo $MYVAR"), R5),
+    format(string(Out5), "Result: ~w", [R5]),
+    output(Out5),
+    
+    output(""),
+    output("Test 6: Check env var (does it persist?)"),
+    exec(vm_exec(command: "echo $MYVAR"), R6),
+    format(string(Out6), "Result: ~w", [R6]),
+    output(Out6),
+    
+    answer("Done").

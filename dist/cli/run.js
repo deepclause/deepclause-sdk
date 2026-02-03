@@ -24,6 +24,8 @@ async function getAgentVM(workspacePath, network) {
             mounts: { '/workspace': workspacePath }
         });
         await agentVMInstance.start();
+        // Set initial working directory to the workspace mount point
+        await agentVMInstance.exec('cd /workspace');
     }
     return agentVMInstance;
 }

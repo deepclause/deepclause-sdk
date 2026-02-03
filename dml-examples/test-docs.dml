@@ -1,0 +1,30 @@
+% Helper to log progress
+step(N, Desc) :-
+    format(string(Msg), "Step ~w: ~w", [N, Desc]),
+    output(Msg).
+
+% Main entry point
+agent_main :-
+    param(topic, "Research topic", Topic),
+    
+    % Set up the assistant
+    system("You are a thorough research assistant."),
+    system("Provide detailed, accurate information."),
+    
+    % Step 1: Overview
+    step(1, "Getting overview"),
+    format(string(Task1), "Provide a brief overview of ~w", [Topic]),
+    task(Task1),
+    
+    % Step 2: Key concepts
+    step(2, "Identifying key concepts"),
+    task("List the 3 most important concepts related to this topic. Store them in Concepts.", Concepts),
+    
+    % Step 3: Deep dive
+    step(3, "Deep dive analysis"),
+    format(string(Task3), "Explain these concepts in detail: ~w", [Concepts]),
+    task(Task3),
+    
+    % Complete
+    format(string(FinalMsg), "Research on '~w' complete!", [Topic]),
+    answer(FinalMsg).
