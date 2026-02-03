@@ -5,6 +5,9 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "deepclause": "./dist/cli/index.js"
+  },
   "exports": {
     ".": {
       "import": "./dist/index.js",
@@ -29,6 +32,7 @@
     "@ai-sdk/google": "^3.0.20",
     "@ai-sdk/openai": "^3.0.25",
     "ai": "^6.0.67",
+    "commander": "^12.1.0",
     "deepclause-agentvm": "^0.0.3",
     "swipl-wasm": "file:./vendor/swipl-wasm",
     "zod": "^3.23.0"
