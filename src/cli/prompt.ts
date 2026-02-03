@@ -148,12 +148,34 @@ are primarily useful for manual isolation within a clause.
 
 #### Tool Definitions
 
-Define tools that the LLM can call during \`task()\`:
+Define tools that the LLM can call during \`task()\` execution:
 
 \`\`\`prolog
 % Tool wrapper (description is second arg, body calls exec)
 tool(search(Query, Results), "Search the web for information") :-
     exec(web_search(query: Query), Results).
+\`\`\`
+
+**CRITICAL: Tools are LLM-only!** Tools defined with \`tool/3\` can ONLY be called by the 
+LLM during \`task()\` execution. You CANNOT call tools directly from DML code:
+
+\`\`\`prolog
+% WRONG - tools cannot be called directly from DML!
+agent_main :-
+    search("AI news", Results),  % ERROR: search/2 is not a regular predicate
+    output(Results).
+
+% CORRECT - let the LLM call the tool via task()
+agent_main :-
+    system("You are a research assistant. Use the search tool to find information."),
+    task("Search for AI news and summarize the results.", Summary),
+    output(Summary).
+
+% CORRECT - use exec() directly if you need to call the external tool from DML
+agent_main :-
+    exec(web_search(query: "AI news"), Results),  % Direct external tool call
+    get_dict(results, Results, Data),
+    output(Data).
 \`\`\`
 #### Using \`task()\` and \`prompt()\` Inside Tools
 
@@ -208,13 +230,16 @@ tool(cheap_task(Input, Output), "Process without expensive tools") :-
 \`\`\`
 #### Built-in Agent Tools
 
-During \`task()\` execution, the LLM has access to these built-in tools:
+During \`task()\` execution, the LLM has access to these built-in tools (plus any you define with \`tool/3\`):
 
 | Tool | Description |
 |------|-------------|
 | \`store(variable, value)\` | Store a result in an output variable |
 | \`ask_user(prompt)\` | Ask the user for input or clarification |
 | \`finish(success)\` | Complete the task |
+
+**Remember:** These tools (and your custom \`tool/3\` definitions) are only available to the 
+LLM during \`task()\` calls. DML code uses \`exec()\` for direct external tool access.
 
 **Important:** If your task might need user input (clarification, choices, confirmation), 
 you should define an \`ask_user\` tool wrapper so the LLM can request input:
@@ -554,6 +579,126 @@ close(S)
 
 ---
 
+## File Access Patterns with vm_exec
+
+AgentVM runs a sandboxed Alpine Linux VM using **BusyBox** (not GNU coreutils). 
+Some GNU-specific options may not be available. The workspace is mounted at \`/workspace\`.
+
+**Important:** \`vm_exec\` returns a dict - always extract stdout:
+\`\`\`prolog
+exec(vm_exec(command: "ls /workspace"), Result),
+get_dict(stdout, Result, Output).
+\`\`\`
+
+### Common File Operations
+
+| Operation | Command | Example |
+|-----------|---------|---------|
+| List files | \`ls {dir}\` | \`ls /workspace/src\` |
+| Find by name | \`find {dir} -name '{pattern}' -type f\` | \`find /workspace -name '*.ts' -type f\` |
+| Find shallow | \`find {dir} -maxdepth 1 -name '{pattern}'\` | \`find /workspace/src -maxdepth 1 -name '*.ts'\` |
+| Read file | \`cat {path}\` | \`cat /workspace/README.md\` |
+| Read first N lines | \`head -{n} {path}\` | \`head -10 /workspace/file.ts\` |
+| Read last N lines | \`tail -{n} {path}\` | \`tail -5 /workspace/file.ts\` |
+| Read line range | \`sed -n '{start},{end}p' {path}\` | \`sed -n '1,10p' /workspace/file.ts\` |
+| Grep in file | \`grep '{pattern}' {path}\` | \`grep 'import' /workspace/file.ts\` |
+| Grep with line nums | \`grep -n '{pattern}' {path}\` | \`grep -n 'export' /workspace/file.ts\` |
+| Grep recursive | \`grep -rn '{pattern}' {dir}\` | \`grep -rn 'TODO' /workspace/src\` |
+| File exists | \`test -f {path} && echo yes\` | \`test -f /workspace/file.ts && echo yes\` |
+| Dir exists | \`test -d {path} && echo yes\` | \`test -d /workspace/src && echo yes\` |
+| File size | \`stat -c %s {path}\` | \`stat -c %s /workspace/file.ts\` |
+| Line count | \`wc -l < {path}\` | \`wc -l < /workspace/file.ts\` |
+| Count files | \`find ... \\| wc -l\` | \`find /workspace -name '*.ts' \\| wc -l\` |
+| Basename | \`basename {path}\` | \`basename /workspace/src/file.ts\` |
+| Dirname | \`dirname {path}\` | \`dirname /workspace/src/file.ts\` |
+
+### DML File Access Patterns
+
+#### List Directory
+\`\`\`prolog
+list_files(Dir, Files) :-
+    format(string(Cmd), "ls ~w", [Dir]),
+    exec(vm_exec(command: Cmd), Result),
+    get_dict(stdout, Result, Output),
+    split_string(Output, "\\n", "\\s\\t\\r\\n", Files).
+\`\`\`
+
+#### Find Files by Pattern
+\`\`\`prolog
+find_files(Dir, Pattern, Files) :-
+    format(string(Cmd), "find ~w -name '~w' -type f", [Dir, Pattern]),
+    exec(vm_exec(command: Cmd), Result),
+    get_dict(stdout, Result, Output),
+    split_string(Output, "\\n", "\\s\\t\\r\\n", Files).
+\`\`\`
+
+#### Read File
+\`\`\`prolog
+read_file(Path, Content) :-
+    format(string(Cmd), "cat ~w", [Path]),
+    exec(vm_exec(command: Cmd), Result),
+    get_dict(stdout, Result, Content).
+\`\`\`
+
+#### Read First N Lines
+\`\`\`prolog
+read_head(Path, N, Content) :-
+    format(string(Cmd), "head -~d ~w", [N, Path]),
+    exec(vm_exec(command: Cmd), Result),
+    get_dict(stdout, Result, Content).
+\`\`\`
+
+#### Read Line Range
+\`\`\`prolog
+read_lines(Path, Start, End, Content) :-
+    format(string(Cmd), "sed -n '~d,~dp' ~w", [Start, End, Path]),
+    exec(vm_exec(command: Cmd), Result),
+    get_dict(stdout, Result, Content).
+\`\`\`
+
+#### Grep in File
+\`\`\`prolog
+grep(Path, Pattern, Matches) :-
+    format(string(Cmd), "grep -n '~w' ~w || true", [Pattern, Path]),
+    exec(vm_exec(command: Cmd), Result),
+    get_dict(stdout, Result, Matches).
+\`\`\`
+
+#### Recursive Grep
+\`\`\`prolog
+grep_recursive(Dir, Pattern, Matches) :-
+    format(string(Cmd), "grep -rn '~w' ~w || true", [Pattern, Dir]),
+    exec(vm_exec(command: Cmd), Result),
+    get_dict(stdout, Result, Matches).
+\`\`\`
+
+#### File Exists Check
+\`\`\`prolog
+file_exists(Path) :-
+    format(string(Cmd), "test -f ~w && echo yes || echo no", [Path]),
+    exec(vm_exec(command: Cmd), Result),
+    get_dict(stdout, Result, "yes").
+\`\`\`
+
+#### Line Count
+\`\`\`prolog
+line_count(Path, Count) :-
+    format(string(Cmd), "wc -l < ~w", [Path]),
+    exec(vm_exec(command: Cmd), Result),
+    get_dict(stdout, Result, Output),
+    normalize_space(atom(CountAtom), Output),
+    atom_number(CountAtom, Count).
+\`\`\`
+
+### BusyBox Limitations
+
+BusyBox in Alpine Linux has limited options compared to GNU coreutils:
+- \`grep --include\` is NOT supported - use \`find ... -exec grep\` instead
+- Some \`find\` options may differ
+- Use \`|| true\` with grep to prevent failures when no matches found
+
+---
+
 ## Conversion Guidelines
 
 1. **Identify the core task** - What is the primary goal?
@@ -565,6 +710,28 @@ close(S)
 7. **Handle edge cases** - Add fallbacks and error handling
 8. **Add progress output** - Keep users informed with \`output/1\`
 9. **Add ask_user wrapper** - If the task might need user input, clarification, or choices
+
+## CRITICAL: Tools are LLM-Only
+
+**Tools defined with \`tool/3\` can ONLY be called by the LLM during \`task()\` execution.**
+
+- \`tool/3\` defines capabilities for the LLM to use
+- DML code CANNOT call tools directly as predicates
+- If DML code needs external functionality, use \`exec()\` directly
+
+\`\`\`prolog
+% WRONG - cannot call tool from DML code
+agent_main :-
+    my_search("query", Results).  % ERROR!
+
+% CORRECT - use exec() for direct access
+agent_main :-
+    exec(web_search(query: "query"), Results).
+
+% CORRECT - let LLM use the tool via task()
+agent_main :-
+    task("Search for information about X.", Summary).
+\`\`\`
 
 ## CRITICAL: String Handling Rules
 
