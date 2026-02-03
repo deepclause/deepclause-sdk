@@ -9,6 +9,8 @@
 - [Core Predicates](#core-predicates)
   - [task/1, task/2, task/3, task/4](#task-predicates)
   - [exec/2](#exec2)
+  - [Tool Definitions](#tool-definitions)
+  - [Tool Scoping](#tool-scoping)
   - [system/1, user/1](#memory-predicates)
   - [output/1, yield/1, log/1](#output-predicates)
   - [answer/1](#answer1)
@@ -205,7 +207,58 @@ tool(format_data(Data, FormattedOutput)) :-
     task(Desc, FormattedOutput).
 ```
 
-**Important:** When `task()` runs inside a tool, the nested agent does NOT have access to DML tools (to prevent infinite recursion). It only has access to `finish` and `set_result`.
+**Note:** When `task()` runs inside a tool, the nested agent has access to all DML tools **except** the tool that is currently executing (automatic call stack exclusion to prevent infinite recursion). You can further control tool access using `with_tools/2` and `without_tools/2`.
+
+---
+
+### Tool Scoping
+
+You can control which tools are available to nested `task()` calls using `with_tools/2` and `without_tools/2`.
+
+#### `with_tools(+ToolList, +Goal)`
+
+Run Goal with only the specified tools available to nested tasks:
+
+```prolog
+% Only allow tool_a and tool_b in the nested task
+tool(restricted_task(Input, Output), "Runs with limited tools") :-
+    with_tools([tool_a, tool_b], (
+        format(string(Desc), "Process '~w' using available tools", [Input]),
+        task(Desc, Output)
+    )).
+```
+
+#### `without_tools(+ToolList, +Goal)`
+
+Run Goal with the specified tools excluded from nested tasks:
+
+```prolog
+% Exclude expensive_tool from the nested task
+tool(cheap_task(Input, Output), "Runs without expensive tools") :-
+    without_tools([expensive_tool], (
+        format(string(Desc), "Process '~w' cheaply", [Input]),
+        task(Desc, Output)
+    )).
+```
+
+#### Using Tool Scoping in `agent_main`
+
+You can also use `with_tools/2` and `without_tools/2` directly in `agent_main`:
+
+```prolog
+agent_main :-
+    system("You are a safe assistant."),
+    
+    % Run task with only safe tools
+    with_tools([read_file, list_files], (
+        task("Analyze the files in the workspace.", Analysis)
+    )),
+    
+    output(Analysis),
+    answer("Done").
+```
+
+**Automatic call stack exclusion:** When a tool calls `task()`, the calling tool is automatically excluded from the nested agent's available tools to prevent infinite recursion. This happens in addition to any manual scoping via `with_tools/2` or `without_tools/2`.
 
 ---
 

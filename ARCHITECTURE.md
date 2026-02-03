@@ -240,7 +240,37 @@ When `task()` runs inside a tool:
 3. The result is posted back via `post_tool_agent_result()`
 4. The tool engine resumes with the result bound to the output variable
 
-**Important:** Nested agent loops do NOT have access to DML tools (to prevent infinite recursion). They only have access to `finish` and `set_result`.
+**Tool Availability:** Nested agent loops have access to all DML tools **except** the calling tool (automatic call stack exclusion to prevent infinite recursion).
+
+#### Manual Tool Scoping
+
+You can further control tool availability using `with_tools/2` and `without_tools/2`:
+
+```prolog
+% Only allow specific tools in nested task
+tool(restricted_task(Input, Output), "Runs with limited tools") :-
+    with_tools([tool_a, tool_b], (
+        format(string(Desc), "Process '~w'", [Input]),
+        task(Desc, Output)
+    )).
+
+% Exclude specific tools from nested task
+tool(safe_task(Input, Output), "Excludes dangerous tools") :-
+    without_tools([dangerous_tool], (
+        format(string(Desc), "Process '~w' safely", [Input]),
+        task(Desc, Output)
+    )).
+```
+
+Tool scoping can also be used directly in `agent_main`:
+
+```prolog
+agent_main :-
+    with_tools([safe_tool], (
+        task("Do something with only safe tools", Result)
+    )),
+    answer(Result).
+```
 
 ---
 

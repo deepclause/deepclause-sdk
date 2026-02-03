@@ -27,6 +27,7 @@ node dist/cli/index.js run dml-examples/<example>.dml
 ### Advanced Features
 
 - **`nested-task-test.dml`** - Demonstrates using `task()` inside tool definitions to combine Prolog logic with LLM reasoning
+- **`tool-scoping-test.dml`** - Demonstrates manual tool scoping with `with_tools/2` and `without_tools/2` to control which tools are available to nested tasks
 - **`deep_research.dml`** - Deep research agent with multi-step reasoning
 
 ## Key Concepts Demonstrated
@@ -51,6 +52,24 @@ tool(explain_calculation(A, B, Explanation)) :-
     Sum is A + B,  % Prolog computation
     format(string(Desc), "Explain ~w + ~w = ~w to a child", [A, B, Sum]),
     task(Desc, Explanation).  % LLM explanation
+```
+
+### Tool Scoping
+
+```prolog
+% Control which tools are available to nested tasks
+tool(restricted_task(Input, Output), "Only allows specific tools") :-
+    with_tools([tool_a, tool_b], (
+        format(string(Desc), "Process '~w' with limited tools", [Input]),
+        task(Desc, Output)
+    )).
+
+% Exclude specific tools from nested tasks
+tool(safe_task(Input, Output), "Excludes dangerous tools") :-
+    without_tools([dangerous_tool], (
+        format(string(Desc), "Process '~w' safely", [Input]),
+        task(Desc, Output)
+    )).
 ```
 
 ### Knowledge Base Integration
