@@ -1,4 +1,4 @@
-# DeepClause
+# DeepClause CLI and SDK
 
 Compile markdown specs into executable logic programs. Guaranteed execution semantics for agentic workflows.
 
