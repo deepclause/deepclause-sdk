@@ -1,6 +1,6 @@
 # DeepClause
 
-Compile natural language task descriptions into executable logic programs.
+Compile markdown specs into Prolog agents. Guaranteed execution semantics for agentic workflows.
 
 ## What This Is
 
