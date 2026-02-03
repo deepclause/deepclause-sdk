@@ -20,7 +20,7 @@ Everything runs in WebAssembly—no native code execution, no container setup re
 - **[AgentVM](https://github.com/deepclause/agentvm)**: A lightweight WASM-based Linux environment for shell commands, file operations, and Python/Node execution
 - **Prolog runtime**: The logic engine itself runs in WASM (SWI-Prolog compiled to WebAssembly)
 
-This means that DML tools and agents can execute arbitrary shell commands without escaping to your host system.
+This means that DML tools and agents can execute arbitrary shell commands with minimal chance of escaping to your host system.
 
 ## Beyond Markdown: Why Logic Programming?
 
