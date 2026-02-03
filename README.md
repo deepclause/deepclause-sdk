@@ -405,18 +405,6 @@ agent_main(Topic) :-
     answer(Final).
 ```
 
-### When to Use DML Directly
-
-| Use Markdown When... | Use DML When... |
-|---------------------|-----------------|
-| Linear, single-task workflow | Complex control flow needed |
-| No error handling needed | Need retry/fallback logic |
-| Simple input → output | Processing collections |
-| Quick prototyping | Production reliability |
-| Non-programmers writing skills | Fine-grained tool control |
-
-Start with Markdown. Graduate to DML when you need the power.
-
 ## Using as a Library
 
 Embed DeepClause in your own applications:
