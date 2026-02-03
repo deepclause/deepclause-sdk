@@ -1,15 +1,16 @@
 # DeepClause
 
-Compile markdown specs into Prolog agents. Guaranteed execution semantics for agentic workflows.
+Compile markdown specs into executable logic programs. Guaranteed execution semantics for agentic workflows.
 
 ## What This Is
 
 AI skills and tools are everywhere—but most are just prompts. When a prompt fails, you tweak it. When you need branching logic, you write wrapper code. When you want retry behavior, you build it yourself.
 
-DeepClause takes a different approach: **compile task descriptions into Prolog-based programs** that handle control flow, error recovery, and tool orchestration automatically.
+DeepClause takes a different approach: **compile task descriptions into DML programs**—a Prolog-based language that handles control flow, error recovery, and tool orchestration automatically.
+
 
 ```
-Markdown description  →  compile  →  Logic program (DML)  →  run  →  Output
+Markdown description  →  compile  →  Logic program  →  run  →  Output
 ```
 
 ## Sandboxed by Default
