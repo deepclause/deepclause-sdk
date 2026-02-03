@@ -200,7 +200,18 @@ tool(format_data(Data, FormattedOutput)) :-
     task(Desc, FormattedOutput).
 ```
 
-**Note:** When `task()` runs inside a tool, the nested agent has access to all DML tools **except** the tool that is currently executing (automatic call stack exclusion to prevent infinite recursion). You can further control tool access using `with_tools/2` and `without_tools/2`.
+**Memory Isolation:** When `task()` or `prompt()` runs inside a tool, the nested agent starts with **fresh memory**. It does NOT inherit the parent's accumulated memory from `system()`, `user()`, or previous `task()` calls. If you need context in a nested task, pass it explicitly as a tool argument or add it with `system()` inside the tool body.
+
+**Tool Access:** The nested agent has access to all DML tools **except** the tool that is currently executing (automatic call stack exclusion to prevent infinite recursion). You can further control tool access using `with_tools/2` and `without_tools/2`.
+
+```prolog
+% Example: Passing context explicitly
+tool(smart_search(Context, Query, Summary), "Search with context") :-
+    system(Context),  % Add context to nested task's memory
+    exec(web_search(query: Query), Results),
+    format(string(Desc), "Summarize: ~w", [Results]),
+    task(Desc, Summary).
+```
 
 ---
 

@@ -1565,6 +1565,7 @@ is_mi_special_predicate(output(_)).
 is_mi_special_predicate(yield(_)).
 is_mi_special_predicate(log(_)).
 is_mi_special_predicate(system(_)).
+is_mi_special_predicate(user(_)).  %% Add user message to context
 is_mi_special_predicate(task(_)).
 is_mi_special_predicate(task(_,_)).
 is_mi_special_predicate(task(_,_,_)).

@@ -1092,6 +1092,10 @@ export class DMLRunner {
               console.log('[RUNNER] Call stack excluded tools:', nestedExcludedTools);
               console.log('[RUNNER] Tool scope:', toolScopeType, toolScopeList);
               console.log('[RUNNER] Available tools for nested agent:', filteredTools.map(t => t.name));
+              console.log('[RUNNER] Memory passed to nested agent:', memory.length, 'messages');
+              if (memory.length > 0) {
+                console.log('[RUNNER] Memory contents:', JSON.stringify(memory, null, 2));
+              }
             }
             
             // Build tools for nested agent with filtered tool list

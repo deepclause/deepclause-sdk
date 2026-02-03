@@ -67,7 +67,7 @@ agent_main(MaxResults, Topic) :- ...
 
 | Predicate | Description |
 |-----------|-------------|
-| \`task(Description)\` | Execute an LLM task |
+| \`task(Description)\` | Execute an LLM task with accumulated memory |
 | \`task(Description, Var)\` | Execute task, bind result to Var |
 | \`task(Description, Var1, Var2)\` | Execute task, bind two results |
 | \`task(Description, Var1, Var2, Var3)\` | Execute task, bind three results |
@@ -75,6 +75,26 @@ agent_main(MaxResults, Topic) :- ...
 **Important:** Variable names in the description must match the Prolog variables:
 \`\`\`prolog
 task("Analyze this and store the result in Summary.", Summary)
+\`\`\`
+
+#### Fresh LLM Calls (No Memory)
+
+| Predicate | Description |
+|-----------|-------------|
+| \`prompt(Description)\` | Execute LLM with **empty memory** (fresh context) |
+| \`prompt(Description, Var)\` | Fresh LLM call, bind result to Var |
+| \`prompt(Description, Var1, Var2)\` | Fresh LLM call, bind two results |
+| \`prompt(Description, Var1, Var2, Var3)\` | Fresh LLM call, bind three results |
+
+**When to use \`prompt()\` vs \`task()\`:**
+- Use \`task()\` when you want the LLM to have context from previous \`system()\`, \`user()\`, and \`task()\` calls
+- Use \`prompt()\` when you want a completely fresh LLM call without any prior conversation context
+
+\`\`\`prolog
+agent_main :-
+    system("You are a helpful assistant."),
+    task("What is 2+2?"),  % LLM sees the system message
+    prompt("What is 3+3?"). % LLM does NOT see any prior context
 \`\`\`
 
 #### Direct Tool Execution
@@ -96,6 +116,13 @@ get_dict(stdout, Result, Output),
 output(Output).
 \`\`\`
 
+**VM Working Directory:** The VM starts with the working directory set to \`/workspace\`, which is 
+mounted to your actual workspace. Files are directly accessible:
+\`\`\`prolog
+exec(vm_exec(command: "cat README.md"), Result),  % Reads workspace/README.md
+get_dict(stdout, Result, Content).
+\`\`\`
+
 #### Memory Management
 
 | Predicate | Description |
@@ -105,6 +132,10 @@ output(Output).
 | \`push_context\` | Save memory state (for isolation) |
 | \`push_context(clear)\` | Save and clear memory |
 | \`pop_context\` | Restore previous memory state |
+| \`clear_memory\` | Clear all accumulated memory |
+
+**Note:** Memory is automatically restored on backtracking, so \`push_context\`/\`pop_context\` 
+are primarily useful for manual isolation within a clause.
 
 #### Output
 
@@ -124,7 +155,57 @@ Define tools that the LLM can call during \`task()\`:
 tool(search(Query, Results), "Search the web for information") :-
     exec(web_search(query: Query), Results).
 \`\`\`
+#### Using \`task()\` and \`prompt()\` Inside Tools
 
+Tools can use \`task()\` or \`prompt()\` internally to combine Prolog logic with LLM reasoning:
+
+\`\`\`prolog
+% A tool that computes then explains
+tool(explain_calculation(A, B, Explanation), "Calculate and explain the result") :-
+    Sum is A + B,  % Prolog computation
+    format(string(Desc), "Explain ~w + ~w = ~w to a child", [A, B, Sum]),
+    task(Desc, Explanation).  % LLM explanation
+\`\`\`
+
+**Memory Isolation:** Nested \`task()\` calls inside tools run with **fresh memory** - they 
+do NOT have access to the parent's accumulated memory. If you need context, either:
+1. Pass it as a tool argument
+2. Add it explicitly with \`system()\` inside the tool
+
+\`\`\`prolog
+% Pass context explicitly as an argument
+tool(analyze_with_context(Context, Data, Result), "Analyze data with given context") :-
+    system(Context),  % Add context to this tool's memory
+    format(string(Desc), "Analyze: ~w", [Data]),
+    task(Desc, Result).
+\`\`\`
+
+**Automatic Recursion Prevention:** When \`task()\` runs inside a tool, the nested agent 
+cannot call the tool that is currently executing. This prevents infinite recursion.
+
+#### Tool Scoping
+
+Control which tools are available to nested \`task()\` calls:
+
+| Predicate | Description |
+|-----------|-------------|
+| \`with_tools(ToolList, Goal)\` | Run Goal with only specified tools available |
+| \`without_tools(ToolList, Goal)\` | Run Goal excluding specified tools |
+
+\`\`\`prolog
+% Only allow search tool in nested task
+tool(safe_research(Topic, Result), "Research with limited tools") :-
+    with_tools([search], (
+        format(string(Desc), "Research ~w using search", [Topic]),
+        task(Desc, Result)
+    )).
+
+% Exclude expensive tools from nested task  
+tool(cheap_task(Input, Output), "Process without expensive tools") :-
+    without_tools([expensive_api], (
+        task("Process {Input} cheaply", Output)
+    )).
+\`\`\`
 #### Built-in Agent Tools
 
 During \`task()\` execution, the LLM has access to these built-in tools:
@@ -199,6 +280,10 @@ goal1, goal2, goal3
 
 % Cut (commit to this branch)
 !
+
+% Exception handling
+catch(Goal, Error, Recovery)
+throw(some_error)
 \`\`\`
 
 ### Backtracking
@@ -271,26 +356,42 @@ agent_main(Topic) :-
     answer("Research complete!").
 \`\`\`
 
+### Pattern 3b: Tool with Nested LLM Call
+\`\`\`prolog
+% A tool that uses LLM to analyze search results
+tool(smart_search(Query, Summary), "Search and summarize results") :-
+    exec(web_search(query: Query), Results),
+    format(string(Desc), "Summarize these search results: ~w", [Results]),
+    task(Desc, Summary).  % Nested task CANNOT call smart_search (recursion prevention)
+
+agent_main(Topic) :-
+    system("Use smart_search to research topics."),
+    task("Research {Topic}."),
+    answer("Done!").
+\`\`\`
+
 ### Pattern 4: Code Execution (Use Sparingly!)
 \`\`\`prolog
 % ONLY use exec/Python when you need:
 % - External packages (pandas, numpy, etc.)
 % - Shell commands (find, grep, sed, awk, curl)
 % - Complex imperative logic that's awkward in Prolog
+%
 % NOTE: vm_exec returns a dict with stdout, stderr, exitCode - use get_dict to extract
+% NOTE: The VM starts in /workspace which is your actual workspace directory
 
 agent_main(Task) :-
     system("You are a coding assistant."),
     
     task("Write Python code to solve: {Task}. Store only the code in Code.", Code),
     
-    % Write code to a file and execute it
+    % Write code to a file in the workspace (VM cwd is /workspace)
     open('script.py', write, S),
     write(S, Code),
     close(S),
     
     output("Executing code..."),
-    exec(vm_exec(command: "python3 script.py"), Result),
+    exec(vm_exec(command: "python3 script.py"), Result),  % Runs in /workspace
     get_dict(stdout, Result, Output),
     
     task("Explain this execution result: {Output}"),
@@ -381,6 +482,43 @@ agent_main(Task) :-
     task("Help the user with: {Task}. If anything is unclear, ask for clarification."),
     
     answer("Task completed!").
+\`\`\`
+
+### Pattern 9: Error Handling with catch/throw
+\`\`\`prolog
+% Safe tool call with error recovery
+agent_main(Query) :-
+    catch(
+        (
+            exec(web_search(query: Query), Results),
+            task("Summarize: {Results}")
+        ),
+        Error,
+        (
+            format(string(ErrMsg), "Search failed: ~w. Proceeding without search.", [Error]),
+            output(ErrMsg),
+            task("Answer based on your knowledge: {Query}")
+        )
+    ),
+    answer("Done!").
+\`\`\`
+
+### Pattern 10: Fresh Context with prompt()
+\`\`\`prolog
+% Use prompt() for independent sub-tasks that shouldn't share context
+agent_main(Topic) :-
+    system("You are a research assistant."),
+    
+    % Main research with accumulated context
+    task("Research {Topic} deeply.", MainFindings),
+    
+    % Independent critique - fresh context, no bias from main research
+    prompt("As a skeptical reviewer, critique this research: {MainFindings}. Store critique in Critique.", Critique),
+    
+    % Back to main context for final synthesis
+    task("Address this critique: {Critique}"),
+    
+    answer("Research complete with peer review!").
 \`\`\`
 
 ---

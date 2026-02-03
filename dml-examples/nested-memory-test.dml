@@ -1,0 +1,24 @@
+% Test: Do nested tasks (inside tools) have access to LLM memory?
+%
+% This test sets up a system message and a "secret code" in memory,
+% then calls a tool that uses task() to see if it can access that context.
+
+% Tool that uses a nested task to check memory
+tool(check_memory(Answer), "Check if the nested task can see the secret code") :-
+    task("What is the secret code I told you earlier? Just respond with the code number only.", Answer).
+
+agent_main :-
+    % Set up context in memory
+    system("You are a helpful assistant. Remember everything the user tells you."),
+    user("The secret code is 42. Remember this!"),
+    
+    output("Memory set up with secret code 42"),
+    output("Now calling nested task inside a tool..."),
+    
+    % Call the tool which uses task() internally
+    task("Use the check_memory tool to verify you remember the secret code.", Result),
+    
+    format(string(Msg), "Nested task returned: ~w", [Result]),
+    output(Msg),
+    
+    answer("Test complete!").

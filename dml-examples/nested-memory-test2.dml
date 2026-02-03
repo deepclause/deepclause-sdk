@@ -1,0 +1,30 @@
+% Test: Memory behavior in nested tasks
+%
+% Result: Nested tasks inside tools start with FRESH memory
+% The tool engine is isolated - it doesn't inherit parent memory.
+%
+% This is by design - tools should be self-contained units.
+% If you need context, pass it as a tool argument.
+
+% Tool with nested task - does NOT see parent memory
+tool(isolated_task(Input, Output), "This nested task has fresh memory") :-
+    system("You are a simple responder. Answer directly."),
+    format(string(Desc), "What is the answer to: ~w? Just give the answer.", [Input]),
+    task(Desc, Output).
+
+agent_main :-
+    % Set up rich context in parent memory
+    system("You are a helpful assistant."),
+    system("Important: The magic word is 'banana'."),
+    user("Remember: I like the color blue."),
+    
+    output("Parent memory established with magic word and color preference."),
+    
+    % Call tool - the nested task inside WON'T see our memory
+    task("Use the isolated_task tool to ask: 'What is the magic word?'", Result),
+    
+    format(string(Msg), "Result from nested task: ~w", [Result]),
+    output(Msg),
+    output("(If it says 'banana', memory leaked. If not, isolation works.)"),
+    
+    answer("Test complete!").
