@@ -21,6 +21,22 @@ Everything runs in WebAssembly—no native code execution, no container setup re
 
 This means that DML tools and agents can execute arbitrary shell commands without escaping to your host system.
 
+## Beyond Markdown: Why Logic Programming?
+
+Markdown skills are great for simple, linear workflows. But real-world tasks often need:
+
+- **Branching logic** - Try approach A, fall back to B if it fails
+- **Iteration** - Process a list of items one by one
+- **State management** - Isolate context between sub-tasks
+- **Error recovery** - Handle failures gracefully
+- **Composition** - Build complex skills from simpler ones
+
+When you give markdown instructions to a typical agentic loop, there's no guarantee these requirements will actually be followed—the LLM might ignore the fallback logic or skip items in a list. 
+
+By compiling to Prolog, you get **guaranteed execution semantics**: backtracking ensures fallbacks happen, recursion processes every item, and unification binds variables correctly. You define *what* should happen—the runtime guarantees *how*.
+
+
+
 ## Spec-Driven Development That Compiles
 
 [Spec-driven development](https://martinfowler.com/articles/exploring-gen-ai/sdd-3-tools.html) proposes writing specifications before code, with the spec becoming the source of truth. Current SDD tools (Kiro, spec-kit, Tessl) generate elaborate markdown artifacts that are then fed to coding agents—but the output is still non-deterministic, and you end up reviewing both specs *and* generated code.
@@ -292,17 +308,6 @@ agent_main(Topic) :-
 
 You can edit DML directly for fine-grained control. See the [DML Reference](./docs/DML_REFERENCE.md) for the full language spec.
 
-## Beyond Markdown: Why Logic Programming?
-
-Markdown skills are great for simple, linear workflows. But real-world tasks often need:
-
-- **Branching logic** - Try approach A, fall back to B if it fails
-- **Iteration** - Process a list of items one by one
-- **State management** - Isolate context between sub-tasks
-- **Error recovery** - Handle failures gracefully
-- **Composition** - Build complex skills from simpler ones
-
-This is where DML's Prolog foundation shines.
 
 ### Backtracking: Automatic Retry Logic
 
