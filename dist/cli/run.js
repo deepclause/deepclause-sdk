@@ -339,9 +339,9 @@ function createToolDefinition(tool, config, workspacePath) {
                     }
                     const networkEnabled = config.agentvm?.network ?? false;
                     const vm = await getAgentVM(workspacePath, networkEnabled);
-                    console.log(`[CLI] vm_exec executing command: ${command}`);
+                    //console.log(`[CLI] vm_exec executing command: ${command}`);
                     const result = await vm.exec(command);
-                    console.log(`[CLI] vm_exec completed with: ${result}`);
+                    //console.log(`[CLI] vm_exec completed with: ${result}`);
                     return {
                         stdout: result.stdout,
                         stderr: result.stderr,

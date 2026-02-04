@@ -85,6 +85,9 @@ program
     .option('--validate-only', 'Validate without saving output')
     .option('--model <model>', 'Override model for compilation')
     .option('--temperature <number>', 'Override temperature (0.0-2.0)', parseFloat)
+    .option('--max-attempts <number>', 'Max compilation attempts (default: 3)', parseInt)
+    .option('-v, --verbose', 'Show detailed output including generated code')
+    .option('--no-stream', 'Disable streaming output')
     .action(async (source, output, options) => {
     try {
         const config = await loadConfig(process.cwd());
@@ -93,21 +96,24 @@ program
             force: options.force,
             validateOnly: options.validateOnly,
             model: options.model || config.model,
-            temperature: options.temperature
+            temperature: options.temperature,
+            maxAttempts: options.maxAttempts,
+            verbose: options.verbose,
+            stream: options.stream !== false
         });
         if (result.skipped) {
             console.log(`⏭️  Skipped (unchanged): ${source}`);
         }
-        else if (options.validateOnly) {
-            console.log(`✅ Valid DML generated from: ${source}`);
-        }
-        else {
-            console.log(`✅ Compiled: ${source} → ${result.output}`);
+        else if (!options.validateOnly) {
+            console.log(`\n   Output: ${result.output}`);
             console.log(`   Tools: ${result.tools.join(', ') || 'none'}`);
+            if (result.attempts && result.attempts > 1) {
+                console.log(`   Attempts: ${result.attempts}`);
+            }
         }
     }
     catch (error) {
-        console.error('❌ Error:', error.message);
+        // Error message already printed by compile function
         process.exit(1);
     }
 });

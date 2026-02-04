@@ -1,7 +1,8 @@
 /**
  * DeepClause CLI - Compilation Module
  *
- * Compiles Markdown task descriptions to DML programs using LLM.
+ * Compiles Markdown task descriptions to DML programs using an agentic loop
+ * with LLM generation and Prolog validation.
  */
 import { type Provider } from './config.js';
 export interface CompileOptions {
@@ -10,6 +11,9 @@ export interface CompileOptions {
     model?: string;
     provider?: Provider;
     temperature?: number;
+    maxAttempts?: number;
+    verbose?: boolean;
+    stream?: boolean;
 }
 export interface CompileResult {
     output: string;
@@ -18,6 +22,8 @@ export interface CompileResult {
     valid: boolean;
     dml?: string;
     meta?: MetaFile;
+    explanation?: string;
+    attempts?: number;
 }
 export interface CompileAllResult {
     compiled: number;
@@ -53,7 +59,7 @@ export interface MetaFile {
     }>;
 }
 /**
- * Compile a Markdown task description to DML
+ * Compile a Markdown task description to DML using an agentic loop
  */
 export declare function compile(sourcePath: string, outputDir: string, options?: CompileOptions): Promise<CompileResult>;
 /**
@@ -62,7 +68,6 @@ export declare function compile(sourcePath: string, outputDir: string, options?:
 export declare function compileAll(sourceDir: string, outputDir: string, options?: CompileOptions): Promise<CompileAllResult>;
 /**
  * Extract tool dependencies from DML code
- * Only extracts external tools called via exec/2
  */
 export declare function extractToolDependencies(dml: string): string[];
 /**
@@ -75,11 +80,11 @@ export declare function extractParameters(dml: string): Array<{
     required?: boolean;
 }>;
 /**
- * Extract description from markdown (first heading or paragraph)
+ * Extract description from markdown
  */
 export declare function extractDescription(markdown: string): string;
 /**
- * Basic DML syntax validation
+ * Basic DML syntax validation (exported for backwards compatibility)
  */
 export declare function validateDMLSyntax(dml: string): {
     valid: boolean;

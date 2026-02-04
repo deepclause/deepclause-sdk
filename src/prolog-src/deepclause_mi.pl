@@ -253,6 +253,20 @@ process_directive(param(Key, Desc), SessionId) :-
 process_directive(param(Key, Desc, Default), SessionId) :-
     !,
     assertz(SessionId:param_decl(Key, Desc, Default)).
+%% Handle consult directive: :- consult(File)
+process_directive(consult(File), SessionId) :-
+    !,
+    % Set session ID for get_session_id to find, then call our custom consult
+    nb_setval(current_session_id, SessionId),
+    resolve_workspace_path(File, FullPath),
+    readutil:read_file_to_string(FullPath, Code, []),
+    consult_string(Code, SessionId).
+%% Handle list-style consult: :- [File] or :- [File1, File2, ...]
+process_directive([File|Files], SessionId) :-
+    !,
+    nb_setval(current_session_id, SessionId),
+    process_directive(consult(File), SessionId),
+    (Files == [] -> true ; process_directive(Files, SessionId)).
 process_directive(_, _).
 
 %% ============================================================
@@ -1420,6 +1434,69 @@ resolve_workspace_path(RelPath, FullPath) :-
     % Build full path
     atom_concat('/workspace/', CleanPath, FullPath).
 
+%% mi_call(consult(File), +StateIn, -StateOut)
+%% Load Prolog clauses from a file into the current session module
+%% This is a DML-specific implementation that reads from /workspace
+mi_call(consult(File), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    resolve_workspace_path(File, FullPath),
+    readutil:read_file_to_string(FullPath, Code, []),
+    consult_string(Code, SessionId).
+
+%% mi_call([File], +StateIn, -StateOut)
+%% Alternative consult syntax: [file]
+mi_call([File], StateIn, StateOut) :-
+    !,
+    mi_call(consult(File), StateIn, StateOut).
+
+%% mi_call([File|Files], +StateIn, -StateOut)
+%% Consult multiple files: [file1, file2, ...]
+mi_call([File|Files], StateIn, StateOut) :-
+    !,
+    mi_call(consult(File), StateIn, State1),
+    mi_call(Files, State1, StateOut).
+
+%% consult_string(+Code, +SessionId)
+%% Parse Prolog code from a string and assert clauses into the session module
+consult_string(Code, SessionId) :-
+    open_string(Code, Stream),
+    consult_clauses(Stream, SessionId),
+    close(Stream).
+
+%% consult_clauses(+Stream, +SessionId)
+%% Read and assert all clauses from a stream
+consult_clauses(Stream, SessionId) :-
+    read_term(Stream, Term, [module(SessionId)]),
+    (   Term == end_of_file
+    ->  true
+    ;   consult_process_term(Term, SessionId),
+        consult_clauses(Stream, SessionId)
+    ).
+
+%% consult_process_term(+Term, +SessionId)
+%% Process a single term read during consult
+consult_process_term(:-(Directive), SessionId) :-
+    % Handle directives - route through mi_call so custom predicates like consult/1 work
+    !,
+    catch(
+        (   is_mi_special_predicate(Directive)
+        ->  mi_call(Directive, [], _)  % Use MI for special predicates
+        ;   call(SessionId:Directive)   % Regular call for others
+        ),
+        Error,
+        format(user_error, "Warning: directive failed: ~w~n", [Error])
+    ).
+
+consult_process_term((Head :- Body), SessionId) :-
+    % Assert a clause
+    !,
+    assertz(SessionId:(Head :- Body)).
+
+consult_process_term(Head, SessionId) :-
+    % Assert a fact
+    assertz(SessionId:Head).
+
 %% mi_call(read_file_to_string(File, Content, Options), +StateIn, -StateOut)
 mi_call(read_file_to_string(File, Content, Options), StateIn, StateIn) :-
     !,
@@ -1640,6 +1717,10 @@ is_mi_special_predicate(directory_files(_,_)).
 is_mi_special_predicate(make_directory(_)).
 is_mi_special_predicate(delete_file(_)).
 is_mi_special_predicate(delete_directory(_)).
+%% Consult predicates
+is_mi_special_predicate(consult(_)).
+is_mi_special_predicate([_]).
+is_mi_special_predicate([_|_]).
 
 %% mi_call(Goal, +StateIn, -StateOut)
 %% Catch-all for built-in and user-defined predicates
