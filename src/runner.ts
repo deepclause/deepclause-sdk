@@ -857,11 +857,8 @@ export class DMLRunner {
         required.push(input.name);
       }
 
-      // Build description with source code
-      let description = tool.description || `Prolog tool: ${tool.name}`;
-      if (tool.source) {
-        description += `\n\nProlog implementation:\n${tool.source}`;
-      }
+      // Build description (without Prolog source - keep prompts clean)
+      const description = tool.description || `Tool: ${tool.name}`;
 
       // Capture tool name for closure
       const toolName = tool.name;

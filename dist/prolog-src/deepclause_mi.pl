@@ -879,17 +879,15 @@ mi_call(task_named(Desc, Vars, VarNames), StateIn, StateOut) :-
 %% ============================================================
 
 %% mi_call(prompt(Desc), +StateIn, -StateOut)
-%% Like task/1 but starts with empty memory
+%% Simple LLM call with empty memory and NO tools (pure text completion)
 mi_call(prompt(Desc), StateIn, StateOut) :-
     !,
     get_params(StateIn, Params),
     interpolate_desc(Desc, Params, InterpDesc),
     get_session_id(SessionId),
-    collect_user_tools(SessionId, UserTools),
-    get_tool_scope(StateIn, ToolScope),
-    % Use empty memory instead of current memory
-    engine_yield(request_agent_loop(InterpDesc, [], UserTools, [], ToolScope)),
-    % Handle signals (tool calls) until agent_done - still need for tool execution
+    % prompt/N is a simple LLM call - no tools, no tool scope
+    engine_yield(request_agent_loop(InterpDesc, [], [], [], none)),
+    % Wait for agent_done (no tool calls expected since no tools provided)
     handle_agent_signals(SessionId, StateIn, StateOut),
     session_agent_result(SessionId, Result),
     retract(session_agent_result(SessionId, _)),
@@ -912,17 +910,15 @@ mi_call(prompt_named(Desc, Vars, VarNames), StateIn, StateOut) :-
     mi_call_prompt_n(Desc, Vars, VarNames, StateIn, StateOut).
 
 %% mi_call_prompt_n(+Desc, +Vars, +VarNames, +StateIn, -StateOut)
-%% Like mi_call_task_n but uses empty memory and doesn't update memory
+%% Simple LLM call with empty memory and NO tools (pure text completion with variable binding)
 mi_call_prompt_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     !,  % Cut to make this predicate deterministic - no backtracking once started
     get_params(StateIn, Params),
     interpolate_desc(Desc, Params, InterpDesc),
     get_session_id(SessionId),
-    collect_user_tools(SessionId, UserTools),
-    get_tool_scope(StateIn, ToolScope),
-    % Use empty memory instead of current memory
-    engine_yield(request_agent_loop(InterpDesc, VarNames, UserTools, [], ToolScope)),
-    % Handle signals (tool calls) until agent_done - still need for tool execution
+    % prompt/N is a simple LLM call - no tools, no tool scope
+    engine_yield(request_agent_loop(InterpDesc, VarNames, [], [], none)),
+    % Wait for agent_done (no tool calls expected since no tools provided)
     handle_agent_signals(SessionId, StateIn, StateOut),
     session_agent_result(SessionId, Result),
     retract(session_agent_result(SessionId, _)),
@@ -1488,6 +1484,26 @@ consult_process_term(:-(Directive), SessionId) :-
         format(user_error, "Warning: directive failed: ~w~n", [Error])
     ).
 
+%% Handle tool/2 with description: tool(Head, Description) :- Body
+consult_process_term((tool(ToolHead, Description) :- Body), SessionId) :-
+    !,
+    extract_tool_schema(ToolHead, Description, ToolName, Schema),
+    assertz(session_user_tools(SessionId, ToolName)),
+    assertz(session_user_tool_schema(SessionId, ToolName, Schema)),
+    format(string(SourceCode), "tool(~w, ~q) :-~n    ~w.", [ToolHead, Description, Body]),
+    assertz(SessionId:tool_source(ToolName, SourceCode)),
+    assertz(SessionId:(tool(ToolHead) :- Body)).
+
+%% Handle tool/1 without description: tool(Head) :- Body
+consult_process_term((tool(ToolHead) :- Body), SessionId) :-
+    !,
+    extract_tool_schema(ToolHead, none, ToolName, Schema),
+    assertz(session_user_tools(SessionId, ToolName)),
+    assertz(session_user_tool_schema(SessionId, ToolName, Schema)),
+    format(string(SourceCode), "tool(~w) :-~n    ~w.", [ToolHead, Body]),
+    assertz(SessionId:tool_source(ToolName, SourceCode)),
+    assertz(SessionId:(tool(ToolHead) :- Body)).
+
 consult_process_term((Head :- Body), SessionId) :-
     % Assert a clause
     !,
@@ -1623,7 +1639,7 @@ mi_call(Module:Goal, StateIn, StateOut) :-
     % Now try clause/2 for rules, allowing backtracking through clauses
     clause(Module:Goal, Body),
     (   Body == true
-    ->  true  % Fact - succeed with no body to interpret
+    ->  StateOut = StateIn  % Fact - succeed with state unchanged
     ;   mi_call(Body, StateIn, StateOut)
     ).
 
