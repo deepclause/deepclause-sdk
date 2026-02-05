@@ -1,6 +1,6 @@
 {
   "name": "deepclause-sdk",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "DeepClause CLI Tool and Typescript SDK",
   "type": "module",
   "main": "dist/index.js",
