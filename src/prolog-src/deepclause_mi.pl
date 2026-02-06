@@ -36,6 +36,7 @@
 %% Allow mi_call/3 clauses to be non-contiguous
 :- discontiguous mi_call/3.
 :- discontiguous transform_task_calls/3.
+:- discontiguous var_to_name/3.
 
 %% Dynamic predicates for session state (engine management only, not memory!)
 :- dynamic session_engine/2.       % session_engine(SessionId, Engine)
@@ -125,32 +126,41 @@ transform_task_calls(\+ A, Bindings, \+ TA) :- !,
     transform_task_calls(A, Bindings, TA).
 
 %% Transform task/2 to task_named/3
-transform_task_calls(task(Desc, V1), Bindings, task_named(Desc, [V1], Names)) :- !,
-    maplist(var_to_name(Bindings), [V1], Names).
+transform_task_calls(task(Desc, V1), Bindings, task_named(Desc, [Var1], [Info1])) :- !,
+    extract_var_info(Bindings, V1, Var1, Info1).
 
 %% Transform task/3 to task_named/3
-transform_task_calls(task(Desc, V1, V2), Bindings, task_named(Desc, [V1, V2], Names)) :- !,
-    maplist(var_to_name(Bindings), [V1, V2], Names).
+transform_task_calls(task(Desc, V1, V2), Bindings, task_named(Desc, [Var1, Var2], [Info1, Info2])) :- !,
+    extract_var_info(Bindings, V1, Var1, Info1),
+    extract_var_info(Bindings, V2, Var2, Info2).
 
 %% Transform task/4 to task_named/3
-transform_task_calls(task(Desc, V1, V2, V3), Bindings, task_named(Desc, [V1, V2, V3], Names)) :- !,
-    maplist(var_to_name(Bindings), [V1, V2, V3], Names).
+transform_task_calls(task(Desc, V1, V2, V3), Bindings, task_named(Desc, [Var1, Var2, Var3], [Info1, Info2, Info3])) :- !,
+    extract_var_info(Bindings, V1, Var1, Info1),
+    extract_var_info(Bindings, V2, Var2, Info2),
+    extract_var_info(Bindings, V3, Var3, Info3).
 
 %% Transform task/5 to task_named/3
-transform_task_calls(task(Desc, V1, V2, V3, V4), Bindings, task_named(Desc, [V1, V2, V3, V4], Names)) :- !,
-    maplist(var_to_name(Bindings), [V1, V2, V3, V4], Names).
+transform_task_calls(task(Desc, V1, V2, V3, V4), Bindings, task_named(Desc, [Var1, Var2, Var3, Var4], [Info1, Info2, Info3, Info4])) :- !,
+    extract_var_info(Bindings, V1, Var1, Info1),
+    extract_var_info(Bindings, V2, Var2, Info2),
+    extract_var_info(Bindings, V3, Var3, Info3),
+    extract_var_info(Bindings, V4, Var4, Info4).
 
 %% Transform prompt/2 to prompt_named/3
-transform_task_calls(prompt(Desc, V1), Bindings, prompt_named(Desc, [V1], Names)) :- !,
-    maplist(var_to_name(Bindings), [V1], Names).
+transform_task_calls(prompt(Desc, V1), Bindings, prompt_named(Desc, [Var1], [Info1])) :- !,
+    extract_var_info(Bindings, V1, Var1, Info1).
 
 %% Transform prompt/3 to prompt_named/3
-transform_task_calls(prompt(Desc, V1, V2), Bindings, prompt_named(Desc, [V1, V2], Names)) :- !,
-    maplist(var_to_name(Bindings), [V1, V2], Names).
+transform_task_calls(prompt(Desc, V1, V2), Bindings, prompt_named(Desc, [Var1, Var2], [Info1, Info2])) :- !,
+    extract_var_info(Bindings, V1, Var1, Info1),
+    extract_var_info(Bindings, V2, Var2, Info2).
 
 %% Transform prompt/4 to prompt_named/3
-transform_task_calls(prompt(Desc, V1, V2, V3), Bindings, prompt_named(Desc, [V1, V2, V3], Names)) :- !,
-    maplist(var_to_name(Bindings), [V1, V2, V3], Names).
+transform_task_calls(prompt(Desc, V1, V2, V3), Bindings, prompt_named(Desc, [Var1, Var2, Var3], [Info1, Info2, Info3])) :- !,
+    extract_var_info(Bindings, V1, Var1, Info1),
+    extract_var_info(Bindings, V2, Var2, Info2),
+    extract_var_info(Bindings, V3, Var3, Info3).
 
 %% Recurse into arbitrary compound terms (like with_tools/2, without_tools/2, etc.)
 transform_task_calls(Term, Bindings, TransformedTerm) :-
@@ -168,6 +178,51 @@ transform_task_calls_arg(Bindings, Arg, TransformedArg) :-
 
 %% Default: atoms and numbers pass through unchanged
 transform_task_calls(Term, _, Term).
+
+%% extract_var_info(+Bindings, +Term, -BareVar, -Info)
+%% Extracts name and type from a variable term (which might be wrapped)
+%% Supported wrappers: string(V), integer(V), boolean(V), float(V), number(V), list(V), object(V)
+extract_var_info(Bindings, Term, BareVar, Info) :-
+    (   var(Term)
+    ->  % Bare variable - default to string
+        BareVar = Term,
+        var_to_name(Bindings, Term, Name),
+        Info = typed_var{name: Name, type: string}
+    ;   compound(Term), Term =.. [Wrapper, Inner]
+    ->  % Wrapped variable
+        (   wrapper_type(Wrapper, Type)
+        ->  (   var(Inner)
+            ->  BareVar = Inner,
+                var_to_name(Bindings, Inner, Name),
+                Info = typed_var{name: Name, type: Type}
+            ;   compound(Inner), Inner =.. [InnerWrapper, InnerVar], var(InnerVar), Wrapper == list
+            ->  % List of typed items: list(string(X))
+                BareVar = InnerVar,
+                var_to_name(Bindings, InnerVar, Name),
+                wrapper_type(InnerWrapper, ItemType),
+                Info = typed_var{name: Name, type: array, itemType: ItemType}
+            ;   % Unknown inner structure
+                BareVar = Term,
+                Info = typed_var{name: "Unknown", type: string}
+            )
+        ;   % Unknown wrapper
+            BareVar = Term,
+            Info = typed_var{name: "Unknown", type: string}
+        )
+    ;   % Not a variable or known wrapper
+        BareVar = Term,
+        Info = typed_var{name: "Unknown", type: string}
+    ).
+
+%% wrapper_type(?Wrapper, ?Type)
+wrapper_type(string, string).
+wrapper_type(integer, integer).
+wrapper_type(float, number).
+wrapper_type(number, number).
+wrapper_type(boolean, boolean).
+wrapper_type(list, array).
+wrapper_type(object, object).
+wrapper_type(dict, object).
 
 %% var_to_name(+Bindings, +Var, -Name)
 %% Look up a variable's name from the bindings list
@@ -261,6 +316,13 @@ process_directive(consult(File), SessionId) :-
     resolve_workspace_path(File, FullPath),
     readutil:read_file_to_string(FullPath, Code, []),
     consult_string(Code, SessionId).
+%% Handle use_module directive
+process_directive(use_module(Module), SessionId) :-
+    !,
+    SessionId:use_module(Module).
+process_directive(use_module(Module, Exports), SessionId) :-
+    !,
+    SessionId:use_module(Module, Exports).
 %% Handle list-style consult: :- [File] or :- [File1, File2, ...]
 process_directive([File|Files], SessionId) :-
     !,
@@ -978,8 +1040,12 @@ mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
 
 %% bind_task_variables(+VarsDict, +Names, -Values)
 bind_task_variables(_, [], []) :- !.
-bind_task_variables(VarsDict, [Name|Names], [Value|Values]) :-
-    (   get_dict(Name, VarsDict, Value)
+bind_task_variables(VarsDict, [N|Names], [Value|Values]) :-
+    (   is_dict(N)
+    ->  Key = N.name
+    ;   Key = N
+    ),
+    (   get_dict(Key, VarsDict, Value)
     ->  true
     ;   true
     ),
@@ -1733,8 +1799,10 @@ is_mi_special_predicate(directory_files(_,_)).
 is_mi_special_predicate(make_directory(_)).
 is_mi_special_predicate(delete_file(_)).
 is_mi_special_predicate(delete_directory(_)).
-%% Consult predicates
+%% Consult and module predicates
 is_mi_special_predicate(consult(_)).
+is_mi_special_predicate(use_module(_)).
+is_mi_special_predicate(use_module(_,_)).
 is_mi_special_predicate([_]).
 is_mi_special_predicate([_|_]).
 
@@ -1762,20 +1830,25 @@ mi_call_dispatch(Goal, StateIn, StateOut) :-
     get_session_id(SessionId),
     callable(Goal),
     predicate_property(SessionId:Goal, defined),
-    % User-defined predicate - use clause/2 for backtracking
-    % Add trace entry for call
-    get_depth(StateIn, Depth),
-    Goal =.. [Functor|Args],
-    add_trace_entry(SessionId, call, Functor, Args, Depth),
-    % Find a matching clause - allows backtracking to try multiple clauses
-    clause(SessionId:Goal, Body),
-    NewDepth is Depth + 1,
-    set_depth(StateIn, NewDepth, State1),
-    (   mi_call(Body, State1, State2)
-    ->  add_trace_entry(SessionId, exit, Functor, Args, Depth),
-        set_depth(State2, Depth, StateOut)
-    ;   add_trace_entry(SessionId, fail, Functor, Args, Depth),
-        fail
+    % If it's a library/imported predicate, call it directly
+    (   (predicate_property(SessionId:Goal, imported_from(_)) ; predicate_property(SessionId:Goal, foreign))
+    ->  StateOut = StateIn,
+        call(SessionId:Goal)
+    ;   % User-defined predicate - use clause/2 for backtracking
+        % Add trace entry for call
+        get_depth(StateIn, Depth),
+        Goal =.. [Functor|Args],
+        add_trace_entry(SessionId, call, Functor, Args, Depth),
+        % Find a matching clause - allows backtracking to try multiple clauses
+        clause(SessionId:Goal, Body),
+        NewDepth is Depth + 1,
+        set_depth(StateIn, NewDepth, State1),
+        (   mi_call(Body, State1, State2)
+        ->  add_trace_entry(SessionId, exit, Functor, Args, Depth),
+            set_depth(State2, Depth, StateOut)
+        ;   add_trace_entry(SessionId, fail, Functor, Args, Depth),
+            fail
+        )
     ).
 
 mi_call_dispatch(Goal, StateIn, StateIn) :-
@@ -1810,6 +1883,15 @@ interpolate_desc(Template, Params, Result) :-
 get_session_id(SessionId) :-
     nb_current(current_session_id, SessionId), !.
 get_session_id(default_session).
+
+%% var_to_name(+Bindings, +Var, -Name)
+%% Look up a variable's name from the bindings list
+var_to_name(Bindings, Var, Name) :-
+    (   member(N=V, Bindings), V == Var
+    ->  Name = N
+    ;   % format(user_error, "[DEBUG] var_to_name failed for ~w in ~w~n", [Var, Bindings]),
+        Name = 'Var'  % Fallback if not found
+    ).
 
 %% ============================================================
 %% Compile-Time String Interpolation Expansion

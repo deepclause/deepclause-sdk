@@ -58,6 +58,15 @@ export interface MetaFile {
         provider: string;
     }>;
 }
+interface ValidationResult {
+    valid: boolean;
+    errors: string[];
+    warnings?: string[];
+}
+interface CompilationAttempt {
+    dml: string;
+    validation: ValidationResult;
+}
 /**
  * Compile a Markdown task description to DML using an agentic loop
  */
@@ -66,6 +75,17 @@ export declare function compile(sourcePath: string, outputDir: string, options?:
  * Compile all Markdown files in a directory
  */
 export declare function compileAll(sourceDir: string, outputDir: string, options?: CompileOptions): Promise<CompileAllResult>;
+/**
+ * Compile a natural language prompt directly to DML without saving to disk
+ */
+export declare function compilePrompt(prompt: string, options?: CompileOptions): Promise<{
+    dml: string;
+    tools: string[];
+}>;
+/**
+ * Generate DML using LLM with streaming
+ */
+export declare function generateDMLWithStreaming(systemPrompt: string, userMessage: string, previousAttempts: CompilationAttempt[], model: string, provider: Provider, temperature?: number, onChunk?: (chunk: string) => void): Promise<string>;
 /**
  * Extract tool dependencies from DML code
  */
@@ -90,4 +110,5 @@ export declare function validateDMLSyntax(dml: string): {
     valid: boolean;
     errors: string[];
 };
+export {};
 //# sourceMappingURL=compile.d.ts.map

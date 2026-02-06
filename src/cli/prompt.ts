@@ -72,6 +72,21 @@ agent_main(MaxResults, Topic) :- ...
 | \`task(Description, Var1, Var2)\` | Execute task, bind two results |
 | \`task(Description, Var1, Var2, Var3)\` | Execute task, bind three results |
 
+**Type-Safe Output Variables:**
+You can wrap output variables with type specifiers to enforce strict validation:
+- \`string(Var)\` (Default)
+- \`integer(Var)\` - Enforces integer type
+- \`number(Var)\` or \`float(Var)\` - Enforces numeric type
+- \`boolean(Var)\` - Enforces boolean type
+- \`list(string(Var))\` - Enforces array of strings (or other types)
+- \`object(Var)\` - Enforces object/dict type
+
+\`\`\`prolog
+task("Calculate result", integer(Result))
+task("List items", list(string(Items)))
+task("Check status", boolean(IsComplete))
+\`\`\`
+
 **Important:** Variable names in the description must match the Prolog variables:
 \`\`\`prolog
 task("Analyze this and store the result in Summary.", Summary)

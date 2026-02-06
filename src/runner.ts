@@ -3,7 +3,7 @@
  */
 
 import type { SWIPLModule } from './prolog/loader.js';
-import type { DMLEvent, ToolDefinition, ToolPolicy, MemoryMessage } from './types.js';
+import type { DMLEvent, ToolDefinition, ToolPolicy, MemoryMessage, TypedVar } from './types.js';
 import { mountWorkspace } from './prolog/loader.js';
 import { runAgentLoop } from './agent.js';
 import { checkToolPolicy } from './tools.js';
@@ -418,11 +418,17 @@ export class DMLRunner {
     const rawPayload = payload as Record<string, unknown>;
     const taskDescription = String(toJsValue(rawPayload.taskDescription) ?? '');
     
-    // Ensure outputVars is an array
-    let outputVars: string[] = [];
+    // Ensure outputVars is an array of either strings or TypedVar objects
+    let outputVars: (string | TypedVar)[] = [];
     const rawOutputVars = toJsValue(rawPayload.outputVars);
     if (Array.isArray(rawOutputVars)) {
-      outputVars = rawOutputVars.map(v => String(v));
+      outputVars = rawOutputVars.map(v => {
+        const val = toJsValue(v);
+        if (typeof val === 'object' && val !== null && 'name' in val && 'type' in val) {
+          return val as unknown as TypedVar;
+        }
+        return String(val);
+      });
     }
     
     // Parse userTools - now contains schema info as array of tool_info dicts

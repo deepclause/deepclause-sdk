@@ -1,0 +1,122 @@
+% ==================================================================================
+% CONFERENCE SCHEDULER: A Constraint Satisfaction Agent
+% ==================================================================================
+
+% --- 1. THE SEARCH SPACE (DOMAIN DEFINITION) ---
+% These could be loaded dynamically or defined as facts
+room(r1, "Main Hall").
+room(r2, "Workshop Room").
+
+slot(mon_am, "Monday Morning").
+slot(mon_pm, "Monday Afternoon").
+slot(tue_am, "Tuesday Morning").
+
+% The talks we need to schedule
+talk(t1, "Keynote: The Future of AI", "Alice").
+talk(t2, "Intro to Prolog", "Bob").
+talk(t3, "Deep Learning scaling", "Charlie").
+talk(t4, "Ethics in AI", "Alice"). % Alice has 2 talks!
+
+% ==================================================================================
+% MAIN AGENT LOOP
+% ==================================================================================
+
+agent_main :-
+    system("You are a conference scheduling assistant."),
+    
+    % Get all talks as a list
+    findall(talk(Id, Topic, Speaker), talk(Id, Topic, Speaker), AllTalks),
+    
+    output("Thinking... calculating optimal schedule..."),
+    
+    % START THE SEARCH
+    % We pass an empty list [] as the initial 'Scheduled' state.
+    % The result will be bound to 'FinalSchedule'.
+    schedule_all(AllTalks, [], FinalSchedule),
+    
+    % If we get here, a valid schedule was found!
+    pretty_print(FinalSchedule, Report),
+    answer(Report).
+
+% Failure handler
+agent_main :-
+    answer("IMPOSSIBLE: Could not find a schedule that satisfies all constraints.").
+
+
+% ==================================================================================
+% THE RECURSIVE PLANNER (BACKTRACKING CORE)
+% ==================================================================================
+
+% Base Case: No talks left to schedule? We are done.
+schedule_all([], Scheduled, Scheduled).
+
+% Recursive Step: Pick a talk, find a valid slot, recurse.
+schedule_all([CurrentTalk | RemainingTalks], CurrentSchedule, FinalResult) :-
+    
+    % 1. GUESS: Non-deterministically pick a Room and a Slot
+    room(RoomID, RoomName),
+    slot(SlotID, SlotName),
+    
+    % 2. CHECK LOCAL CONSTRAINTS (Fast Checks)
+    % Constraint: Room must be free at this slot
+    \+ member(assignment(_, SlotID, RoomID), CurrentSchedule),
+    
+    % 3. CHECK EXTERNAL CONSTRAINTS (LLM/Tool Checks - Costly!)
+    % We only run this if the slot is physically free.
+    check_speaker_availability(CurrentTalk, SlotID),
+    check_topic_clash(CurrentTalk, SlotID, CurrentSchedule),
+    
+    % 4. COMMIT & RECURSE
+    % If we passed checks, add to schedule and move to next talk.
+    NewAssignment = assignment(CurrentTalk, SlotID, RoomID),
+    
+    % LOGGING: Show the "Thinking" process
+    log("Tentatively scheduling {CurrentTalk} in {RoomID} at {SlotID}..."),
+    
+    schedule_all(RemainingTalks, [NewAssignment | CurrentSchedule], FinalResult).
+
+
+% ==================================================================================
+% CONSTRAINT CHECKERS (The "Agent" part)
+% ==================================================================================
+
+check_speaker_availability(talk(_, _, Speaker), SlotID) :-
+    % Simulate an API call or LLM reasoning check.
+    % In a real app, this would be 'exec(check_calendar(Speaker, Slot), Result)'
+    
+    % MEMORY OPTIMIZATION:
+    % We wrap this in a "once" or similar if we don't want to re-check on backtrack.
+    % But here, if we backtrack, we WANT to forget the failure and try a new slot.
+    
+    format(string(Reasoning), "Checking calendar for Speaker '~w' for slot '~w'...", [Speaker, SlotID]),
+    
+    % Let's hardcode a conflict for demonstration:
+    % "Alice is busy on Monday Morning"
+    ( (Speaker = "Alice", SlotID = mon_am) ->
+        log("CONFLICT: {Speaker} is not available during {SlotID}."),
+        fail % <--- THIS TRIGGERS BACKTRACKING
+    ;
+        true
+    ).
+
+check_topic_clash(talk(_, Topic, _), SlotID, CurrentSchedule) :-
+    % LLM Judgment: Is this talk too similar to others in the same slot?
+    
+    % Gather other talks in this slot
+    findall(OtherTopic, (
+        member(assignment(talk(_, OtherTopic, _), SlotID, _), CurrentSchedule)
+    ), ConcurrentTalks),
+    
+    (ConcurrentTalks = [] -> true ; 
+        % Ask LLM for semantic clash detection
+        task("I am scheduling '{Topic}'. Currently in this timeslot: {ConcurrentTalks}. \nAre these topics too similar to be concurrent? Answer YES or NO.", Answer),
+        (Answer = "NO" -> true ; fail)
+    ).
+
+% ==================================================================================
+% FORMATTING
+% ==================================================================================
+
+pretty_print(Schedule, Report) :-
+    % Convert the obscure Prolog list into a nice markdown table
+    task("Format this raw schedule data into a beautiful Markdown table:\n{Schedule}", Report).

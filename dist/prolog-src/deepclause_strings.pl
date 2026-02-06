@@ -14,12 +14,17 @@
 %% Replace {VariableName} patterns in Template with values from Bindings
 %% Bindings is a list of Name=Value pairs
 interpolate_string(Template, Bindings, Result) :-
-    (   string(Template)
-    ->  atom_string(TemplateAtom, Template)
-    ;   TemplateAtom = Template
-    ),
-    interpolate_atom(TemplateAtom, Bindings, ResultAtom),
-    atom_string(ResultAtom, Result).
+    (   (string(Template) ; atom(Template))
+    ->  (   string(Template)
+        ->  atom_string(TemplateAtom, Template)
+        ;   TemplateAtom = Template
+        ),
+        interpolate_atom(TemplateAtom, Bindings, ResultAtom),
+        atom_string(ResultAtom, Result)
+    ;   % If not string or atom, convert to string first
+        format(string(S), "~w", [Template]),
+        interpolate_string(S, Bindings, Result)
+    ).
 
 %% interpolate_atom(+Template, +Bindings, -Result)
 interpolate_atom(Template, Bindings, Result) :-

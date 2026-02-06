@@ -16,6 +16,7 @@ export interface RunOptions {
     provider?: Provider;
     temperature?: number;
     params?: Record<string, string>;
+    prompt?: string;
 }
 export interface RunResult {
     output: string[];
@@ -27,7 +28,7 @@ export interface RunResult {
     events?: DMLEvent[];
 }
 /**
- * Execute a compiled DML program
+ * Execute a compiled DML program or generate and run DML from a prompt
  */
-export declare function run(file: string, args: string[], options?: RunOptions): Promise<RunResult>;
+export declare function run(file: string | undefined, args: string[], options?: RunOptions): Promise<RunResult>;
 //# sourceMappingURL=run.d.ts.map

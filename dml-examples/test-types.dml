@@ -1,0 +1,23 @@
+% test-types.dml
+% Testing type-safe output variables
+
+agent_main :-
+    system("You are a helpful assistant."),
+    
+    output("Testing string output..."),
+    task("Generate a short greeting. Store in Greeting.", string(Greeting)),
+    output(Greeting),
+    
+    output("Testing integer output..."),
+    task("Calculate 10 + 5. Store in Sum.", integer(Sum)),
+    output(Sum),
+    
+    output("Testing boolean output..."),
+    task("Is the sky blue? Answer with true/false. Store in IsBlue.", boolean(IsBlue)),
+    output(IsBlue),
+    
+    output("Testing array output..."),
+    task("List 3 primary colors. Store in Colors.", list(string(Colors))),
+    output(Colors),
+    
+    answer("Type tests complete.").

@@ -659,9 +659,66 @@ export async function compileAll(
 // =============================================================================
 
 /**
+ * Compile a natural language prompt directly to DML without saving to disk
+ */
+export async function compilePrompt(
+  prompt: string,
+  options: CompileOptions = {}
+): Promise<{ dml: string; tools: string[] }> {
+  const config = await loadConfig(process.cwd());
+  const model = options.model || config.model;
+  const provider = options.provider || config.provider;
+
+  // Get available tools for the prompt
+  const tools = await getAvailableTools(config);
+
+  // Build the compilation prompt
+  const systemPrompt = buildCompilationPrompt(tools);
+  const userMessage = buildUserMessage(prompt);
+
+  const maxAttempts = options.maxAttempts ?? 3;
+  const attempts: CompilationAttempt[] = [];
+  let lastDml = "";
+  let lastValidation: ValidationResult = { valid: false, errors: [] };
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const dml = await generateDML(
+        systemPrompt,
+        userMessage,
+        attempts,
+        model,
+        provider,
+        options.temperature
+      );
+
+      lastDml = dml;
+      const validation = await validateWithProlog(dml);
+      lastValidation = validation;
+      attempts.push({ dml, validation });
+
+      if (validation.valid) {
+        return {
+          dml,
+          tools: extractToolDependencies(dml)
+        };
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      attempts.push({
+        dml: lastDml,
+        validation: { valid: false, errors: [message] }
+      });
+    }
+  }
+
+  throw new Error(`Failed to generate valid DML after ${maxAttempts} attempts: ${lastValidation.errors.join(", ")}`);
+}
+
+/**
  * Generate DML using LLM with streaming
  */
-async function generateDMLWithStreaming(
+export async function generateDMLWithStreaming(
   systemPrompt: string,
   userMessage: string,
   previousAttempts: CompilationAttempt[],

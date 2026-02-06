@@ -144,8 +144,8 @@ program
 // Execution Commands
 // =============================================================================
 program
-    .command('run <file> [args...]')
-    .description('Execute a compiled DML program')
+    .command('run [file] [args...]')
+    .description('Execute a compiled DML program or generate and run DML from a prompt')
     .option('--workspace <path>', 'Working directory for file operations', './')
     .option('--verbose', 'Show debug output including tool calls')
     .option('--stream', 'Stream LLM responses in real-time')
@@ -155,7 +155,8 @@ program
     .option('--model <model>', 'Override configured model (can be provider/model format, e.g., google/gemini-2.5-pro)')
     .option('--provider <provider>', 'Override configured provider (openai, anthropic, google, openrouter)')
     .option('--temperature <number>', 'Override temperature (0.0-2.0)', parseFloat)
-    .option('-p, --param <key=value>', 'Pass named parameter (can be repeated)', collectParams, {})
+    .option('-p, --prompt <text>', 'One-shot prompt: generate and run DML from natural language')
+    .option('-P, --param <key=value>', 'Pass named parameter (can be repeated)', collectParams, {})
     .action(async (file, args, options) => {
     try {
         // Parse provider/model format if provided (e.g., "google/gemini-2.5-pro")
@@ -176,7 +177,8 @@ program
             model,
             provider: provider,
             temperature: options.temperature,
-            params: options.param
+            params: options.param,
+            prompt: options.prompt
         });
         if (options.dryRun) {
             console.log(result.wouldExecute);

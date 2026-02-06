@@ -316,11 +316,17 @@ export class DMLRunner {
         // Safely extract payload fields with proper conversion
         const rawPayload = payload;
         const taskDescription = String(toJsValue(rawPayload.taskDescription) ?? '');
-        // Ensure outputVars is an array
+        // Ensure outputVars is an array of either strings or TypedVar objects
         let outputVars = [];
         const rawOutputVars = toJsValue(rawPayload.outputVars);
         if (Array.isArray(rawOutputVars)) {
-            outputVars = rawOutputVars.map(v => String(v));
+            outputVars = rawOutputVars.map(v => {
+                const val = toJsValue(v);
+                if (typeof val === 'object' && val !== null && 'name' in val && 'type' in val) {
+                    return val;
+                }
+                return String(val);
+            });
         }
         // Parse userTools - now contains schema info as array of tool_info dicts
         const userTools = [];

@@ -157,6 +157,14 @@ export interface DeepClauseSDK {
     dispose(): Promise<void>;
 }
 /**
+ * Variable with type information for type-safe LLM outputs
+ */
+export interface TypedVar {
+    name: string;
+    type: 'string' | 'number' | 'integer' | 'boolean' | 'array' | 'object';
+    itemType?: TypedVar['type'];
+}
+/**
  * Internal types for Prolog bridge communication
  */
 export interface PrologRequest {

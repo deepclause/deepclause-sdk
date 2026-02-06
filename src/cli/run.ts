@@ -13,6 +13,7 @@ import { loadConfig, type Config, type Provider } from './config.js';
 import { getAgentVMTools, type Tool } from './tools.js';
 import { webSearch, newsSearch } from './search.js';
 import type { MetaFile } from './compile.js';
+import { compilePrompt } from './compile.js';
 import type { AgentVM } from 'deepclause-agentvm';
 
 // Dynamic import for AgentVM (ESM module)
@@ -85,6 +86,7 @@ export interface RunOptions {
   provider?: Provider;
   temperature?: number;
   params?: Record<string, string>;
+  prompt?: string;
 }
 
 export interface RunResult {
@@ -102,38 +104,75 @@ export interface RunResult {
 // =============================================================================
 
 /**
- * Execute a compiled DML program
+ * Execute a compiled DML program or generate and run DML from a prompt
  */
 export async function run(
-  file: string,
+  file: string | undefined,
   args: string[],
   options: RunOptions = {}
 ): Promise<RunResult> {
-  const absolutePath = path.resolve(file);
-  
   // Config is always loaded from current working directory
   const configRoot = process.cwd();
-  
-  // Load DML file
-  let dmlCode: string;
-  try {
-    dmlCode = await fs.readFile(absolutePath, 'utf-8');
-  } catch (error) {
-    throw new Error(`Failed to read DML file: ${absolutePath}`);
-  }
-
-  // Try to load meta file
-  const metaPath = absolutePath.replace(/\.dml$/, '.meta.json');
-  let meta: MetaFile | null = null;
-  try {
-    const metaContent = await fs.readFile(metaPath, 'utf-8');
-    meta = JSON.parse(metaContent) as MetaFile;
-  } catch {
-    // Meta file is optional
-  }
-
-  // Load config from cwd
   const config = await loadConfig(configRoot);
+  
+  let dmlCode: string;
+  let meta: MetaFile | null = null;
+  let absolutePath: string | undefined;
+
+  if (options.prompt) {
+    if (options.verbose) {
+      console.log(`[CLI] One-shot mode: generating DML from prompt...`);
+    }
+    const compileResult = await compilePrompt(options.prompt, {
+      model: options.model || config.model,
+      provider: options.provider || config.provider,
+      temperature: options.temperature,
+      verbose: options.verbose
+    });
+    dmlCode = compileResult.dml;
+
+    if (options.verbose) {
+      console.log('\n--- Final Validated DML ---');
+      console.log(dmlCode);
+      console.log('---------------------------\n');
+    }
+
+    // Create a synthetic meta object for one-shot mode
+    meta = {
+      version: '1.0.0',
+      source: 'oneshot',
+      sourceHash: '',
+      compiledAt: new Date().toISOString(),
+      model: options.model || config.model,
+      provider: options.provider || config.provider,
+      description: options.prompt,
+      parameters: [],
+      tools: compileResult.tools,
+      history: []
+    };
+  } else {
+    if (!file) {
+      throw new Error('Either a DML file or a --prompt must be provided');
+    }
+    absolutePath = path.resolve(file);
+    
+    // Load DML file
+    try {
+      dmlCode = await fs.readFile(absolutePath, 'utf-8');
+    } catch (error) {
+      throw new Error(`Failed to read DML file: ${absolutePath}`);
+    }
+
+    // Try to load meta file
+    const metaPath = absolutePath.replace(/\.dml$/, '.meta.json');
+    try {
+      const metaContent = await fs.readFile(metaPath, 'utf-8');
+      meta = JSON.parse(metaContent) as MetaFile;
+    } catch {
+      // Meta file is optional
+    }
+  }
+
   const model = options.model || config.model;
   const provider = options.provider || config.provider;
 
@@ -151,7 +190,7 @@ export async function run(
     return {
       output: [],
       dryRun: true,
-      wouldExecute: formatDryRun(absolutePath, meta, params, model, provider, workspacePath)
+      wouldExecute: formatDryRun(absolutePath || 'oneshot', meta, params, model, provider, workspacePath)
     };
   }
 

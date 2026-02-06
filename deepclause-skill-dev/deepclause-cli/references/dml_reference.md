@@ -117,36 +117,6 @@ agent_main :-
 
 Bind up to three variables.
 
-### Type-Safe Output Variables
-
-You can wrap output variables with type specifiers to enforce strict validation on the LLM's output. The runtime will ensure the value matches the specified type.
-
-| Wrapper | Description | Zod Equivalent |
-|---------|-------------|----------------|
-| `string(Var)` | Default string type | `z.string()` |
-| `integer(Var)` | Integer number | `z.number().int()` |
-| `number(Var)` | Any number (float or int) | `z.number()` |
-| `float(Var)` | Alias for number | `z.number()` |
-| `boolean(Var)` | Boolean value | `z.boolean()` |
-| `list(Type(Var))` | Array of specified type | `z.array(Type)` |
-| `object(Var)` | Dictionary/Object | `z.record(z.unknown())` |
-
-**Examples:**
-
-```prolog
-% Enforce integer result
-task("Calculate 10 + 5", integer(Result)).
-
-% Enforce boolean result
-task("Is this true?", boolean(IsTrue)).
-
-% Enforce list of strings
-task("List 3 colors", list(string(Colors))).
-
-% Enforce object result
-task("Extract user details", object(User)).
-```
-
 **Note:** The LLM during `task()` can only call tools defined in DML (see [Tool Definitions](#tool-definitions)). Registered TypeScript tools are not automatically available - this gives you control over what the LLM can do.
 
 ---
@@ -600,13 +570,4 @@ agent_main :-
     % Complete
     format(string(FinalMsg), "Research on '~w' complete!", [Topic]),
     answer(FinalMsg).
-```
-
-Run with:
-```typescript
-for await (const event of dc.runDML(code, { 
-  params: { topic: 'quantum computing' } 
-})) {
-  console.log(event.type, event.content);
-}
 ```

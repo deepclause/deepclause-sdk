@@ -1,0 +1,63 @@
+% clpfd-planner.dml
+% A neuro-symbolic event planner using CLPFD for hard constraints.
+% The LLM suggests items and prices, while Prolog's CLPFD solver
+% ensures the quantities fit the budget exactly.
+% If the math fails, the agent backtracks to pick different items.
+
+:- use_module(library(clpfd)).
+
+% The main entry point
+agent_main(EventDescription, TotalBudgetStr) :-
+    system("You are a meticulous event planner."),
+    
+    % Ensure budget is a number
+    (number(TotalBudgetStr) -> TotalBudget = TotalBudgetStr ; atom_number(TotalBudgetStr, TotalBudget)),
+
+    % 1. The LLM suggests 3 distinct categories of items for the event
+    task("Suggest 3 distinct categories of items needed for {EventDescription}. 
+          Store as a list in Categories.", list(string(Categories))),
+   
+    % 2. The agent finds the price for each category
+    get_prices(Categories, PricedItems),
+    
+    % 3. Symbolic Math: Use CLPFD to find quantities that fit the budget
+    % If the LLM picked items that are too expensive, this will FAIL,
+    % and we will backtrack to step 1 to get new Categories!
+    solve_quantities(PricedItems, TotalBudget, Quantities),
+    
+    % 4. Format the final result
+    format_output(PricedItems, Quantities, Result),
+    format(string(FinalAnswer), "I've planned your ~w:\n~w", [EventDescription, Result]),
+    answer(FinalAnswer).
+
+% --- Helpers ---
+
+% Fetch prices for each suggested category
+get_prices([], []).
+get_prices([Cat|Rest], [item(Cat, Price)|Priced]) :-
+    task("Estimate the price for one unit of {Cat}. Output only the integer number. Store in Price.", integer(Price)),
+    get_prices(Rest, Priced).
+
+% The "Hard Logic" Constraint Block
+solve_quantities(Items, Budget, Quantities) :-
+    length(Items, N),
+    length(Quantities, N),
+    
+    % Constraint: We must buy between 10 and 50 of every item
+    Quantities ins 10..50,
+    
+    % Constraint: Total price must be less than or equal to Budget
+    maplist(get_price, Items, Prices),
+    scalar_product(Prices, Quantities, #=<, Budget),
+    
+    % Search for a valid solution
+    label(Quantities).
+
+get_price(item(_, P), P).
+
+% Helper to format the list for the final answer
+format_output([], [], "").
+format_output([item(Name, P)|I], [Q|Qs], FinalStr) :-
+    format_output(I, Qs, Rest),
+    format(string(Line), "- ~w: ~w units at $~w each\n", [Name, Q, P]),
+    string_concat(Line, Rest, FinalStr).

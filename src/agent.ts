@@ -9,7 +9,7 @@
 
 import { generateText, streamText, tool as aiTool } from 'ai';
 import { z } from 'zod';
-import type { ToolDefinition, MemoryMessage } from './types.js';
+import type { ToolDefinition, MemoryMessage, TypedVar } from './types.js';
 import { createModelProvider } from './prolog/bridge.js';
 
 /** Maximum number of retries for LLM error finish reasons */
@@ -48,7 +48,7 @@ function cleanPrologMarkers(data: unknown): unknown {
 
 export interface AgentLoopOptions {
   taskDescription: string;
-  outputVars: string[];
+  outputVars: (string | TypedVar)[];
   memory: MemoryMessage[];
   tools: Map<string, ToolDefinition>;
   modelOptions: {
@@ -73,6 +73,21 @@ export interface AgentLoopResult {
   variables: Record<string, unknown>;
   /** Conversation messages from the agent loop (excludes system messages which are task-specific) */
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+}
+
+/**
+ * Convert TypedVar type to Zod schema
+ */
+function typedVarToZod(type: TypedVar['type'], itemType?: TypedVar['type']): z.ZodTypeAny {
+  switch (type) {
+    case 'string': return z.string();
+    case 'number': return z.number();
+    case 'integer': return z.number().int();
+    case 'boolean': return z.boolean();
+    case 'array': return z.array(itemType ? typedVarToZod(itemType) : z.unknown());
+    case 'object': return z.record(z.unknown());
+    default: return z.unknown();
+  }
 }
 
 /**
@@ -158,7 +173,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
   };
   
-  debugLog('Output vars:', outputVars);
+  // Normalize outputVars to TypedVar[]
+  const normalizedOutputVars: TypedVar[] = outputVars.map(v => 
+    typeof v === 'string' ? { name: v, type: 'string' } : v
+  );
+  
+  debugLog('Output vars:', normalizedOutputVars.map(v => `${v.name}:${v.type}`));
 
   const outputs: string[] = [];
   const variables: Record<string, unknown> = {};
@@ -172,7 +192,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
   // Add finish tool with Zod schema
   aiTools['finish'] = aiTool({
-    description: 'Signals that the task has been completed and sets the success status. Call with true for success, false for failure. You MUST always use this tool as the last step to indicate whether the task could be completed or not!',
+    description: 'CRITICAL: You MUST call this tool to complete the task and return success/failure. Call with success=true if you have set all required results, or success=false if the task is impossible.',
     inputSchema: z.object({
       success: z.boolean().describe('Whether the task was completed successfully')
     }),
@@ -184,21 +204,33 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   });
 
   // Add set_result tool for output variables
-  if (outputVars.length > 0) {
-    const varList = outputVars.map((v, i) => `"${v}"${i < outputVars.length - 1 ? ',' : ''}`).join(' ');
+  if (normalizedOutputVars.length > 0) {
+    const varNames = normalizedOutputVars.map(v => v.name);
     
+    // Create discriminated union schema for variable-specific validation
+    // This ensures that if variable="X", value must match the type of X
+    const unionOptions = normalizedOutputVars.map(v => {
+      return z.object({
+        variable: z.literal(v.name).describe(`Set value for '${v.name}' (${v.type})`),
+        value: typedVarToZod(v.type, v.itemType).describe(`Value for '${v.name}' (must be ${v.type})`)
+      });
+    });
+
+    // Create the union schema - handle single var case specially since union needs >= 2 options
+    const inputSchema = unionOptions.length > 1 
+      ? z.discriminatedUnion('variable', unionOptions as any)
+      : unionOptions[0];
+
     aiTools['set_result'] = aiTool({
       description: `Set a result value for an output variable. You MUST call this tool to return results from the task. Use the exact variable name as specified.`,
-      inputSchema: z.object({
-        variable: z.string().describe(`The variable name to set. Must be exactly one of: ${varList}`),
-        value: z.string().describe('The value to set (must be a string)')
-      }),
-      execute: async ({ variable, value }: { variable: string; value: string }) => {
-        if (outputVars.includes(variable)) {
+      inputSchema: inputSchema as any,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      execute: async ({ variable, value }: { variable: string; value: any }) => {
+        if (varNames.includes(variable)) {
           variables[variable] = value;
           return { success: true, variable, value };
         }
-        return { success: false, error: `Unknown variable: ${variable}. Must be one of: ${varList}` };
+        return { success: false, error: `Unknown variable: ${variable}` };
       },
     });
   }
@@ -231,7 +263,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   }
 
   // Build the base system prompt with task instructions and tools
-  const baseSystemPrompt = buildSystemPrompt(taskDescription, outputVars, tools);
+  const baseSystemPrompt = buildSystemPrompt(taskDescription, normalizedOutputVars, tools);
 
   // Extract system context from memory (user-defined system() calls)
   const systemContext = memory
@@ -329,12 +361,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         // Handle errors
         if (finishReason === 'error') {
           errorRetryCount++;
+          debugLog(`ERROR: LLM returned error (attempt ${errorRetryCount}/${MAX_ERROR_RETRIES}).`);
           if (errorRetryCount <= MAX_ERROR_RETRIES) {
-            debugLog(`ERROR: LLM returned error (attempt ${errorRetryCount}/${MAX_ERROR_RETRIES}). Retrying...`);
             await new Promise(resolve => setTimeout(resolve, 1000 * errorRetryCount));
             continue;
           }
-          outputs.push('Error: LLM API returned an error. Check API key and rate limits.');
+          outputs.push(`Error: LLM API returned an error.`);
           break;
         }
 
@@ -556,18 +588,26 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
  */
 function buildSystemPrompt(
   taskDescription: string,
-  outputVars: string[],
+  outputVars: (string | TypedVar)[],
   tools: Map<string, ToolDefinition>
 ): string {
   const toolDescriptions: string[] = [];
+  
+  // Normalize outputVars to TypedVar[]
+  const normalizedOutputVars: TypedVar[] = outputVars.map(v => 
+    typeof v === 'string' ? { name: v, type: 'string' } : v
+  );
   
   // Add finish tool description
   toolDescriptions.push('- finish(success: boolean): Signal task completion. Call finish(true) when done successfully, or finish(false) if the task cannot be completed.');
   
   // Add set_result tool if we have output variables
-  if (outputVars.length > 0) {
-    const varList = outputVars.map(v => `"${v}"`).join(', ');
-    toolDescriptions.push(`- set_result(variable: string, value: string): Store a result value. Variable must be one of: ${varList}`);
+  if (normalizedOutputVars.length > 0) {
+    const varList = normalizedOutputVars.map(v => {
+      const typeStr = v.type === 'array' && v.itemType ? `array<${v.itemType}>` : v.type;
+      return `"${v.name}" (${typeStr})`;
+    }).join(', ');
+    toolDescriptions.push(`- set_result(variable: string, value: any): Store a result value. Variable must be one of: ${varList}`);
   }
   
   // Add user-defined tools
@@ -603,12 +643,17 @@ Workflow:
 
 If you determine the task cannot be completed, call finish(false) immediately.`;
 
-  if (outputVars.length > 0) {
-    const varList = outputVars.map(v => `"${v}"`).join(', ');
+  if (normalizedOutputVars.length > 0) {
+    const varList = normalizedOutputVars.map(v => {
+      const typeStr = v.type === 'array' && v.itemType ? `array<${v.itemType}>` : v.type;
+      return `"${v.name}" (${typeStr})`;
+    }).join(', ');
+    
     prompt += `
 
 IMPORTANT: You MUST use set_result() to store values for: ${varList}
-Call set_result for each variable before calling finish.`;
+Call set_result for each variable before calling finish.
+The tool will enforce strict type checking based on the variable type.`;
   }
 
   prompt += `
@@ -618,7 +663,7 @@ CRITICAL INSTRUCTIONS:
 - NEVER write code syntax like print(), default_api.X(), or function_name() in your text response.
 - NEVER describe tool calls in text - actually invoke them using the tool interface.
 - Each tool call should be a separate structured function call, not embedded in text.
-- When storing values, pass simple strings without code formatting or escaping.
+- When storing values, pass simple strings without code formatting or escaping unless the type is 'string'.
 
 EXAMPLES OF CORRECT TOOL USAGE:
 

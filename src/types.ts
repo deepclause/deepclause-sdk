@@ -175,6 +175,15 @@ export interface DeepClauseSDK {
 }
 
 /**
+ * Variable with type information for type-safe LLM outputs
+ */
+export interface TypedVar {
+  name: string;
+  type: 'string' | 'number' | 'integer' | 'boolean' | 'array' | 'object';
+  itemType?: TypedVar['type']; // For arrays
+}
+
+/**
  * Internal types for Prolog bridge communication
  */
 export interface PrologRequest {

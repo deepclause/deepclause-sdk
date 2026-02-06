@@ -6,10 +6,10 @@
  * - Uses Zod schemas for tool definitions
  * - Uses result.response.messages for message history management
  */
-import type { ToolDefinition, MemoryMessage } from './types.js';
+import type { ToolDefinition, MemoryMessage, TypedVar } from './types.js';
 export interface AgentLoopOptions {
     taskDescription: string;
-    outputVars: string[];
+    outputVars: (string | TypedVar)[];
     memory: MemoryMessage[];
     tools: Map<string, ToolDefinition>;
     modelOptions: {
