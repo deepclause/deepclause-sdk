@@ -553,6 +553,26 @@ agent_main :-
     answer(Msg).
 ```
 
+### Constraint Logic Programming (CLP)
+
+DML supports Prolog's CLP libraries for solving optimization and logic problems without needing Python:
+
+- **CLP(FD)**: Finite domains (integers). Use `:- use_module(library(clpfd)).`
+- **CLP(Q)**: Rational numbers. Use `:- use_module(library(clpq)).`
+- **CLP(R)**: Real numbers. Use `:- use_module(library(clpr)).`
+
+```prolog
+:- use_module(library(clpfd)).
+
+agent_main(Total) :-
+    [X,Y] ins 0..100,
+    X + Y #= Total,
+    X * Y #= 2400,
+    label([X,Y]),
+    format(string(Msg), "X=~w, Y=~w", [X, Y]),
+    answer(Msg).
+```
+
 ### Dictionaries (SWI-Prolog)
 ```prolog
 agent_main :-

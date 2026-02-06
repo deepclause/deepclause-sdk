@@ -326,6 +326,25 @@ catch(Goal, Error, Recovery)
 throw(some_error)
 \`\`\`
 
+### Logic & Optimization (CLP)
+
+DML supports Prolog's Constraint Logic Programming (CLP) libraries. Use these instead of Python for mathematical optimization, scheduling, or strict logic puzzles:
+
+- **CLP(FD)**: Finite domains (integers). Use \`:- use_module(library(clpfd)).\`
+- **CLP(Q)**: Rational numbers (exact fractions). Use \`:- use_module(library(clpq)).\`
+- **CLP(R)**: Real numbers (floating point). Use \`:- use_module(library(clpr)).\`
+
+\`\`\`prolog
+:- use_module(library(clpfd)).
+
+% Solve: find X and Y such that X+Y=10 and X*Y=24
+solve(X, Y) :-
+    [X,Y] ins 0..10,
+    X + Y #= 10,
+    X * Y #= 24,
+    label([X,Y]).
+\`\`\`
+
 ### Backtracking
 
 DML supports full Prolog backtracking across LLM calls:
