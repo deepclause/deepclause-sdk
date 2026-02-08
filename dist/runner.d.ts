@@ -17,6 +17,7 @@ export interface InternalRunOptions {
     args?: unknown[];
     params?: Record<string, unknown>;
     workspacePath?: string;
+    gasLimit?: number;
     tools: Map<string, ToolDefinition>;
     toolPolicy: ToolPolicy | null;
     onInputRequired: (prompt: string) => Promise<string>;

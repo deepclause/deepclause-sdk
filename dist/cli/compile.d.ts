@@ -58,15 +58,6 @@ export interface MetaFile {
         provider: string;
     }>;
 }
-interface ValidationResult {
-    valid: boolean;
-    errors: string[];
-    warnings?: string[];
-}
-interface CompilationAttempt {
-    dml: string;
-    validation: ValidationResult;
-}
 /**
  * Compile a Markdown task description to DML using an agentic loop
  */
@@ -82,33 +73,4 @@ export declare function compilePrompt(prompt: string, options?: CompileOptions):
     dml: string;
     tools: string[];
 }>;
-/**
- * Generate DML using LLM with streaming
- */
-export declare function generateDMLWithStreaming(systemPrompt: string, userMessage: string, previousAttempts: CompilationAttempt[], model: string, provider: Provider, temperature?: number, onChunk?: (chunk: string) => void): Promise<string>;
-/**
- * Extract tool dependencies from DML code
- */
-export declare function extractToolDependencies(dml: string): string[];
-/**
- * Extract parameters from agent_main signature
- */
-export declare function extractParameters(dml: string): Array<{
-    name: string;
-    position: number;
-    description?: string;
-    required?: boolean;
-}>;
-/**
- * Extract description from markdown
- */
-export declare function extractDescription(markdown: string): string;
-/**
- * Basic DML syntax validation (exported for backwards compatibility)
- */
-export declare function validateDMLSyntax(dml: string): {
-    valid: boolean;
-    errors: string[];
-};
-export {};
 //# sourceMappingURL=compile.d.ts.map

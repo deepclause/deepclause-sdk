@@ -1,7 +1,15 @@
 /**
  * Tool management utilities
  */
-import type { ToolPolicy } from './types.js';
+import type { ToolPolicy, CompileTool } from './types.js';
+/**
+ * Built-in tools for compilation descriptions
+ */
+export declare const BUILTIN_COMPILE_TOOLS: CompileTool[];
+/**
+ * Get all built-in tools for compilation
+ */
+export declare function getBuiltInCompileTools(): CompileTool[];
 /**
  * Check if a tool is allowed by the current policy
  */

@@ -180,7 +180,13 @@ export class DMLRunner {
                         }
                         return;
                     case 'error':
-                        yield { type: 'error', content: step.content };
+                        if (this.options.trace && step.payload) {
+                            const traceData = toJsValue(step.payload.trace);
+                            yield { type: 'error', content: step.content, trace: Array.isArray(traceData) ? traceData : undefined };
+                        }
+                        else {
+                            yield { type: 'error', content: step.content };
+                        }
                         return;
                     default:
                         yield { type: 'error', content: `Unknown step status: ${step.status}` };
@@ -234,6 +240,9 @@ export class DMLRunner {
             trace: this.options.trace ?? false,
             ...options.params,
         };
+        if (options.gasLimit !== undefined) {
+            params['gas_limit'] = options.gasLimit;
+        }
         // Convert to Prolog dict syntax (keys must be lowercase atoms)
         const entries = Object.entries(params)
             .map(([k, v]) => `${k.toLowerCase()}: ${this.toPrologTerm(v)}`)

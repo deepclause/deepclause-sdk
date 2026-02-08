@@ -2,6 +2,57 @@
  * Tool management utilities
  */
 /**
+ * Built-in tools for compilation descriptions
+ */
+export const BUILTIN_COMPILE_TOOLS = [
+    {
+        name: 'vm_exec',
+        description: 'Execute a shell command in a sandboxed Alpine Linux VM with Python. Returns stdout, stderr, and exit code.',
+        provider: 'agentvm',
+        schema: {
+            type: 'object',
+            properties: {
+                command: { type: 'string', description: 'Shell command to execute (e.g., "python3 script.py", "echo hello", "ls -la")' }
+            },
+            required: ['command']
+        }
+    },
+    {
+        name: 'web_search',
+        description: 'Search the web using Brave Search API. Returns structured results with titles, URLs, and descriptions.',
+        provider: 'brave',
+        schema: {
+            type: 'object',
+            properties: {
+                query: { type: 'string', description: 'Search query' },
+                count: { type: 'number', description: 'Number of results (default: 10, max: 20)' },
+                freshness: { type: 'string', description: 'Filter by freshness: pd (past day), pw (past week), pm (past month), py (past year)' }
+            },
+            required: ['query']
+        }
+    },
+    {
+        name: 'news_search',
+        description: 'Search for recent news articles using Brave Search API.',
+        provider: 'brave',
+        schema: {
+            type: 'object',
+            properties: {
+                query: { type: 'string', description: 'Search query' },
+                count: { type: 'number', description: 'Number of results (default: 10, max: 20)' },
+                freshness: { type: 'string', description: 'Filter by freshness: pd (past day), pw (past week), pm (past month)' }
+            },
+            required: ['query']
+        }
+    }
+];
+/**
+ * Get all built-in tools for compilation
+ */
+export function getBuiltInCompileTools() {
+    return [...BUILTIN_COMPILE_TOOLS];
+}
+/**
  * Check if a tool is allowed by the current policy
  */
 export function checkToolPolicy(toolName, policy) {

@@ -1,0 +1,82 @@
+[
+  {
+    "$tag": "trace",
+    "depth": 0,
+    "type": "output",
+    "predicate": "output",
+    "args": [
+      "Solving logic puzzle..."
+    ],
+    "timestamp": 1770386863407
+  },
+  {
+    "$tag": "trace",
+    "depth": 0,
+    "type": "call",
+    "predicate": "solve",
+    "args": [
+      11707
+    ],
+    "timestamp": 1770386863409
+  },
+  {
+    "$tag": "trace",
+    "depth": 1,
+    "type": "output",
+    "predicate": "output",
+    "args": [
+      "A0"
+    ],
+    "timestamp": 1770386863409
+  },
+  {
+    "$tag": "trace",
+    "depth": 1,
+    "type": "output",
+    "predicate": "output",
+    "args": [
+      "A1"
+    ],
+    "timestamp": 1770386863409
+  },
+  {
+    "$tag": "trace",
+    "depth": 1,
+    "type": "output",
+    "predicate": "output",
+    "args": [
+      "A1"
+    ],
+    "timestamp": 1770386863410
+  },
+  {
+    "$tag": "trace",
+    "depth": 1,
+    "type": "output",
+    "predicate": "output",
+    "args": [
+      "A2"
+    ],
+    "timestamp": 1770386863410
+  },
+  {
+    "$tag": "trace",
+    "depth": 1,
+    "type": "output",
+    "predicate": "output",
+    "args": [
+      "A2"
+    ],
+    "timestamp": 1770386863410
+  },
+  {
+    "$tag": "trace",
+    "depth": 0,
+    "type": "fail",
+    "predicate": "solve",
+    "args": [
+      11953
+    ],
+    "timestamp": 1770386863410
+  }
+]

@@ -68,6 +68,21 @@ agent_main(MaxResults, Topic) :- ...
 | \`task(Description, Var1, Var2)\` | Execute task, bind two results |
 | \`task(Description, Var1, Var2, Var3)\` | Execute task, bind three results |
 
+**Type-Safe Output Variables:**
+You can wrap output variables with type specifiers to enforce strict validation:
+- \`string(Var)\` (Default)
+- \`integer(Var)\` - Enforces integer type
+- \`number(Var)\` or \`float(Var)\` - Enforces numeric type
+- \`boolean(Var)\` - Enforces boolean type
+- \`list(string(Var))\` - Enforces array of strings (or other types)
+- \`object(Var)\` - Enforces object/dict type
+
+\`\`\`prolog
+task("Calculate result", integer(Result))
+task("List items", list(string(Items)))
+task("Check status", boolean(IsComplete))
+\`\`\`
+
 **Important:** Variable names in the description must match the Prolog variables:
 \`\`\`prolog
 task("Analyze this and store the result in Summary.", Summary)
@@ -305,6 +320,25 @@ goal1, goal2, goal3
 % Exception handling
 catch(Goal, Error, Recovery)
 throw(some_error)
+\`\`\`
+
+### Logic & Optimization (CLP)
+
+DML supports Prolog's Constraint Logic Programming (CLP) libraries. Use these instead of Python for mathematical optimization, scheduling, or strict logic puzzles:
+
+- **CLP(FD)**: Finite domains (integers). Use \`:- use_module(library(clpfd)).\`
+- **CLP(Q)**: Rational numbers (exact fractions). Use \`:- use_module(library(clpq)).\`
+- **CLP(R)**: Real numbers (floating point). Use \`:- use_module(library(clpr)).\`
+
+\`\`\`prolog
+:- use_module(library(clpfd)).
+
+% Solve: find X and Y such that X+Y=10 and X*Y=24
+solve(X, Y) :-
+    [X,Y] ins 0..10,
+    X + Y #= 10,
+    X * Y #= 24,
+    label([X,Y]).
 \`\`\`
 
 ### Backtracking

@@ -345,8 +345,10 @@ create_engine(SessionId, _MemoryId, Args, Params, Engine) :-
     (get_dict(trace, Params, true) -> TraceEnabled = true ; TraceEnabled = false),
     assertz(session_trace_enabled(SessionId, TraceEnabled)),
     assertz(session_trace_log(SessionId, [])),
-    % Create initial state with empty memory, params, context stack, and trace depth
-    InitialState = state{memory: [], params: Params, context_stack: [], depth: 0},
+    % Check for gas limit in params
+    (get_dict(gas_limit, Params, GasLimit) -> true ; GasLimit = -1),
+    % Create initial state with empty memory, params, context stack, trace depth and gas
+    InitialState = state{memory: [], params: Params, context_stack: [], depth: 0, gas_remaining: GasLimit},
     % Create the engine - pass SessionId and initial state to mi/3
     engine_create(_, 
         deepclause_mi:mi(Goal, InitialState, SessionId),
@@ -410,7 +412,11 @@ step_engine(SessionId, Status, Content, Payload) :-
             (   format(atom(ErrMsg), 'Engine error: ~w', [Error]),
                 Status = error,
                 Content = ErrMsg,
-                Payload = none
+                (   session_trace_enabled(SessionId, true),
+                    session_trace_log(SessionId, TraceLog)
+                ->  Payload = payload{trace: TraceLog}
+                ;   Payload = none
+                )
             )
         )
     ;   Status = error,
@@ -510,6 +516,9 @@ mi(Goal, StateIn, SessionId) :-
         Error,
         (   Error == '$answer_commit'
         ->  true  % answer/1 threw to commit - success, no backtracking
+        ;   Error == gas_exhausted
+        ->  engine_yield(error("Gas exhausted: execution exceeded iteration limit")),
+            fail
         ;   format(atom(ErrMsg), 'Runtime error: ~w', [Error]),
             engine_yield(error(ErrMsg)),
             fail
@@ -892,7 +901,8 @@ collect_user_tools(SessionId, ToolSchemas) :-
 %% mi_call(task(Desc), +StateIn, -StateOut)
 mi_call(task(Desc), StateIn, StateOut) :-
     !,
-    get_params(StateIn, Params),
+    consume_gas(StateIn, State0),
+    get_params(State0, Params),
     interpolate_desc(Desc, Params, InterpDesc),
     get_session_id(SessionId),
     get_depth(StateIn, Depth),
@@ -934,7 +944,8 @@ mi_call(task(Desc), StateIn, StateOut) :-
 %% New unified handler for task/N with embedded variable names
 mi_call(task_named(Desc, Vars, VarNames), StateIn, StateOut) :-
     !,
-    mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut).
+    consume_gas(StateIn, State1),
+    mi_call_task_n(Desc, Vars, VarNames, State1, StateOut).
 
 %% ============================================================
 %% Prompt Handling - Fresh LLM call without existing memory
@@ -969,7 +980,8 @@ mi_call(prompt(Desc), StateIn, StateOut) :-
 %% New unified handler for prompt/N with embedded variable names
 mi_call(prompt_named(Desc, Vars, VarNames), StateIn, StateOut) :-
     !,
-    mi_call_prompt_n(Desc, Vars, VarNames, StateIn, StateOut).
+    consume_gas(StateIn, State1),
+    mi_call_prompt_n(Desc, Vars, VarNames, State1, StateOut).
 
 %% mi_call_prompt_n(+Desc, +Vars, +VarNames, +StateIn, -StateOut)
 %% Simple LLM call with empty memory and NO tools (pure text completion with variable binding)
@@ -1056,11 +1068,12 @@ bind_task_variables(VarsDict, [N|Names], [Value|Values]) :-
 %% ============================================================
 
 %% mi_call(exec(ToolCall, Output), +StateIn, -StateOut)
-mi_call(exec(ToolCall, Output), StateIn, StateIn) :-
+mi_call(exec(ToolCall, Output), StateIn, StateOut) :-
     !,
+    consume_gas(StateIn, State0),
     ToolCall =.. [ToolName|Args],
     get_session_id(SessionId),
-    get_depth(StateIn, Depth),
+    get_depth(State0, Depth),
     add_trace_entry(SessionId, exec, ToolName, Args, Depth),
     engine_yield(request_exec(ToolName, Args)),
     % Use get_next_signal helper which handles both dynamic predicate and engine_fetch
@@ -1069,7 +1082,8 @@ mi_call(exec(ToolCall, Output), StateIn, StateIn) :-
     retract(session_exec_result(SessionId, _)),
     (   Result.status == success
     ->  Output = Result.result,
-        add_trace_with_result(SessionId, exit, ToolName, Args, Output, Depth)
+        add_trace_with_result(SessionId, exit, ToolName, Args, Output, Depth),
+        StateOut = State0
     ;   add_trace_entry(SessionId, fail, ToolName, Args, Depth),
         fail
     ).
@@ -1816,7 +1830,24 @@ mi_call(Goal, StateIn, StateOut) :-
     ),
     % Skip if this is a special predicate (has dedicated mi_call clause)
     \+ is_mi_special_predicate(Goal),
-    mi_call_dispatch(Goal, StateIn, StateOut).
+    consume_gas(StateIn, State1),
+    mi_call_dispatch(Goal, State1, StateOut).
+
+%% consume_gas(+StateIn, -StateOut)
+%% Decrements gas_remaining if it is >= 0. Throws gas_exhausted if it reaches 0.
+consume_gas(StateIn, StateOut) :-
+    (   get_dict(gas_remaining, StateIn, Gas)
+    ->  (   Gas == 0
+        ->  throw(gas_exhausted)
+        ;   Gas > 0
+        ->  NewGas is Gas - 1,
+            StateOut = StateIn.put(gas_remaining, NewGas)
+        ;   % Gas is -1 (infinite)
+            StateOut = StateIn
+        )
+    ;   % No gas limit set
+        StateOut = StateIn
+    ).
 
 %% mi_call_dispatch(+Goal, +StateIn, -StateOut)
 %% Dispatch user-defined vs built-in predicates

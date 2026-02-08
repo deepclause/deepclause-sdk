@@ -77,6 +77,7 @@ export interface InternalRunOptions {
   args?: unknown[];
   params?: Record<string, unknown>;
   workspacePath?: string;
+  gasLimit?: number;
   tools: Map<string, ToolDefinition>;
   toolPolicy: ToolPolicy | null;
   onInputRequired: (prompt: string) => Promise<string>;
@@ -167,9 +168,9 @@ export class DMLRunner {
       // Memory is now managed internally by the MI via state threading
       // No external initialization needed
 
-      // Build args and params
-      const args = this.buildArgs(options);
-      const params = this.buildParams(options);
+    // Build args and params
+    const args = this.buildArgs(options);
+    const params = this.buildParams(options);
 
       // Parse the DML code and assert params as facts
       const parseResult = this.parseCode(code, memoryId, params);
@@ -255,7 +256,12 @@ export class DMLRunner {
             return;
 
           case 'error':
-            yield { type: 'error', content: step.content };
+            if (this.options.trace && step.payload) {
+              const traceData = toJsValue((step.payload as Record<string, unknown>).trace);
+              yield { type: 'error', content: step.content, trace: Array.isArray(traceData) ? traceData : undefined } as DMLEvent;
+            } else {
+              yield { type: 'error', content: step.content };
+            }
             return;
 
           default:
@@ -315,6 +321,10 @@ export class DMLRunner {
       trace: this.options.trace ?? false,
       ...options.params,
     };
+
+    if (options.gasLimit !== undefined) {
+      params['gas_limit'] = options.gasLimit;
+    }
 
     // Convert to Prolog dict syntax (keys must be lowercase atoms)
     const entries = Object.entries(params)

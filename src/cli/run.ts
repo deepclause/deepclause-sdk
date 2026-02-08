@@ -85,6 +85,7 @@ export interface RunOptions {
   model?: string;
   provider?: Provider;
   temperature?: number;
+  gasLimit?: number;
   params?: Record<string, string>;
   prompt?: string;
 }
@@ -226,16 +227,19 @@ export async function run(
     events: []
   };
 
+  let finished = false;
   try {
     for await (const event of sdk.runDML(dmlCode, {
       params,
       args,
       workspacePath,
+      gasLimit: options.gasLimit,
       // Handle user input requests from ask_user tool
       onUserInput: options.headless 
         ? async () => '' // In headless mode, return empty string
         : promptUser
     })) {
+      if (finished) break;
       result.events?.push(event);
 
       switch (event.type) {
@@ -291,15 +295,19 @@ export async function run(
 
         case 'error':
           result.error = event.content;
+          if (event.trace) {
+            result.trace = event.trace;
+          }
+          finished = true;
           break;
 
         case 'finished':
           if (event.trace) {
             result.trace = event.trace;
           }
-          // Explicitly break out of the for-await loop when finished
-          // The generator should end but this ensures we stop processing
-          return result;
+          // Mark as finished to break out of the loop
+          finished = true;
+          break;
 
         case 'input_required':
           // For CLI, we'd need to handle stdin - for now just skip

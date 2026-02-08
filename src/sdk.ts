@@ -3,6 +3,8 @@
  */
 
 import type {
+  CompileOptions,
+  CompileResult,
   CreateOptions,
   DeepClauseSDK,
   DMLEvent,
@@ -13,6 +15,10 @@ import type {
 } from './types.js';
 import { DMLRunner } from './runner.js';
 import { loadProlog } from './prolog/loader.js';
+import { compileToDML } from './compiler.js';
+import { getBuiltInCompileTools } from './tools.js';
+import * as fs from 'fs/promises';
+import * as path from 'path';
 
 /**
  * Create a new DeepClause SDK instance
@@ -60,6 +66,7 @@ export async function createDeepClause(options: CreateOptions): Promise<DeepClau
         ...runOptions,
         tools,
         toolPolicy,
+        gasLimit: runOptions?.gasLimit,
         onInputRequired: async (prompt: string) => {
           if (runOptions?.onUserInput) {
             return runOptions.onUserInput(prompt);
@@ -70,6 +77,36 @@ export async function createDeepClause(options: CreateOptions): Promise<DeepClau
           });
         },
       });
+    },
+
+    async compile(source: string, compileOptions?: CompileOptions): Promise<CompileResult> {
+      if (disposed) {
+        throw new Error('SDK has been disposed');
+      }
+
+      let markdown = source;
+      
+      // If source looks like a file path and ends with .md, try to read it
+      if (source.endsWith('.md') && source.length < 1024) {
+        try {
+          // Use absolute path if it exists, otherwise relative to cwd
+          const filePath = path.isAbsolute(source) ? source : path.resolve(process.cwd(), source);
+          markdown = await fs.readFile(filePath, 'utf-8');
+        } catch {
+          // If file reading fails, assume source is the markdown content itself
+        }
+      }
+
+      // Merge options
+      const mergedOptions: CompileOptions = {
+        model: options.model,
+        provider: provider as any,
+        temperature: options.temperature,
+        tools: getBuiltInCompileTools(),
+        ...compileOptions
+      };
+
+      return compileToDML(markdown, mergedOptions);
     },
 
     registerTool(name: string, tool: ToolDefinition): void {

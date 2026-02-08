@@ -38,6 +38,8 @@ export interface RunOptions {
   params?: Record<string, unknown>;
   /** Path to workspace directory */
   workspacePath?: string;
+  /** Maximum number of execution steps (gas) */
+  gasLimit?: number;
   /** Handler for user input requests */
   onUserInput?: (prompt: string) => Promise<string>;
   /** Abort signal for cancellation */
@@ -94,6 +96,51 @@ export interface ToolDefinition {
 }
 
 /**
+ * Tool representation for the compiler
+ */
+export interface CompileTool {
+  name: string;
+  description: string;
+  provider: string;
+  schema?: object;
+}
+
+/**
+ * Options for DML compilation
+ */
+export interface CompileOptions {
+  /** Model to use for compilation */
+  model?: string;
+  /** Provider for the model */
+  provider?: 'openai' | 'anthropic' | 'google' | 'openrouter';
+  /** Temperature for LLM calls (0-1) */
+  temperature?: number;
+  /** Maximum number of compilation attempts */
+  maxAttempts?: number;
+  /** Enable verbose logging during compilation */
+  verbose?: boolean;
+  /** Custom tools to describe to the compiler */
+  tools?: CompileTool[];
+}
+
+/**
+ * Result of a DML compilation
+ */
+export interface CompileResult {
+  /** Compiled DML code */
+  dml: string;
+  /** Tool dependencies extracted from the DML */
+  tools: string[];
+  /** Brief explanation of what the program does */
+  explanation?: string;
+  /** Number of attempts taken to compile */
+  attempts?: number;
+  /** Validation details */
+  valid: boolean;
+  errors?: string[];
+}
+
+/**
  * JSON Schema type for tool parameters
  */
 export interface JsonSchema {
@@ -127,6 +174,14 @@ export interface DeepClauseSDK {
    * @yields DML events (output, log, answer, etc.)
    */
   runDML(code: string, options?: RunOptions): AsyncGenerator<DMLEvent>;
+
+  /**
+   * Compile Markdown task description to DML
+   * @param source - Markdown content or path to .md file
+   * @param options - Compilation options
+   * @returns Compiled DML and metadata
+   */
+  compile(source: string, options?: CompileOptions): Promise<CompileResult>;
 
   /**
    * Register an external tool

@@ -15,6 +15,7 @@ export interface RunOptions {
     model?: string;
     provider?: Provider;
     temperature?: number;
+    gasLimit?: number;
     params?: Record<string, string>;
     prompt?: string;
 }

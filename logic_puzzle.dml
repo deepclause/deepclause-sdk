@@ -1,0 +1,141 @@
+% Logic Puzzle Solver
+% Solves the 3-house logic puzzle using Prolog constraints and formats the output.
+
+:- use_module(library(lists)).
+
+% --- Solver Logic ---
+
+solve(Houses) :-
+    % Structure: house(Number, Name, Child, Birthday, Smoothie, Lunch, Mother)
+
+    output("A0"),
+    Houses = [
+        house(1, _, _, _, _, _, _),
+        house(2, _, _, _, _, _, _),
+        house(3, _, _, _, _, _, _)
+    ],
+
+    % --- Clue 8: The person whose mother's name is Aniya is in the first house.
+    member(house(1, _, _, _, _, _, aniya), Houses),
+
+    % --- Clue 3 & 7: Peter is directly left of the person whose birthday is in September.
+    % --- Clue 7: The person whose birthday is in September is Eric.
+    member(house(HPeter, peter, _, _, _, _, _), Houses),
+    member(house(HEric, eric, _, sept, _, _, _), Houses),
+    HEric =:= HPeter + 1,
+
+    output("A1"),
+    % --- Clue 10: The person who likes Cherry smoothies is the person whose birthday is in January.
+    member(house(HJan, _, _, jan, cherry, _, _), Houses),
+
+    % --- Clue 5: The person who likes Cherry smoothies is not in the first house.
+    HJan \= 1,
+
+    % --- Clue 9: The person's child is named Fred is somewhere to the right of the person who likes Cherry smoothies.
+    member(house(HFred, _, fred, _, _, _, _), Houses),
+    HFred > HJan,
+
+    % --- Clue 6: The person's child is named Bella is the Desert smoothie lover.
+    member(house(_, _, bella, _, desert, _, _), Houses),
+
+    % --- Clue 1: Arnold is the person who loves eating grilled cheese.
+    member(house(_, arnold, _, _, _, grilled_cheese, _), Houses),
+
+    output("A2"),
+    % --- Clue 2 & 4: 
+    % "The person who loves the spaghetti eater" (Let's call them LSE).
+    % Clue 4: LSE is the person whose birthday is in January.
+    % Clue 2: LSE (Jan) is next to the person whose mother's name is Holly.
+    member(house(HHolly, _, _, _, _, _, holly), Houses),
+    abs(HJan - HHolly) =:= 1,
+
+    output("A2"),
+    % Implicit: The "Spaghetti Eater" is distinct from the person who "loves the spaghetti eater" (Jan).
+    % We need to place Spaghetti.
+    member(house(HSpag, _, _, _, _, spaghetti, _), Houses),
+    % Ensure Jan (the lover) is not the Spaghetti eater (the loved).
+    HSpag \= HJan,
+
+
+    output("A3"),
+    % --- Final Definition of Attributes to ensure completeness ---
+    
+    % Persons: Arnold, Peter, Eric
+    maplist(arg(2), Houses, Persons),
+    permutation([arnold, peter, eric], Persons),
+
+    % Children: Meredith, Fred, Bella
+    maplist(arg(3), Houses, Children),
+    permutation([meredith, fred, bella], Children),
+
+    % Birthdays: Jan, April, Sept
+    maplist(arg(4), Houses, Birthdays),
+    permutation([jan, april, sept], Birthdays),
+
+    output("A4"),
+    % Smoothies: Desert, Cherry, Watermelon
+    maplist(arg(5), Houses, Smoothies),
+    permutation([desert, cherry, watermelon], Smoothies),
+
+    % Lunch: Spaghetti, Grilled Cheese, Pizza
+    maplist(arg(6), Houses, Lunches),
+    permutation([spaghetti, grilled_cheese, pizza], Lunches),
+
+    output("A5"),
+    % Mothers: Janelle, Aniya, Holly
+    maplist(arg(7), Houses, Mothers),
+    permutation([janelle, aniya, holly], Mothers).
+
+% --- Agent Execution ---
+
+agent_main :-
+    output("Solving logic puzzle..."),
+    (   solve(Houses)
+    ->  print_solution(Houses)
+    ;   answer("No solution found.")
+    ).
+
+print_solution(Houses) :-
+    output("Found Solution:"),
+    Separator = "-----------------------------------------------------------------------------------------------",
+    output(Separator),
+    
+    % Header
+    format_row("House", "Name", "Child", "Birthday", "Smoothie", "Lunch", "Mother", HeaderStr),
+    output(HeaderStr),
+    output(Separator),
+    
+    % Rows
+    forall(member(H, Houses), (
+        format_house(H, RowStr),
+        output(RowStr)
+    )),
+    
+    output(Separator),
+    answer("Puzzle solved successfully.").
+
+format_house(house(N, Name, Child, Bday, Smoothie, Lunch, Mother), Str) :-
+    format_row(N, Name, Child, Bday, Smoothie, Lunch, Mother, Str).
+
+format_row(C1, C2, C3, C4, C5, C6, C7, Str) :-
+    pad_str(C1, 5, S1),
+    pad_str(C2, 10, S2),
+    pad_str(C3, 10, S3),
+    pad_str(C4, 10, S4),
+    pad_str(C5, 12, S5),
+    pad_str(C6, 15, S6),
+    pad_str(C7, 10, S7),
+    format(string(Str), "| ~w| ~w| ~w| ~w| ~w| ~w| ~w |", [S1, S2, S3, S4, S5, S6, S7]).
+
+% Pad string to length with spaces on the right (Left Align)
+pad_str(Val, TargetLen, Padded) :-
+    format(string(S), "~w", [Val]),
+    string_length(S, L),
+    (L < TargetLen ->
+        SpacesNeeded is TargetLen - L,
+        length(SpaceList, SpacesNeeded),
+        maplist(=(' '), SpaceList),
+        string_chars(SpaceStr, SpaceList),
+        string_concat(S, SpaceStr, Padded)
+    ;   sub_string(S, 0, TargetLen, _, Padded)
+    ).

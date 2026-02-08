@@ -136,6 +136,9 @@ export declare const ConfigSchema: z.ZodObject<{
 }, "strip", z.ZodTypeAny, {
     provider: "openai" | "anthropic" | "google" | "openrouter";
     model: string;
+    agentvm: {
+        network: boolean;
+    };
     providers: {
         openai?: {
             apiKey?: string | undefined;
@@ -161,14 +164,14 @@ export declare const ConfigSchema: z.ZodObject<{
             env: Record<string, string>;
         }>;
     };
-    agentvm: {
-        network: boolean;
-    };
     dmlBase: string;
     workspace: string;
 }, {
     model: string;
     provider?: "openai" | "anthropic" | "google" | "openrouter" | undefined;
+    agentvm?: {
+        network?: boolean | undefined;
+    } | undefined;
     providers?: {
         openai?: {
             apiKey?: string | undefined;
@@ -193,9 +196,6 @@ export declare const ConfigSchema: z.ZodObject<{
             args?: string[] | undefined;
             env?: Record<string, string> | undefined;
         }> | undefined;
-    } | undefined;
-    agentvm?: {
-        network?: boolean | undefined;
     } | undefined;
     dmlBase?: string | undefined;
     workspace?: string | undefined;

@@ -2,6 +2,9 @@
 
 Compile markdown specs into executable logic programs. Guaranteed execution semantics for agentic workflows.
 
+![docs/overview.png](docs/overview.png)
+
+
 ## What This Is
 
 AI skills and tools are everywhere—but most are just prompts. When a prompt fails, you tweak it. When you need branching logic, you write wrapper code. When you want retry behavior, you build it yourself.

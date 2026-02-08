@@ -165,6 +165,7 @@ program
   .option('--model <model>', 'Override configured model (can be provider/model format, e.g., google/gemini-2.5-pro)')
   .option('--provider <provider>', 'Override configured provider (openai, anthropic, google, openrouter)')
   .option('--temperature <number>', 'Override temperature (0.0-2.0)', parseFloat)
+  .option('--gas-limit <number>', 'Maximum number of execution steps', parseInt)
   .option('-p, --prompt <text>', 'One-shot prompt: generate and run DML from natural language')
   .option('-P, --param <key=value>', 'Pass named parameter (can be repeated)', collectParams, {})
   .action(async (file, args, options) => {
@@ -188,6 +189,7 @@ program
         model,
         provider: provider as import('./config.js').Provider,
         temperature: options.temperature,
+        gasLimit: options.gasLimit,
         params: options.param,
         prompt: options.prompt
       });
