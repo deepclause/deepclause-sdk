@@ -172,16 +172,17 @@ Note: There is no separate save_file or read_file tool. File operations go throu
 
 {ReasoningNote}
 
-Also specify a recipe query for each task if relevant (null otherwise). Use natural language queries like 'testing patterns' or 'codebase analysis'.
+Also specify a recipe query for each task if relevant (NONE otherwise). Use natural language queries like 'testing patterns' or 'codebase analysis'.
 
-Return a JSON array of objects with these fields:
-- \"description\": the task description (copy from the plan above)
-- \"tools\": array of tool name strings from the available tools list above
-- \"reasoning\": one of \"none\", \"low\", \"medium\", \"high\"
-- \"recipe\": a recipe query string or null
+Return three ordered lists aligned 1:1 with Tasks:
+- ToolSpecs: each item must be either ALL or a comma-separated list of exact tool names from the available tools list above.
+- ReasoningSpecs: each item must be exactly one of none, low, medium, high.
+- RecipeSpecs: each item must be either NONE or a recipe query string.
 
-Return ONLY the JSON array, no other text.", string(AssignmentsJson)),
-    (   catch(parse_plan_json(AssignmentsJson, PlanSteps), _, fail)
+Store the ordered tool specs in ToolSpecs.
+Store the ordered reasoning specs in ReasoningSpecs.
+Store the ordered recipe specs in RecipeSpecs.", list(string(ToolSpecs)), list(string(ReasoningSpecs)), list(string(RecipeSpecs))),
+    (   build_plan_steps_from_specs(PlanTasks, ToolSpecs, ReasoningSpecs, RecipeSpecs, PlanSteps)
     ->  true
     ;   % Fallback: no tool/reasoning/recipe assignments
         fallback_plan_steps(PlanTasks, PlanSteps)
@@ -199,48 +200,68 @@ valid_plan_tool(create_new_skill).
 valid_plan_tool(ask_user).
 valid_plan_tool(inform_user).
 
-%% tool_name_to_atom(+Raw, -Atom)
-%% Converts a JSON string or atom to a Prolog atom
-tool_name_to_atom(Raw, Atom) :-
-    (   atom(Raw) -> Atom = Raw
-    ;   string(Raw) -> atom_string(Atom, Raw)
-    ;   Atom = Raw
+default_plan_tools([run_bash, run_skill, consult_recipes, search_web, search_news, fetch_url, download_file, create_new_skill, ask_user, inform_user]).
+
+build_plan_steps_from_specs([], [], [], [], []).
+build_plan_steps_from_specs([Desc|RestDesc], [ToolSpec|RestTools], [ReasoningSpec|RestReasoning], [RecipeSpec|RestRecipes], [plan_step{description: Desc, tools: Tools, reasoning: Reasoning, recipe: Recipe}|RestSteps]) :-
+    normalize_tools_spec(ToolSpec, Tools),
+    normalize_reasoning_spec(ReasoningSpec, Reasoning),
+    normalize_recipe_spec(RecipeSpec, Recipe),
+    build_plan_steps_from_specs(RestDesc, RestTools, RestReasoning, RestRecipes, RestSteps).
+
+normalize_tools_spec(Raw, Tools) :-
+    format(string(Text), "~w", [Raw]),
+    string_lower(Text, Lower),
+    (   Lower = "all"
+    ->  default_plan_tools(Tools)
+    ;   split_string(Text, ",", " []\t\n", Parts0),
+        include(non_empty_string, Parts0, Parts),
+        findall(ToolAtom,
+            ( member(Part, Parts),
+              tool_name_string_to_atom(Part, ToolAtom),
+              valid_plan_tool(ToolAtom)
+            ),
+            ValidTools),
+        (   ValidTools = []
+        ->  default_plan_tools(Tools)
+        ;   Tools = ValidTools
+        )
     ).
 
-%% parse_plan_json(+Json, -PlanSteps)
-parse_plan_json(Json, PlanSteps) :-
-    atom_json_dict(Json, JsonArray, []),
-    is_list(JsonArray),
-    maplist(parse_plan_step, JsonArray, PlanSteps).
+normalize_reasoning_spec(Raw, Reasoning) :-
+    format(string(Text), "~w", [Raw]),
+    string_lower(Text, Lower),
+    normalize_reasoning_label(Lower, Reasoning).
 
-parse_plan_step(Dict, plan_step{description: Desc, tools: Tools, reasoning: Reasoning, recipe: Recipe}) :-
-    Desc = Dict.get(description),
-    (   Desc = null -> throw(parse_error) ; true ),
-    ToolsRaw = Dict.get(tools),
-    (   is_list(ToolsRaw)
-    ->  % Convert each tool name to atom, filter to valid tools
-        findall(TA, (member(TR, ToolsRaw), tool_name_to_atom(TR, TA), valid_plan_tool(TA)), ValidTools),
-        (   ValidTools = [] -> Tools = all ; Tools = ValidTools )
-    ;   Tools = all ),
-    ReasoningRaw = Dict.get(reasoning),
-    (   atom(ReasoningRaw) -> atom_string(ReasoningRaw, Reasoning)
-    ;   string(ReasoningRaw) -> Reasoning = ReasoningRaw
-    ;   Reasoning = "none"
-    ),
-    RecipeRaw = Dict.get(recipe),
-    (   (   RecipeRaw = null ; var(RecipeRaw) )
+normalize_reasoning_label("high", "high").
+normalize_reasoning_label("medium", "medium").
+normalize_reasoning_label("low", "low").
+normalize_reasoning_label("none", "none").
+normalize_reasoning_label(_, "none").
+
+normalize_recipe_spec(Raw, Recipe) :-
+    format(string(Text0), "~w", [Raw]),
+    normalize_space(string(Text), Text0),
+    string_lower(Text, Lower),
+    (   Lower = ""
     ->  Recipe = "none"
-    ;   atom(RecipeRaw)
-    ->  atom_string(RecipeRaw, Recipe)
-    ;   string(RecipeRaw)
-    ->  Recipe = RecipeRaw
-    ;   Recipe = "none"
+    ;   Lower = "none"
+    ->  Recipe = "none"
+    ;   Recipe = Text
     ).
+
+tool_name_string_to_atom(Text, Atom) :-
+    string_lower(Text, Lower),
+    atom_string(Atom, Lower).
+
+non_empty_string(Text) :-
+    Text \= "".
 
 %% fallback_plan_steps(+PlanTasks, -PlanSteps)
 %% When JSON parsing fails, create steps with all tools and no reasoning/recipe.
 fallback_plan_steps([], []).
-fallback_plan_steps([Desc|Rest], [plan_step{description: Desc, tools: all, reasoning: "none", recipe: "none"}|RestSteps]) :-
+fallback_plan_steps([Desc|Rest], [plan_step{description: Desc, tools: Tools, reasoning: "none", recipe: "none"}|RestSteps]) :-
+    default_plan_tools(Tools),
     fallback_plan_steps(Rest, RestSteps).
 
 assemble_plan_dml(PlanSystemPrompt, PlanSteps, PlanDml) :-
@@ -289,10 +310,7 @@ build_step_review_lines([Step|RestSteps], StepNumber, StepLines) :-
     Desc = Step.description,
     Tools = Step.tools,
     Reasoning = Step.reasoning,
-    (   Tools == all
-    ->  format(string(CurrentStep), "~w. ~w [all tools, ~w]\n", [StepNumber, Desc, Reasoning])
-    ;   format(string(CurrentStep), "~w. ~w [tools: ~w, ~w]\n", [StepNumber, Desc, Tools, Reasoning])
-    ),
+    format(string(CurrentStep), "~w. ~w [tools: ~w, ~w]\n", [StepNumber, Desc, Tools, Reasoning]),
     NextStepNumber is StepNumber + 1,
     build_step_review_lines(RestSteps, NextStepNumber, RestStepLines),
     string_concat(CurrentStep, RestStepLines, StepLines).
@@ -309,19 +327,13 @@ build_single_task_line(Step, Line) :-
     Reasoning = Step.reasoning,
     Recipe = Step.recipe,
 
-    % Build inner task with tool scoping
-    (   Tools == all
-    ->  format(string(InnerTask), "task(~q)", [Desc])
-    ;   format(string(InnerTask), "with_tools(~w, task(~q))", [Tools, Desc])
-    ),
+    format(string(InnerTask), "with_tools(~w, task(~q))", [Tools, Desc]),
 
-    % Wrap in with_reasoning if reasoning != none
     (   Reasoning \= "none"
     ->  format(string(WithReasoning), "with_reasoning(~n        ~w~n    , ~w)", [InnerTask, Reasoning])
     ;   WithReasoning = InnerTask
     ),
 
-    % Wrap in with_recipe if recipe != none
     (   Recipe \= "none"
     ->  format(string(Line), "    with_recipe(~n        ~w~n    , '~w'),~n", [WithReasoning, Recipe])
     ;   format(string(Line), "    ~w,~n", [WithReasoning])

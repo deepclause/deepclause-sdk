@@ -93,6 +93,13 @@ generate_all_strategy_tasks(Request, [Strategy|RestStrategies], [plan{strategy: 
 
 %% generate_strategy_tasks(+Request, +Strategy, -Steps)
 generate_strategy_tasks(Request, Strategy, Steps) :-
+    (   param(model_info, ModelInfo)
+    ->  (   get_dict(reasoning, ModelInfo, R), R == true
+        ->  ReasoningNote = "The execution model supports reasoning. Assign reasoning effort per task: none, low, medium, or high."
+        ;   ReasoningNote = "The execution model does not support reasoning. Set reasoning to 'none' for all tasks."
+        )
+    ;   ReasoningNote = "Set reasoning to 'none' for all tasks."
+    ),
     task("List 3 to 7 focused execution tasks for this security analysis strategy.
 
 Target: {Request}
@@ -100,13 +107,101 @@ Strategy: {Strategy}
 
 Each task should be one concrete analysis step. Be specific about what to look for and which files to examine.
 
-Store the list of task descriptions in TaskDescriptions.", list(string(TaskDescriptions))),
-    build_steps_from_descriptions(TaskDescriptions, Strategy, Steps).
+Available tools (use ONLY these exact names):
+- consult_recipes: Search recipe guidance and conventions
+- search_web: Search the web for advisories, docs, and references
+- search_news: Search recent news for relevant incidents or advisories
+- fetch_url: Fetch a specific advisory or documentation page
+- run_bash: Run grep, find, test, and scanner commands in the workspace
+- ask_user: Ask the user to narrow scope or clarify assumptions
+- inform_user: Send a status update
 
-%% build_steps_from_descriptions(+Descriptions, +Strategy, -Steps)
-build_steps_from_descriptions([], _, []).
-build_steps_from_descriptions([Desc|Rest], Strategy, [plan_step{description: Desc, tools: all, reasoning: "none", recipe: "none"}|RestSteps]) :-
-    build_steps_from_descriptions(Rest, Strategy, RestSteps).
+{ReasoningNote}
+
+Also specify a recipe query for each task if relevant (NONE otherwise).
+
+Return four ordered lists aligned 1:1:
+- TaskDescriptions: plain task descriptions.
+- ToolSpecs: each item must be either ALL or a comma-separated list of exact tool names from the available tools list above.
+- ReasoningSpecs: each item must be exactly one of none, low, medium, high.
+- RecipeSpecs: each item must be either NONE or a recipe query string.
+
+Store the ordered task descriptions in TaskDescriptions.
+Store the ordered tool specs in ToolSpecs.
+Store the ordered reasoning specs in ReasoningSpecs.
+Store the ordered recipe specs in RecipeSpecs.", list(string(TaskDescriptions)), list(string(ToolSpecs)), list(string(ReasoningSpecs)), list(string(RecipeSpecs))),
+    (   build_steps_from_specs(TaskDescriptions, ToolSpecs, ReasoningSpecs, RecipeSpecs, Steps)
+    ->  true
+    ;   fallback_plan_steps_from_strategy(Strategy, Steps)
+    ).
+
+valid_plan_tool(consult_recipes).
+valid_plan_tool(search_web).
+valid_plan_tool(search_news).
+valid_plan_tool(fetch_url).
+valid_plan_tool(run_bash).
+valid_plan_tool(ask_user).
+valid_plan_tool(inform_user).
+
+default_plan_tools([consult_recipes, search_web, search_news, fetch_url, run_bash, ask_user, inform_user]).
+
+build_steps_from_specs([], [], [], [], []).
+build_steps_from_specs([Desc|RestDesc], [ToolSpec|RestTools], [ReasoningSpec|RestReasoning], [RecipeSpec|RestRecipes], [plan_step{description: Desc, tools: Tools, reasoning: Reasoning, recipe: Recipe}|RestSteps]) :-
+    normalize_tools_spec(ToolSpec, Tools),
+    normalize_reasoning_spec(ReasoningSpec, Reasoning),
+    normalize_recipe_spec(RecipeSpec, Recipe),
+    build_steps_from_specs(RestDesc, RestTools, RestReasoning, RestRecipes, RestSteps).
+
+normalize_tools_spec(Raw, Tools) :-
+    format(string(Text), "~w", [Raw]),
+    string_lower(Text, Lower),
+    (   Lower = "all"
+    ->  default_plan_tools(Tools)
+    ;   split_string(Text, ",", " []\t\n", Parts0),
+        include(non_empty_string, Parts0, Parts),
+        findall(ToolAtom,
+            ( member(Part, Parts),
+              tool_name_string_to_atom(Part, ToolAtom),
+              valid_plan_tool(ToolAtom)
+            ),
+            ValidTools),
+        (   ValidTools = []
+        ->  default_plan_tools(Tools)
+        ;   Tools = ValidTools
+        )
+    ).
+
+normalize_reasoning_spec(Raw, Reasoning) :-
+    format(string(Text), "~w", [Raw]),
+    string_lower(Text, Lower),
+    normalize_reasoning_label(Lower, Reasoning).
+
+normalize_reasoning_label("high", "high").
+normalize_reasoning_label("medium", "medium").
+normalize_reasoning_label("low", "low").
+normalize_reasoning_label("none", "none").
+normalize_reasoning_label(_, "none").
+
+normalize_recipe_spec(Raw, Recipe) :-
+    format(string(Text0), "~w", [Raw]),
+    normalize_space(string(Text), Text0),
+    string_lower(Text, Lower),
+    (   Lower = ""
+    ->  Recipe = "none"
+    ;   Lower = "none"
+    ->  Recipe = "none"
+    ;   Recipe = Text
+    ).
+
+tool_name_string_to_atom(Text, Atom) :-
+    string_lower(Text, Lower),
+    atom_string(Atom, Lower).
+
+non_empty_string(Text) :-
+    Text \= "".
+
+fallback_plan_steps_from_strategy(Strategy, [plan_step{description: Strategy, tools: Tools, reasoning: "none", recipe: "none"}]) :-
+    default_plan_tools(Tools).
 
 %% assemble_multi_strategy_dml(+StrategyPlans, -PlanDml)
 assemble_multi_strategy_dml(StrategyPlans, PlanDml) :-
@@ -156,7 +251,19 @@ build_single_task_line(Step, Num, PrevSum, Line) :-
     Desc = Step.description,
     format(string(VarName), "Sum~w", [Num]),
     format(string(DescWithCtx), "~w. Store your findings summary in ~w.", [Desc, VarName]),
-    format(string(Line), "    task(~q, string(~w)),~n", [DescWithCtx, VarName]).
+    Tools = Step.tools,
+    Reasoning = Step.reasoning,
+    Recipe = Step.recipe,
+    format(string(BaseTask), "task(~q, string(~w))", [DescWithCtx, VarName]),
+    format(string(WithTools), "with_tools(~w, ~w)", [Tools, BaseTask]),
+    (   Reasoning \= "none"
+    ->  format(string(WithReasoning), "with_reasoning(~n        ~w~n    , ~w)", [WithTools, Reasoning])
+    ;   WithReasoning = WithTools
+    ),
+    (   Recipe \= "none"
+    ->  format(string(Line), "    with_recipe(~n        ~w~n    , '~w'),~n", [WithReasoning, Recipe])
+    ;   format(string(Line), "    ~w,~n", [WithReasoning])
+    ).
 
 %% build_review_message(+FilePath, +StrategyPlans, -ReviewMessage)
 build_review_message(FilePath, StrategyPlans, ReviewMessage) :-

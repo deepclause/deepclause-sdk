@@ -779,9 +779,9 @@ get_reasoning_effort(State, Effort) :-
 %% Recipe Context Helpers
 %% ============================================================
 
-%% load_recipe_content(+Query, -Content)
-load_recipe_content(Query, RecipeContent) :-
-    exec(consult_recipes(query: Query, max_results: 1), Result),
+%% load_recipe_content(+Query, +StateIn, -StateOut, -Content)
+load_recipe_content(Query, StateIn, StateOut, RecipeContent) :-
+    mi_call(exec(consult_recipes(query: Query, max_results: 1), Result), StateIn, StateOut),
     get_dict(matches, Result, Matches),
     (   Matches = [Match|_]
     ->  get_dict(content, Match, RecipeContent)
@@ -1484,8 +1484,8 @@ mi_call(with_reasoning(Goal, Effort), StateIn, StateOut) :-
 %% Run Goal with a recipe loaded as transient context (not persisted to memory).
 mi_call(with_recipe(Goal, Query), StateIn, StateOut) :-
     !,
-    load_recipe_content(Query, RecipeContent),
-    set_recipe_context(StateIn, RecipeContent, ScopedState),
+    load_recipe_content(Query, StateIn, StateAfterRecipeLoad, RecipeContent),
+    set_recipe_context(StateAfterRecipeLoad, RecipeContent, ScopedState),
     mi_call(Goal, ScopedState, StateWithRecipe),
     clear_recipe_context(StateWithRecipe, StateOut).
 
