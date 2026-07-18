@@ -54,12 +54,12 @@
     "@types/node": "^20.0.0",
     "@typescript-eslint/eslint-plugin": "^7.0.0",
     "@typescript-eslint/parser": "^7.0.0",
-    "@vitest/coverage-v8": "^2.0.0",
+    "@vitest/coverage-v8": "^4.1.10",
     "eslint": "^8.57.0",
     "memfs": "^4.56.10",
     "tsx": "^4.21.0",
     "typescript": "^5.5.0",
-    "vitest": "^2.0.0"
+    "vitest": "^4.1.10"
   },
   "engines": {
     "node": ">=18.0.0"
