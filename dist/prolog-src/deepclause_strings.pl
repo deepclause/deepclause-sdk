@@ -36,10 +36,11 @@ interpolate_atom(Template, Bindings, Result) :-
 %% Process character codes, replacing {var} patterns
 interpolate_codes([], _, []) :- !.
 
-% Found opening brace - extract variable name
+% Found opening brace - replace only identifier-like placeholders
 interpolate_codes([0'{|Rest], Bindings, Result) :-
-    !,
     extract_var_name(Rest, VarNameCodes, AfterVar),
+    valid_placeholder_codes(VarNameCodes),
+    !,
     atom_codes(VarName, VarNameCodes),
     (   find_binding(VarName, Bindings, Value)
     ->  format(atom(ValueAtom), '~w', [Value]),
@@ -50,6 +51,11 @@ interpolate_codes([0'{|Rest], Bindings, Result) :-
         interpolate_codes(AfterVar, Bindings, RestResult),
         append([0'{|VarNameCodes], [0'}|RestResult], Result)
     ).
+
+% Invalid placeholder syntax - keep the opening brace literal
+interpolate_codes([0'{|Rest], Bindings, [0'{|Result]) :-
+    !,
+    interpolate_codes(Rest, Bindings, Result).
 
 % Regular character - keep it
 interpolate_codes([C|Rest], Bindings, [C|Result]) :-
@@ -62,6 +68,20 @@ extract_var_name([C|Rest], [C|VarRest], Final) :-
     C \= 0'},
     extract_var_name(Rest, VarRest, Final).
 extract_var_name([], [], []).  % Handle unclosed brace gracefully
+
+%% valid_placeholder_codes(+Codes)
+%% Placeholder names must look like identifiers: [A-Za-z_][A-Za-z0-9_]*
+valid_placeholder_codes([First|Rest]) :-
+    valid_placeholder_start(First),
+    maplist(valid_placeholder_char, Rest).
+
+valid_placeholder_start(Code) :-
+    code_type(Code, alpha)
+    ; Code =:= 0'_.
+
+valid_placeholder_char(Code) :-
+    code_type(Code, alnum)
+    ; Code =:= 0'_.
 
 %% find_binding(+VarName, +Bindings, -Value)
 %% Look up a variable in the bindings list

@@ -15,7 +15,7 @@ export interface ListToolsOptions {
     json?: boolean;
 }
 /**
- * List all available tools from AgentVM, Search, and configured MCP servers
+ * List all available built-in runtime tools, search tools, and configured MCP servers
  */
 export declare function listTools(workspaceRoot: string, options?: ListToolsOptions): Promise<Tool[] | string>;
 /**
@@ -30,7 +30,7 @@ export declare function verifyTools(config: Config, toolNames: string[]): Promis
     missing: string[];
 }>;
 /**
- * Get all built-in tools (AgentVM + Search)
+ * Get all built-in tools (runtime shell + search)
  */
 export declare function getAgentVMTools(): Tool[];
 //# sourceMappingURL=tools.d.ts.map

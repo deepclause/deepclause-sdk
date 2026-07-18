@@ -17,9 +17,26 @@ interface FSFilesystems {
     NODEFS: unknown;
     MEMFS: unknown;
 }
+type FS = {
+    mkdir: (path: string) => void;
+    mount: (type: unknown, opts: unknown, mountpoint: string) => unknown;
+    unmount: (path: string) => void;
+    readFile: (path: string, opts?: {
+        encoding: string;
+        flags: string;
+    }) => string;
+    writeFile: (path: string, data: string | Uint8Array, opts?: {
+        flags: string;
+    }) => void;
+    unlink: (path: string) => void;
+    rmdir: (path: string) => void;
+    exists: (path: string) => boolean;
+    isDir: (path: string) => boolean;
+    isFile: (path: string) => boolean;
+};
 export interface SWIPLModule {
     prolog: Prolog;
-    FS: typeof FS & {
+    FS: FS & {
         filesystems: FSFilesystems;
     };
 }

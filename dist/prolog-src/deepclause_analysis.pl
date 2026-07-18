@@ -142,6 +142,19 @@ check_sink(Head, Goals, Vars, TaintedNames, warning(critical, Msg)) :-
     member(Name-Source, TaintedNames),
     format(string(Msg), "Security Risk: ~s flows into external tool execution in '~w'", [Source, Head]).
 
+check_sink(Head, Goals, Vars, TaintedNames, warning(medium, Msg)) :-
+    member(TextGoal, Goals),
+    (TextGoal = user(Text) ; TextGoal = system(Text)),
+    member(Name-Source, TaintedNames),
+    var_name(Text, Vars, Name),
+    % Find if there's a task call that follows
+    nth0(IdxSource, Goals, TextGoal),
+    member(TaskGoal, Goals),
+    (TaskGoal = task(_) ; TaskGoal = task(_,_) ; TaskGoal = task(_,_,_) ; TaskGoal = task_named(_,_,_)),
+    nth0(IdxSink, Goals, TaskGoal),
+    IdxSink > IdxSource,
+    format(string(Msg), "Prompt Injection Risk: Task in '~w' implicitly inherits memory tainted by ~s", [Head, Source]).
+
 %% ============================================================================
 %% Helpers
 %% ============================================================================

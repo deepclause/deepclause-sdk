@@ -17,11 +17,13 @@
 
 :- module(deepclause_mi, [
     parse_dml/5,
-    create_engine/5,
+    create_engine/6,
     step_engine/4,
     destroy_engine/1,
     post_agent_result/4,
     post_exec_result/3,
+    post_sample_token_result/3,
+    post_llm_result/3,
     provide_input/2,
     mi/3,
     % Tool engine predicates for isolated tool execution
@@ -46,6 +48,8 @@
 :- dynamic session_pending_input/2. % session_pending_input(SessionId, Input)
 :- dynamic session_agent_result/2. % session_agent_result(SessionId, Result)
 :- dynamic session_exec_result/2.  % session_exec_result(SessionId, Result)
+:- dynamic session_sample_token_result/2. % session_sample_token_result(SessionId, Result)
+:- dynamic session_llm_result/2. % session_llm_result(SessionId, Result)
 :- dynamic session_trace_log/2.    % session_trace_log(SessionId, TraceLog) - accumulated trace entries
 :- dynamic session_trace_enabled/2. % session_trace_enabled(SessionId, true/false)
 :- dynamic session_pending_signal/2. % session_pending_signal(SessionId, Signal) - fallback for engine_fetch
@@ -96,13 +100,39 @@ parse_clauses(Stream, SessionId) :-
     read_term(Stream, Term, [module(SessionId), variable_names(Bindings)]),
     (   Term == end_of_file
     ->  true
-    ;   % First, transform task/N calls to include variable names
-        transform_task_calls(Term, Bindings, TransformedTerm),
-        % Then expand string interpolations
-        expand_interpolations(TransformedTerm, Bindings, ExpandedTerm),
-        process_clause(ExpandedTerm, SessionId),
+    ;   preprocess_loaded_term(Term, Bindings, PreparedTerms),
+        forall(member(PreparedTerm, PreparedTerms), process_clause(PreparedTerm, SessionId)),
         parse_clauses(Stream, SessionId)
     ).
+
+%% preprocess_loaded_term(+Term, +Bindings, -PreparedTerms)
+%% Apply DML source preprocessing before asserting loaded clauses.
+%% This keeps task()/prompt() rewriting and string interpolation working,
+%% while also running expand_term/2 so DCG rules (`-->`) become executable
+%% difference-list predicates before they are asserted into the session module.
+preprocess_loaded_term(Term, Bindings, PreparedTerms) :-
+    transform_task_calls(Term, Bindings, TransformedTerm),
+    expand_interpolations(TransformedTerm, Bindings, InterpolatedTerm),
+    expand_loaded_term(InterpolatedTerm, PreparedTerms).
+
+%% expand_loaded_term(+Term, -ExpandedTerms)
+%% Runs SWI term expansion and normalizes the result to a list of terms.
+expand_loaded_term(Term, ExpandedTerms) :-
+    expand_term(Term, Expanded),
+    normalize_expanded_terms(Expanded, ExpandedTerms).
+
+%% normalize_expanded_terms(+Expanded, -Terms)
+%% expand_term/2 may return a single term or a list. DML does not need the
+%% generated non_terminal/1 directives, so skip them and keep the executable
+%% clauses only.
+normalize_expanded_terms(Expanded, Terms) :-
+    (   is_list(Expanded)
+    ->  RawTerms = Expanded
+    ;   RawTerms = [Expanded]
+    ),
+    exclude(skip_expanded_term, RawTerms, Terms).
+
+skip_expanded_term((:- non_terminal(_))).
 
 %% ============================================================
 %% Task Call Transformation (compile-time)
@@ -124,6 +154,10 @@ transform_task_calls((A -> B), Bindings, (TA -> TB)) :- !,
     transform_task_calls(B, Bindings, TB).
 transform_task_calls(\+ A, Bindings, \+ TA) :- !,
     transform_task_calls(A, Bindings, TA).
+
+%% Transform task/1 to task_named/3 with a hidden Summary variable
+%% This ensures task/1 always produces a summary in the conversation history
+transform_task_calls(task(Desc), _Bindings, task_named(Desc, [_Summary], [typed_var{name: 'Summary', type: string}])) :- !.
 
 %% Transform task/2 to task_named/3
 transform_task_calls(task(Desc, V1), Bindings, task_named(Desc, [Var1], [Info1])) :- !,
@@ -241,6 +275,7 @@ process_clause((:- Directive), SessionId) :-
 %% Handle tool/2 with description: tool(Head, Description) :- Body
 process_clause((tool(ToolHead, Description) :- Body), SessionId) :-
     !,
+    (catch(expand_dict_dots(Body, ExpandedBody), _, fail) -> true ; ExpandedBody = Body),
     extract_tool_schema(ToolHead, Description, ToolName, Schema),
     assertz(session_user_tools(SessionId, ToolName)),
     assertz(session_user_tool_schema(SessionId, ToolName, Schema)),
@@ -248,11 +283,12 @@ process_clause((tool(ToolHead, Description) :- Body), SessionId) :-
     format(string(SourceCode), "tool(~w, ~q) :-~n    ~w.", [ToolHead, Description, Body]),
     assertz(SessionId:tool_source(ToolName, SourceCode)),
     % Assert the tool implementation (use just ToolHead for execution)
-    assertz(SessionId:(tool(ToolHead) :- Body)).
+    assertz(SessionId:(tool(ToolHead) :- ExpandedBody)).
 
 %% Handle tool/1 without description: tool(Head) :- Body
 process_clause((tool(ToolHead) :- Body), SessionId) :-
     !,
+    (catch(expand_dict_dots(Body, ExpandedBody), _, fail) -> true ; ExpandedBody = Body),
     extract_tool_schema(ToolHead, none, ToolName, Schema),
     assertz(session_user_tools(SessionId, ToolName)),
     assertz(session_user_tool_schema(SessionId, ToolName, Schema)),
@@ -260,16 +296,85 @@ process_clause((tool(ToolHead) :- Body), SessionId) :-
     format(string(SourceCode), "tool(~w) :-~n    ~w.", [ToolHead, Body]),
     assertz(SessionId:tool_source(ToolName, SourceCode)),
     % Assert the tool implementation
-    assertz(SessionId:(tool(ToolHead) :- Body)).
+    assertz(SessionId:(tool(ToolHead) :- ExpandedBody)).
 
 process_clause((Head :- Body), SessionId) :-
     !,
-    % Regular clause - assert it
-    assertz(SessionId:(Head :- Body)).
+    % Expand dict dot-notation (Dict.Key → get_dict), then assert
+    (   catch(expand_dict_dots(Body, ExpandedBody), _, fail)
+    ->  true
+    ;   ExpandedBody = Body
+    ),
+    assertz(SessionId:(Head :- ExpandedBody)).
 
 process_clause(Fact, SessionId) :-
     % Simple fact
     assertz(SessionId:Fact).
+
+%% ============================================================
+%% Dict Dot-Notation Expansion (compile-time)
+%% ============================================================
+%% SWI-Prolog's dict functional notation (Dict.Key) is normally
+%% expanded by goal_expansion during compilation. Since DML clauses
+%% are loaded via assertz (no goal expansion), we must expand
+%% Dict.Key → get_dict(Key, Dict, Value) manually before asserting.
+%%
+%% Handles:
+%%   Dict.Key = Value   →  get_dict(Key, Dict, Value)
+%%   Value = Dict.Key   →  get_dict(Key, Dict, Value)
+%%   Dict.Key == Value  →  get_dict(Key, Dict, Tmp), Tmp == Value
+%%   Value == Dict.Key  →  get_dict(Key, Dict, Tmp), Tmp == Value
+
+%% expand_dict_dots(+GoalIn, -GoalOut)
+%% Top-level expansion for goal bodies
+expand_dict_dots(Var, Var) :- var(Var), !.
+expand_dict_dots((A, B), (EA, EB)) :- !, expand_dict_dots(A, EA), expand_dict_dots(B, EB).
+expand_dict_dots((A ; B), (EA ; EB)) :- !, expand_dict_dots(A, EA), expand_dict_dots(B, EB).
+expand_dict_dots((A -> B), (EA -> EB)) :- !, expand_dict_dots(A, EA), expand_dict_dots(B, EB).
+
+%% Unification with dict dot access: Dict.Key = Value
+expand_dict_dots(Goal, Result) :-
+    nonvar(Goal),
+    functor(Goal, =, 2),
+    !,
+    arg(1, Goal, A),
+    arg(2, Goal, B),
+    (   nonvar(A), is_dot_access(A, Dict, Key)
+    ->  Result = get_dict(Key, Dict, B)
+    ;   nonvar(B), is_dot_access(B, Dict, Key)
+    ->  Result = get_dict(Key, Dict, A)
+    ;   Result = Goal
+    ).
+
+%% Equality check with dict dot access: Dict.Key == Value
+expand_dict_dots(Goal, Result) :-
+    nonvar(Goal),
+    functor(Goal, ==, 2),
+    !,
+    arg(1, Goal, A),
+    arg(2, Goal, B),
+    (   nonvar(A), is_dot_access(A, Dict, Key)
+    ->  Result = (get_dict(Key, Dict, Tmp), Tmp == B)
+    ;   nonvar(B), is_dot_access(B, Dict, Key)
+    ->  Result = (get_dict(Key, Dict, Tmp), Tmp == A)
+    ;   Result = Goal
+    ).
+
+expand_dict_dots(Goal, Goal).
+
+%% is_dot_access(+Term, -Dict, -Key)
+%% Check if Term is a dict dot-access expression: '.'(Dict, Key) where Key is atom
+is_dot_access(Term, Dict, Key) :-
+    compound(Term),
+    compound_name_arity(Term, '.', 2),
+    arg(1, Term, Dict),
+    arg(2, Term, Key),
+    atom(Key).
+
+%% expand_dict_expr(+ExprIn, -ExprOut)
+%% Expand dict access in value-level expressions (just pass through for now)
+expand_dict_expr(Var, Var) :- var(Var), !.
+expand_dict_expr(Expr, Expr).
 
 %% ============================================================
 %% Tool Schema Extraction
@@ -301,6 +406,33 @@ extract_params([_Arg|Rest], Index, Arity, Inputs, Outputs) :-
     ;   Inputs = [Param|RestInputs], Outputs = RestOutputs
     ).
 
+module_reference_string(Module, ModuleStr) :-
+    atom(Module),
+    !,
+    atom_string(Module, ModuleStr).
+module_reference_string(Module, Module) :-
+    string(Module).
+
+workspace_module_reference(Module) :-
+    module_reference_string(Module, ModuleStr),
+    (   sub_string(ModuleStr, _, _, _, "/")
+    ;   sub_string(ModuleStr, _, _, 0, ".dml")
+    ;   sub_string(ModuleStr, _, _, 0, ".pl")
+    ;   sub_string(ModuleStr, 0, 1, _, ".")
+    ).
+
+process_use_module_directive(Module, SessionId) :-
+    (   workspace_module_reference(Module)
+    ->  process_directive(consult(Module), SessionId)
+    ;   SessionId:use_module(Module)
+    ).
+
+process_use_module_directive(Module, Exports, SessionId) :-
+    (   workspace_module_reference(Module)
+    ->  process_directive(consult(Module), SessionId)
+    ;   SessionId:use_module(Module, Exports)
+    ).
+
 %% process_directive(+Directive, +SessionId)
 process_directive(param(Key, Desc), SessionId) :-
     !,
@@ -308,6 +440,7 @@ process_directive(param(Key, Desc), SessionId) :-
 process_directive(param(Key, Desc, Default), SessionId) :-
     !,
     assertz(SessionId:param_decl(Key, Desc, Default)).
+
 %% Handle consult directive: :- consult(File)
 process_directive(consult(File), SessionId) :-
     !,
@@ -319,10 +452,10 @@ process_directive(consult(File), SessionId) :-
 %% Handle use_module directive
 process_directive(use_module(Module), SessionId) :-
     !,
-    SessionId:use_module(Module).
+    process_use_module_directive(Module, SessionId).
 process_directive(use_module(Module, Exports), SessionId) :-
     !,
-    SessionId:use_module(Module, Exports).
+    process_use_module_directive(Module, Exports, SessionId).
 %% Handle list-style consult: :- [File] or :- [File1, File2, ...]
 process_directive([File|Files], SessionId) :-
     !,
@@ -335,10 +468,10 @@ process_directive(_, _).
 %% Engine Management
 %% ============================================================
 
-%% create_engine(+SessionId, +MemoryId, +Args, +Params, -Engine)
+%% create_engine(+SessionId, +MemoryId, +Args, +Params, +InitialMemory, -Engine)
 %% Args is a list of positional arguments for agent_main
 %% Params is a dict of named parameters (already asserted as param/2 facts)
-create_engine(SessionId, _MemoryId, Args, Params, Engine) :-
+create_engine(SessionId, _MemoryId, Args, Params, InitialMemory, Engine) :-
     assertz(session_params(SessionId, Params)),
     determine_agent_goal(SessionId, Args, Goal),
     % Check if tracing is enabled and store in session state
@@ -347,8 +480,8 @@ create_engine(SessionId, _MemoryId, Args, Params, Engine) :-
     assertz(session_trace_log(SessionId, [])),
     % Check for gas limit in params
     (get_dict(gas_limit, Params, GasLimit) -> true ; GasLimit = -1),
-    % Create initial state with empty memory, params, context stack, trace depth and gas
-    InitialState = state{memory: [], params: Params, context_stack: [], depth: 0, gas_remaining: GasLimit},
+    % Create initial state with provided memory, params, context stack, trace depth and gas
+    InitialState = state{memory: InitialMemory, params: Params, context_stack: [], depth: 0, gas_remaining: GasLimit},
     % Create the engine - pass SessionId and initial state to mi/3
     engine_create(_, 
         deepclause_mi:mi(Goal, InitialState, SessionId),
@@ -429,13 +562,20 @@ process_engine_result(output(Text), output, Text, none) :- !.
 process_engine_result(log(Text), log, Text, none) :- !.
 process_engine_result(answer(Text), answer, Text, none) :- !.
 %% Note: Memory and tool scope are now passed in the payload for the agent loop
+process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ReasoningEffort, RecipeContext), request_agent_loop, '', 
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: ReasoningEffort, recipeContext: RecipeContext}) :- !.
+%% Legacy 5-arg format (no reasoning/recipe)
 process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope), request_agent_loop, '', 
-    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope}) :- !.
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: none, recipeContext: ""}) :- !.
 %% Legacy 4-arg format (no tool scope)
 process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory), request_agent_loop, '', 
-    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: none}) :- !.
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: none, reasoningEffort: none, recipeContext: ""}) :- !.
 process_engine_result(request_exec(Tool, Args), request_exec, '',
     payload{toolName: Tool, args: Args}) :- !.
+process_engine_result(request_sample_token(Prompt, Allowed), request_sample_token, '',
+    payload{prompt: Prompt, allowedTokens: Allowed}) :- !.
+process_engine_result(request_llm(Messages), request_llm, '',
+    payload{messages: Messages}) :- !.
 %% Tool result from inline tool execution
 process_engine_result(tool_result(Result), tool_result, '',
     payload{result: Result}) :- !.
@@ -457,6 +597,8 @@ destroy_engine(SessionId) :-
     retractall(session_pending_input(SessionId, _)),
     retractall(session_agent_result(SessionId, _)),
     retractall(session_exec_result(SessionId, _)),
+    retractall(session_sample_token_result(SessionId, _)),
+    retractall(session_llm_result(SessionId, _)),
     retractall(session_trace_log(SessionId, _)),
     retractall(session_trace_enabled(SessionId, _)),
     (   current_module(SessionId)
@@ -479,9 +621,16 @@ destroy_engine(SessionId) :-
 %% ============================================================
 
 %% post_agent_result(+SessionId, +Success, +Variables, +Messages)
-%% Messages is a list of message{role: Role, content: Content} dicts
+%% Legacy form without a full memory replacement snapshot.
 post_agent_result(SessionId, Success, Variables, Messages) :-
-    assertz(session_agent_result(SessionId, result{success: Success, variables: Variables, messages: Messages})),
+    post_agent_result(SessionId, Success, Variables, Messages, none).
+
+%% post_agent_result(+SessionId, +Success, +Variables, +Messages, +FullMemory)
+%% Messages is a list of message{role: Role, content: Content} dicts.
+%% FullMemory optionally replaces the entire state memory, including compacted system summaries.
+post_agent_result(SessionId, Success, Variables, Messages, FullMemory) :-
+    retractall(session_agent_result(SessionId, _)),
+    assertz(session_agent_result(SessionId, result{success: Success, variables: Variables, messages: Messages, full_memory: FullMemory})),
     post_signal_to_engine(SessionId, agent_done).
 
 %% post_exec_result(+SessionId, +Status, +Result)
@@ -489,6 +638,18 @@ post_exec_result(SessionId, Status, Result) :-
     retractall(session_exec_result(SessionId, _)),
     assertz(session_exec_result(SessionId, result{status: Status, result: Result})),
     post_signal_to_engine(SessionId, exec_done).
+
+%% post_sample_token_result(+SessionId, +Status, +TokenOrError)
+post_sample_token_result(SessionId, Status, TokenOrError) :-
+    retractall(session_sample_token_result(SessionId, _)),
+    assertz(session_sample_token_result(SessionId, result{status: Status, token: TokenOrError})),
+    post_signal_to_engine(SessionId, sample_token_done).
+
+%% post_llm_result(+SessionId, +Status, +TextOrError)
+post_llm_result(SessionId, Status, TextOrError) :-
+    retractall(session_llm_result(SessionId, _)),
+    assertz(session_llm_result(SessionId, result{status: Status, text: TextOrError})),
+    post_signal_to_engine(SessionId, llm_done).
 
 %% provide_input(+SessionId, +Input)
 provide_input(SessionId, Input) :-
@@ -560,6 +721,12 @@ set_context_stack(StateIn, Stack, StateOut) :-
 set_memory(StateIn, Memory, StateOut) :-
     StateOut = StateIn.put(memory, Memory).
 
+%% is_system_memory_message(+Message)
+%% True if the memory message has role=system
+is_system_memory_message(Message) :-
+    is_dict(Message),
+    get_dict(role, Message, system).
+
 %% ============================================================
 %% Tool Scope Helpers
 %% ============================================================
@@ -584,6 +751,60 @@ clear_tool_scope(StateIn, StateOut) :-
     (   get_dict(tool_scope, StateIn, _)
     ->  del_dict(tool_scope, StateIn, _, StateOut)
     ;   StateOut = StateIn
+    ).
+
+%% ============================================================
+%% Reasoning Effort Helpers
+%% ============================================================
+
+%% set_reasoning_effort_state(+StateIn, +Effort, -StateOut)
+set_reasoning_effort_state(StateIn, Effort, StateOut) :-
+    StateOut = StateIn.put(reasoning_effort, Effort).
+
+%% clear_reasoning_effort_state(+StateIn, -StateOut)
+clear_reasoning_effort_state(StateIn, StateOut) :-
+    (   get_dict(reasoning_effort, StateIn, _)
+    ->  del_dict(reasoning_effort, StateIn, _, StateOut)
+    ;   StateOut = StateIn
+    ).
+
+%% get_reasoning_effort(+State, -Effort)
+get_reasoning_effort(State, Effort) :-
+    (   get_dict(reasoning_effort, State, Effort)
+    ->  true
+    ;   Effort = none
+    ).
+
+%% ============================================================
+%% Recipe Context Helpers
+%% ============================================================
+
+%% load_recipe_content(+Query, +StateIn, -StateOut, -Content)
+load_recipe_content(Query, StateIn, StateOut, RecipeContent) :-
+    mi_call(exec(consult_recipes(query: Query, max_results: 1), Result), StateIn, StateOut),
+    get_dict(matches, Result, Matches),
+    (   Matches = [Match|_]
+    ->  get_dict(content, Match, RecipeContent)
+    ;   RecipeContent = ""
+    ).
+
+%% set_recipe_context(+StateIn, +Content, -StateOut)
+set_recipe_context(StateIn, "", StateIn) :- !.
+set_recipe_context(StateIn, Content, StateOut) :-
+    StateOut = StateIn.put(recipe_context, Content).
+
+%% clear_recipe_context(+StateIn, -StateOut)
+clear_recipe_context(StateIn, StateOut) :-
+    (   get_dict(recipe_context, StateIn, _)
+    ->  del_dict(recipe_context, StateIn, _, StateOut)
+    ;   StateOut = StateIn
+    ).
+
+%% get_recipe_context(+State, -Context)
+get_recipe_context(State, Context) :-
+    (   get_dict(recipe_context, State, Context)
+    ->  true
+    ;   Context = ""
     ).
 
 %% ============================================================
@@ -668,6 +889,11 @@ handle_signal(_SessionId, error_signal(Error), State, State) :-
     engine_yield(error(ErrMsg)).
 
 handle_signal(SessionId, exec_done, StateIn, StateOut) :-
+    % Stale signal - ignore and continue waiting
+    !,
+    handle_agent_signals(SessionId, StateIn, StateOut).
+
+handle_signal(SessionId, llm_done, StateIn, StateOut) :-
     % Stale signal - ignore and continue waiting
     !,
     handle_agent_signals(SessionId, StateIn, StateOut).
@@ -812,11 +1038,18 @@ step_tool_engine(ToolEngineId, Status, Content, Payload) :-
 process_tool_engine_result(tool_finished(ToolResult), finished, '', payload{result: ToolResult}) :- !.
 process_tool_engine_result(request_exec(Tool, Args), request_exec, '',
     payload{toolName: Tool, args: Args}) :- !.
+process_tool_engine_result(request_sample_token(Prompt, Allowed), request_sample_token, '',
+    payload{prompt: Prompt, allowedTokens: Allowed}) :- !.
+process_tool_engine_result(request_llm(Messages), request_llm, '',
+    payload{messages: Messages}) :- !.
+process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ReasoningEffort, RecipeContext), request_agent_loop, '',
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: ReasoningEffort, recipeContext: RecipeContext}) :- !.
+%% Legacy 5-arg format (no reasoning/recipe)
 process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope), request_agent_loop, '',
-    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope}) :- !.
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: none, recipeContext: ""}) :- !.
 %% Legacy 4-arg format (no tool scope)
 process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory), request_agent_loop, '',
-    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: none}) :- !.
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: none, reasoningEffort: none, recipeContext: ""}) :- !.
 process_tool_engine_result(output(Text), output, Text, none) :- !.
 process_tool_engine_result(log(Text), log, Text, none) :- !.
 process_tool_engine_result(Other, error, Msg, none) :-
@@ -831,12 +1064,17 @@ destroy_tool_engine(ToolEngineId) :-
     retractall(tool_engine(ToolEngineId, _)).
 
 %% post_tool_agent_result(+SessionId, +ToolEngineId, +Success, +Variables, +Messages)
+%% Legacy form without a full memory replacement snapshot.
+post_tool_agent_result(SessionId, ToolEngineId, Success, Variables, Messages) :-
+    post_tool_agent_result(SessionId, ToolEngineId, Success, Variables, Messages, none).
+
+%% post_tool_agent_result(+SessionId, +ToolEngineId, +Success, +Variables, +Messages, +FullMemory)
 %% Posts the result of a nested agent loop back to the tool engine.
 %% Also stores in session_agent_result so the meta-interpreter can retrieve it.
 :- dynamic tool_engine_agent_result/2.  % tool_engine_agent_result(ToolEngineId, Result)
 
-post_tool_agent_result(SessionId, ToolEngineId, Success, Variables, Messages) :-
-    Result = result{success: Success, variables: Variables, messages: Messages},
+post_tool_agent_result(SessionId, ToolEngineId, Success, Variables, Messages, FullMemory) :-
+    Result = result{success: Success, variables: Variables, messages: Messages, full_memory: FullMemory},
     % Store in tool_engine_agent_result (for future use)
     retractall(tool_engine_agent_result(ToolEngineId, _)),
     assertz(tool_engine_agent_result(ToolEngineId, Result)),
@@ -910,8 +1148,10 @@ mi_call(task(Desc), StateIn, StateOut) :-
     collect_user_tools(SessionId, UserTools),
     get_memory(StateIn, Memory),
     get_tool_scope(StateIn, ToolScope),
+    get_reasoning_effort(StateIn, ReasoningEffort),
+    get_recipe_context(StateIn, RecipeContext),
     % Yield request with current memory and tool scope
-    engine_yield(request_agent_loop(InterpDesc, [], UserTools, Memory, ToolScope)),
+    engine_yield(request_agent_loop(InterpDesc, [], UserTools, Memory, ToolScope, ReasoningEffort, RecipeContext)),
     % Handle signals (tool calls) until agent_done
     handle_agent_signals(SessionId, StateIn, StateAfterAgent),
     session_agent_result(SessionId, Result),
@@ -926,10 +1166,18 @@ mi_call(task(Desc), StateIn, StateOut) :-
         engine_yield(output(WarnMsg)),
         fail
     ),
-    % Use full messages from agent loop result
-    (   get_dict(messages, Result, Messages), Messages \= []
-    ->  % Replace memory with all messages from agent (includes system, history, and new messages)
-        set_memory(StateAfterAgent, Messages, StateOut)
+    % Use full memory from agent loop result when available
+    (   get_dict(full_memory, Result, FullMemory), is_list(FullMemory)
+    ->  set_memory(StateAfterAgent, FullMemory, StateOut),
+        add_trace_entry(SessionId, exit, task, [InterpDesc], Depth)
+    ;   get_dict(messages, Result, Messages), Messages \= []
+    ->  % Preserve system messages from current memory (agent only returns user/assistant)
+        get_memory(StateAfterAgent, OldMemory),
+        include(is_system_memory_message, OldMemory, SystemMessages),
+        append(SystemMessages, Messages, NewMemory),
+        set_memory(StateAfterAgent, NewMemory, StateOut),
+        % Add exit trace for task/1
+        add_trace_entry(SessionId, exit, task, [InterpDesc], Depth)
     ;   % Fallback: just add task description and response (old behavior)
         add_memory(StateAfterAgent, user, InterpDesc, State1),
         (   get_dict(response, Result, Response), Response \= ""
@@ -951,6 +1199,18 @@ mi_call(task_named(Desc, Vars, VarNames), StateIn, StateOut) :-
 %% Prompt Handling - Fresh LLM call without existing memory
 %% ============================================================
 
+%% mi_call(sample_token(Desc, Token), +StateIn, -StateOut)
+%% Ask the host runtime for exactly one token via the provider.
+mi_call(sample_token(Desc, Token), StateIn, StateOut) :-
+    !,
+    mi_call_sample_token(Desc, none, Token, StateIn, StateOut).
+
+%% mi_call(sample_token(Desc, Allowed, Token), +StateIn, -StateOut)
+%% Same as sample_token/2, but provides an allowed token list to runtime.
+mi_call(sample_token(Desc, Allowed, Token), StateIn, StateOut) :-
+    !,
+    mi_call_sample_token(Desc, Allowed, Token, StateIn, StateOut).
+
 %% mi_call(prompt(Desc), +StateIn, -StateOut)
 %% Simple LLM call with empty memory and NO tools (pure text completion)
 mi_call(prompt(Desc), StateIn, StateOut) :-
@@ -958,6 +1218,8 @@ mi_call(prompt(Desc), StateIn, StateOut) :-
     get_params(StateIn, Params),
     interpolate_desc(Desc, Params, InterpDesc),
     get_session_id(SessionId),
+    get_depth(StateIn, Depth),
+    add_trace_entry(SessionId, llm_call, prompt, [InterpDesc], Depth),
     % prompt/N is a simple LLM call - no tools, no tool scope
     engine_yield(request_agent_loop(InterpDesc, [], [], [], none)),
     % Wait for agent_done (no tool calls expected since no tools provided)
@@ -966,11 +1228,12 @@ mi_call(prompt(Desc), StateIn, StateOut) :-
     retract(session_agent_result(SessionId, _)),
     % Check success and warn on failure
     (   Result.success == true
-    ->  true
+    ->  add_trace_entry(SessionId, exit, prompt, [InterpDesc], Depth)
     ;   (   get_dict(error, Result, ErrorMsg), ErrorMsg \= ""
         ->  format(atom(WarnMsg), 'Warning: prompt/1 failed: ~w', [ErrorMsg])
         ;   format(atom(WarnMsg), 'Warning: prompt/1 failed (success=false)', [])
         ),
+        add_trace_entry(SessionId, fail, prompt, [InterpDesc], Depth),
         engine_yield(output(WarnMsg)),
         fail
     ).
@@ -990,6 +1253,8 @@ mi_call_prompt_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     get_params(StateIn, Params),
     interpolate_desc(Desc, Params, InterpDesc),
     get_session_id(SessionId),
+    get_depth(StateIn, Depth),
+    add_trace_entry(SessionId, llm_call, prompt, [InterpDesc], Depth),
     % prompt/N is a simple LLM call - no tools, no tool scope
     engine_yield(request_agent_loop(InterpDesc, VarNames, [], [], none)),
     % Wait for agent_done (no tool calls expected since no tools provided)
@@ -998,18 +1263,94 @@ mi_call_prompt_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     retract(session_agent_result(SessionId, _)),
     % Check success and warn on failure
     (   Result.success == true
-    ->  true
+    ->  add_trace_entry(SessionId, exit, prompt, [InterpDesc], Depth)
     ;   length(VarNames, Arity),
         ActualArity is Arity + 1,
         (   get_dict(error, Result, ErrorMsg), ErrorMsg \= ""
         ->  format(atom(WarnMsg), 'Warning: prompt/~w failed: ~w', [ActualArity, ErrorMsg])
         ;   format(atom(WarnMsg), 'Warning: prompt/~w failed (success=false)', [ActualArity])
         ),
+        add_trace_entry(SessionId, fail, prompt, [InterpDesc], Depth),
         engine_yield(output(WarnMsg)),
         fail
     ),
     bind_task_variables(Result.variables, VarNames, Vars).
     % Don't modify memory - but state may have changed from tool calls
+
+mi_call_sample_token(Desc, Allowed, Token, StateIn, StateOut) :-
+    get_params(StateIn, Params),
+    interpolate_desc(Desc, Params, InterpDesc),
+    get_session_id(SessionId),
+    get_depth(StateIn, Depth),
+    add_trace_entry(SessionId, llm_call, sample_token, [InterpDesc, Allowed], Depth),
+    engine_yield(request_sample_token(InterpDesc, Allowed)),
+    wait_sample_token_signal(SessionId),
+    (   session_sample_token_result(SessionId, Result)
+    ->  retract(session_sample_token_result(SessionId, _)),
+        (   Result.status == success
+        ->  Token = Result.token,
+            add_trace_with_result(SessionId, exit, sample_token, [InterpDesc, Allowed], Token, Depth),
+            StateOut = StateIn
+        ;   (   get_dict(token, Result, ErrorMsg), ErrorMsg \= ""
+            ->  format(atom(WarnMsg), 'Warning: sample_token failed: ~w', [ErrorMsg])
+            ;   format(atom(WarnMsg), 'Warning: sample_token failed (status=~w)', [Result.status])
+            ),
+            add_trace_entry(SessionId, fail, sample_token, [InterpDesc, Allowed], Depth),
+            engine_yield(output(WarnMsg)),
+            fail
+        )
+    ;   add_trace_entry(SessionId, fail, sample_token, [InterpDesc, Allowed], Depth),
+        engine_yield(output('Warning: sample_token failed (no result returned)')),
+        fail
+    ).
+
+wait_sample_token_signal(SessionId) :-
+    get_next_signal(SessionId, Signal),
+    (   Signal == sample_token_done
+    ->  true
+    ;   Signal = error_signal(_)
+    ->  true
+    ;   wait_sample_token_signal(SessionId)
+    ).
+
+mi_call(llm(Messages, Reply), StateIn, StateOut) :-
+    !,
+    consume_gas(StateIn, State1),
+    mi_call_llm(Messages, Reply, State1, StateOut).
+
+mi_call_llm(Messages, Reply, StateIn, StateOut) :-
+    get_session_id(SessionId),
+    get_depth(StateIn, Depth),
+    add_trace_entry(SessionId, llm_call, llm, [Messages], Depth),
+    engine_yield(request_llm(Messages)),
+    wait_llm_signal(SessionId),
+    (   session_llm_result(SessionId, Result)
+    ->  retract(session_llm_result(SessionId, _)),
+        (   Result.status == success
+        ->  Reply = Result.text,
+            add_trace_with_result(SessionId, exit, llm, [Messages], Reply, Depth),
+            StateOut = StateIn
+        ;   (   get_dict(text, Result, ErrorMsg), ErrorMsg \= ""
+            ->  format(atom(WarnMsg), 'Warning: llm/2 failed: ~w', [ErrorMsg])
+            ;   format(atom(WarnMsg), 'Warning: llm/2 failed (status=~w)', [Result.status])
+            ),
+            add_trace_entry(SessionId, fail, llm, [Messages], Depth),
+            engine_yield(output(WarnMsg)),
+            fail
+        )
+    ;   add_trace_entry(SessionId, fail, llm, [Messages], Depth),
+        engine_yield(output('Warning: llm/2 failed (no result returned)')),
+        fail
+    ).
+
+wait_llm_signal(SessionId) :-
+    get_next_signal(SessionId, Signal),
+    (   Signal == llm_done
+    ->  true
+    ;   Signal = error_signal(_)
+    ->  true
+    ;   wait_llm_signal(SessionId)
+    ).
 
 %% mi_call_task_n(+Desc, +Vars, +VarNames, +StateIn, -StateOut)
 mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
@@ -1017,10 +1358,14 @@ mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     get_params(StateIn, Params),
     interpolate_desc(Desc, Params, InterpDesc),
     get_session_id(SessionId),
+    get_depth(StateIn, Depth),
+    add_trace_entry(SessionId, llm_call, task, [InterpDesc], Depth),
     collect_user_tools(SessionId, UserTools),
     get_memory(StateIn, Memory),
     get_tool_scope(StateIn, ToolScope),
-    engine_yield(request_agent_loop(InterpDesc, VarNames, UserTools, Memory, ToolScope)),
+    get_reasoning_effort(StateIn, ReasoningEffort),
+    get_recipe_context(StateIn, RecipeContext),
+    engine_yield(request_agent_loop(InterpDesc, VarNames, UserTools, Memory, ToolScope, ReasoningEffort, RecipeContext)),
     % Handle signals (tool calls) until agent_done
     handle_agent_signals(SessionId, StateIn, StateAfterAgent),
     session_agent_result(SessionId, Result),
@@ -1038,10 +1383,19 @@ mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
         fail
     ),
     bind_task_variables(Result.variables, VarNames, Vars),
-    % Use full messages from agent loop result
-    (   get_dict(messages, Result, Messages), Messages \= []
-    ->  % Replace memory with all messages from agent
-        set_memory(StateAfterAgent, Messages, StateOut)
+    % Use full memory from agent loop result when available
+    (   get_dict(full_memory, Result, FullMemory), is_list(FullMemory)
+    ->  set_memory(StateAfterAgent, FullMemory, StateOut),
+        % Add exit trace for task_n
+        add_trace_entry(SessionId, exit, task, [InterpDesc], Depth)
+    ;   get_dict(messages, Result, Messages), Messages \= []
+    ->  % Preserve system messages from current memory (agent only returns user/assistant)
+        get_memory(StateAfterAgent, OldMemory),
+        include(is_system_memory_message, OldMemory, SystemMessages),
+        append(SystemMessages, Messages, NewMemory),
+        set_memory(StateAfterAgent, NewMemory, StateOut),
+        % Add exit trace for task_n
+        add_trace_entry(SessionId, exit, task, [InterpDesc], Depth)
     ;   % Fallback: just add task description and response (old behavior)
         add_memory(StateAfterAgent, user, InterpDesc, State1),
         (   get_dict(response, Result, Response), Response \= ""
@@ -1117,6 +1471,24 @@ mi_call(without_tools(ToolList, Goal), StateIn, StateOut) :-
     mi_call(Goal, ScopedState, StateWithScope),
     clear_tool_scope(StateWithScope, StateOut).
 
+%% mi_call(with_reasoning(Goal, Effort), +StateIn, -StateOut)
+%% Run Goal with a specific reasoning effort level (none/low/medium/high).
+%% The effort is passed to the TypeScript runner via request_agent_loop.
+mi_call(with_reasoning(Goal, Effort), StateIn, StateOut) :-
+    !,
+    set_reasoning_effort_state(StateIn, Effort, ScopedState),
+    mi_call(Goal, ScopedState, StateWithScope),
+    clear_reasoning_effort_state(StateWithScope, StateOut).
+
+%% mi_call(with_recipe(Goal, Query), +StateIn, -StateOut)
+%% Run Goal with a recipe loaded as transient context (not persisted to memory).
+mi_call(with_recipe(Goal, Query), StateIn, StateOut) :-
+    !,
+    load_recipe_content(Query, StateIn, StateAfterRecipeLoad, RecipeContent),
+    set_recipe_context(StateAfterRecipeLoad, RecipeContent, ScopedState),
+    mi_call(Goal, ScopedState, StateWithRecipe),
+    clear_recipe_context(StateWithRecipe, StateOut).
+
 %% ============================================================
 %% Memory Predicates - NOW BACKTRACKABLE VIA STATE!
 %% ============================================================
@@ -1134,6 +1506,11 @@ mi_call(user(Text), StateIn, StateOut) :-
     get_params(StateIn, Params),
     interpolate_desc(Text, Params, InterpText),
     add_memory(StateIn, user, InterpText, StateOut).
+
+%% mi_call(get_memory(Messages), +StateIn, -StateOut)
+mi_call(get_memory(Messages), StateIn, StateIn) :-
+    !,
+    get_memory(StateIn, Messages).
 
 %% ============================================================
 %% Output Predicates
@@ -1520,6 +1897,16 @@ mi_call(consult(File), StateIn, StateIn) :-
     readutil:read_file_to_string(FullPath, Code, []),
     consult_string(Code, SessionId).
 
+mi_call(use_module(Module), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    process_use_module_directive(Module, SessionId).
+
+mi_call(use_module(Module, Exports), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    process_use_module_directive(Module, Exports, SessionId).
+
 %% mi_call([File], +StateIn, -StateOut)
 %% Alternative consult syntax: [file]
 mi_call([File], StateIn, StateOut) :-
@@ -1543,10 +1930,11 @@ consult_string(Code, SessionId) :-
 %% consult_clauses(+Stream, +SessionId)
 %% Read and assert all clauses from a stream
 consult_clauses(Stream, SessionId) :-
-    read_term(Stream, Term, [module(SessionId)]),
+    read_term(Stream, Term, [module(SessionId), variable_names(Bindings)]),
     (   Term == end_of_file
     ->  true
-    ;   consult_process_term(Term, SessionId),
+    ;   preprocess_loaded_term(Term, Bindings, PreparedTerms),
+        forall(member(PreparedTerm, PreparedTerms), consult_process_term(PreparedTerm, SessionId)),
         consult_clauses(Stream, SessionId)
     ).
 
@@ -1585,9 +1973,10 @@ consult_process_term((tool(ToolHead) :- Body), SessionId) :-
     assertz(SessionId:(tool(ToolHead) :- Body)).
 
 consult_process_term((Head :- Body), SessionId) :-
-    % Assert a clause
+    % Expand dict dot-notation, then assert
     !,
-    assertz(SessionId:(Head :- Body)).
+    (catch(expand_dict_dots(Body, ExpandedBody), _, fail) -> true ; ExpandedBody = Body),
+    assertz(SessionId:(Head :- ExpandedBody)).
 
 consult_process_term(Head, SessionId) :-
     % Assert a fact
@@ -1670,6 +2059,12 @@ mi_call(make_directory(Dir), StateIn, StateIn) :-
     resolve_workspace_path(Dir, FullPath),
     make_directory(FullPath).
 
+%% mi_call(make_directory_path(Dir), +StateIn, -StateOut)
+mi_call(make_directory_path(Dir), StateIn, StateIn) :-
+    !,
+    resolve_workspace_path(Dir, FullPath),
+    make_directory_path(FullPath).
+
 %% mi_call(delete_file(File), +StateIn, -StateOut)
 mi_call(delete_file(File), StateIn, StateIn) :-
     !,
@@ -1700,11 +2095,35 @@ mi_call(throw(Error), _StateIn, _StateOut) :-
     throw(Error).
 
 %% ============================================================
+%% DCG Helpers
+%% ============================================================
+
+%% phrase/2 and phrase/3 must run in the session module so they can resolve
+%% grammar predicates asserted from the current DML source.
+mi_call(phrase(Grammar, Input), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    call(SessionId:phrase(Grammar, Input)).
+
+mi_call(phrase(Grammar, Input, Rest), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    call(SessionId:phrase(Grammar, Input, Rest)).
+
+%% ============================================================
 %% Module-Qualified Goals
 %% ============================================================
 
 %% mi_call(Module:Goal, +StateIn, -StateOut)
 %% Module-qualified goals - handle special predicates and user-defined predicates
+
+mi_call(Module:phrase(Grammar, Input), StateIn, StateIn) :-
+    !,
+    call(Module:phrase(Grammar, Input)).
+
+mi_call(Module:phrase(Grammar, Input, Rest), StateIn, StateIn) :-
+    !,
+    call(Module:phrase(Grammar, Input, Rest)).
 
 % First check if the unqualified Goal is a special MI predicate - if so, handle it directly
 mi_call(_Module:Goal, StateIn, StateOut) :-
@@ -1745,6 +2164,8 @@ is_mi_special_predicate(task(_,_,_)).
 is_mi_special_predicate(task(_,_,_,_)).
 is_mi_special_predicate(task(_,_,_,_,_)).
 is_mi_special_predicate(task_named(_,_,_)).   %% Transformed form of task/N
+is_mi_special_predicate(sample_token(_,_)).
+is_mi_special_predicate(sample_token(_,_,_)).
 is_mi_special_predicate(exec(_,_)).
 is_mi_special_predicate(param(_,_)).
 is_mi_special_predicate(param(_,_,_)).
@@ -1754,10 +2175,16 @@ is_mi_special_predicate(prompt(_,_)).
 is_mi_special_predicate(prompt(_,_,_)).
 is_mi_special_predicate(prompt(_,_,_,_)).
 is_mi_special_predicate(prompt_named(_,_,_)). %% Transformed form of prompt/N
+is_mi_special_predicate(llm(_,_)).
 %% Tool scoping predicates
 is_mi_special_predicate(with_tools(_,_)).
 is_mi_special_predicate(without_tools(_,_)).
+%% Reasoning effort scoping
+is_mi_special_predicate(with_reasoning(_,_)).
+%% Recipe context scoping
+is_mi_special_predicate(with_recipe(_,_)).
 %% Context stack management
+is_mi_special_predicate(get_memory(_)).
 is_mi_special_predicate(push_context).
 is_mi_special_predicate(push_context(_)).
 is_mi_special_predicate(pop_context).
@@ -1798,6 +2225,9 @@ is_mi_special_predicate(maplist(_,_)).
 is_mi_special_predicate(maplist(_,_,_)).
 is_mi_special_predicate(maplist(_,_,_,_)).
 is_mi_special_predicate(foldl(_,_,_,_)).
+%% DCG predicates
+is_mi_special_predicate(phrase(_,_)).
+is_mi_special_predicate(phrase(_,_,_)).
 %% File I/O predicates
 is_mi_special_predicate(read_file_to_string(_,_,_)).
 is_mi_special_predicate(read_file(_,_)).
@@ -1811,6 +2241,7 @@ is_mi_special_predicate(exists_file(_)).
 is_mi_special_predicate(exists_directory(_)).
 is_mi_special_predicate(directory_files(_,_)).
 is_mi_special_predicate(make_directory(_)).
+is_mi_special_predicate(make_directory_path(_)).
 is_mi_special_predicate(delete_file(_)).
 is_mi_special_predicate(delete_directory(_)).
 %% Consult and module predicates
@@ -2081,6 +2512,10 @@ goal_with_string_arg(prompt(S, V1, V2, V3), prompt, S, [V1, V2, V3]) :- atom(S),
 %% prompt_named/3 - transformed form with embedded variable names
 goal_with_string_arg(prompt_named(S, Vars, Names), prompt_named, S, [Vars, Names]) :- string(S).
 goal_with_string_arg(prompt_named(S, Vars, Names), prompt_named, S, [Vars, Names]) :- atom(S), \+ S = [].
+goal_with_string_arg(sample_token(S, Token), sample_token, S, [Token]) :- string(S).
+goal_with_string_arg(sample_token(S, Token), sample_token, S, [Token]) :- atom(S), \+ S = [].
+goal_with_string_arg(sample_token(S, Allowed, Token), sample_token, S, [Allowed, Token]) :- string(S).
+goal_with_string_arg(sample_token(S, Allowed, Token), sample_token, S, [Allowed, Token]) :- atom(S), \+ S = [].
 
 %% rebuild_goal(+Functor, +StringArg, +RestArgs, -Goal)
 %% Rebuild a goal with the string argument and rest args
@@ -2103,14 +2538,15 @@ flatten_conjunction((A1, A2), B, Result) :- !,
 flatten_conjunction(A, B, (A, B)).
 
 %% string_needs_interpolation(+String)
-%% Check if a string contains {VarName} patterns
+%% Check if a string contains identifier-like {VarName} patterns
 string_needs_interpolation(String) :-
     (   string(String) -> S = String
     ;   atom(String) -> atom_string(String, S)
     ;   fail
     ),
-    sub_string(S, _, _, _, "{"),
-    sub_string(S, _, _, _, "}").
+    string_codes(S, Codes),
+    extract_vars_from_codes(Codes, VarNames, _),
+    VarNames \= [].
 
 %% build_format_call(+Template, +Bindings, -TempVar, -FormatGoal)
 %% Build a format/3 call that produces the interpolated string
@@ -2151,10 +2587,16 @@ extract_interpolation_vars(Template, VarNames, FormatString) :-
 extract_vars_from_codes([], [], []) :- !.
 
 % Found opening brace
-extract_vars_from_codes([0'{|Rest], [VarName|VarNames], [0'~, 0'w|FormatRest]) :- !,
+extract_vars_from_codes([0'{|Rest], [VarName|VarNames], [0'~, 0'w|FormatRest]) :-
     extract_var_until_close(Rest, VarNameCodes, AfterClose),
+    valid_placeholder_codes(VarNameCodes),
+    !,
     atom_codes(VarName, VarNameCodes),
     extract_vars_from_codes(AfterClose, VarNames, FormatRest).
+
+% Invalid placeholder syntax - keep the opening brace literal
+extract_vars_from_codes([0'{|Rest], VarNames, [0'{|FormatRest]) :- !,
+    extract_vars_from_codes(Rest, VarNames, FormatRest).
 
 % Escape tilde for format/3
 extract_vars_from_codes([0'~|Rest], VarNames, [0'~, 0'~|FormatRest]) :- !,
@@ -2169,6 +2611,20 @@ extract_var_until_close([0'}|Rest], [], Rest) :- !.
 extract_var_until_close([C|Rest], [C|VarRest], Final) :-
     extract_var_until_close(Rest, VarRest, Final).
 extract_var_until_close([], [], []).
+
+%% valid_placeholder_codes(+Codes)
+%% Placeholder names must look like identifiers: [A-Za-z_][A-Za-z0-9_]*
+valid_placeholder_codes([First|Rest]) :-
+    valid_placeholder_start(First),
+    maplist(valid_placeholder_char, Rest).
+
+valid_placeholder_start(Code) :-
+    code_type(Code, alpha)
+    ; Code =:= 0'_.
+
+valid_placeholder_char(Code) :-
+    code_type(Code, alnum)
+    ; Code =:= 0'_.
 
 %% lookup_vars_with_params(+VarNames, +Bindings, -VarList, -ParamGoals)
 %% Look up each variable name:

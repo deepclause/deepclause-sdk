@@ -2,7 +2,9 @@
  * DML Runner - Executes DML code using SWI-Prolog WASM
  */
 import type { SWIPLModule } from './prolog/loader.js';
-import type { DMLEvent, ToolDefinition, ToolPolicy, MemoryMessage } from './types.js';
+import type { CompactionOptions, DMLEvent, MemoryMessage, ToolDefinition, ToolPolicy, TypedVar } from './types.js';
+import { type ReasoningType } from './system/config/model-database.js';
+export declare function decodeAgentOutputVars(rawOutputVars: unknown): (string | TypedVar)[];
 export interface RunnerOptions {
     model: string;
     provider: string;
@@ -12,6 +14,11 @@ export interface RunnerOptions {
     trace?: boolean;
     streaming?: boolean;
     debug?: boolean;
+    providerOptions?: Record<string, Record<string, any>>;
+    compaction?: CompactionOptions;
+    reasoningType?: ReasoningType;
+    reasoningBudgetMap?: Record<string, number>;
+    contextWindow?: number;
 }
 export interface InternalRunOptions {
     args?: unknown[];
@@ -22,6 +29,8 @@ export interface InternalRunOptions {
     toolPolicy: ToolPolicy | null;
     onInputRequired: (prompt: string) => Promise<string>;
     signal?: AbortSignal;
+    initialMessages?: MemoryMessage[];
+    compaction?: CompactionOptions;
 }
 /**
  * DML execution engine
@@ -37,6 +46,7 @@ export declare class DMLRunner {
     private engine;
     private sessionId;
     private currentMemory;
+    private stepCounter;
     constructor(swipl: SWIPLModule, options: RunnerOptions);
     /**
      * Get the current conversation memory
@@ -59,6 +69,11 @@ export declare class DMLRunner {
      */
     private buildParams;
     /**
+     * Quote a string as a Prolog atom if it contains non-atom characters.
+     * Valid unquoted atoms: start with lowercase letter, contain only [a-zA-Z0-9_]
+     */
+    private quoteAtom;
+    /**
      * Convert JS value to Prolog term string
      */
     private toPrologTerm;
@@ -74,6 +89,14 @@ export declare class DMLRunner {
      * Handle agent loop request (task() predicate)
      */
     private handleAgentLoop;
+    /**
+     * Handle one-token sampling request (sample_token/2-3)
+     */
+    private handleSampleToken;
+    /**
+     * Handle direct one-shot LLM request (llm/2)
+     */
+    private handleLlm;
     /**
      * Handle exec request (exec() predicate)
      */
@@ -108,10 +131,15 @@ export declare class DMLRunner {
      * @param onToolCall - Callback to emit tool call events from nested tasks
      */
     private executeToolIsolated;
+    private applyCompactionBindings;
+    private runBoundCompactor;
+    private resolveCompactorSource;
     /**
      * Extract memory from payload (now passed via state threading)
      */
+    private extractMessagesFromValue;
     private extractMemoryFromPayload;
+    private serializeMemoryMessages;
     /**
      * Post agent loop result back to Prolog
      */
@@ -120,6 +148,14 @@ export declare class DMLRunner {
      * Post exec result back to Prolog
      */
     private postExecResult;
+    /**
+     * Post one-token sampling result back to Prolog
+     */
+    private postSampleTokenResult;
+    /**
+     * Post direct llm/2 result back to Prolog
+     */
+    private postLlmResult;
     /**
      * Post tool engine agent loop result back to Prolog
      */

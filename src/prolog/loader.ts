@@ -29,10 +29,24 @@ interface FSFilesystems {
   MEMFS: unknown;
 }
 
+// Emscripten FS interface (minimal, matching what swipl-wasm uses)
+type FS = {
+  mkdir: (path: string) => void;
+  mount: (type: unknown, opts: unknown, mountpoint: string) => unknown;
+  unmount: (path: string) => void;
+  readFile: (path: string, opts?: { encoding: string; flags: string }) => string;
+  writeFile: (path: string, data: string | Uint8Array, opts?: { flags: string }) => void;
+  unlink: (path: string) => void;
+  rmdir: (path: string) => void;
+  exists: (path: string) => boolean;
+  isDir: (path: string) => boolean;
+  isFile: (path: string) => boolean;
+};
+
 // Type definition for SWI-Prolog WASM module
 export interface SWIPLModule {
   prolog: Prolog;
-  FS: typeof FS & { filesystems: FSFilesystems };
+  FS: FS & { filesystems: FSFilesystems };
 }
 
 let swiplInstance: SWIPLModule | null = null;

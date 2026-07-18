@@ -1,0 +1,187 @@
+% ============================================================================
+% _skill-creator v4 - Creates, tests, and deploys DML skills.
+%
+% Four-phase pipeline matching the DML Compiler Prompt role definition:
+%   Phase 1 - Understand & Research
+%             Clarify requirements, research dependencies, understand APIs.
+%   Phase 2 - Environment Setup
+%             Install packages, create/test helper scripts via bash.
+%   Phase 3 - DML Implementation
+%             Write DML, validate syntax, run tests - iterate until passing.
+%   Phase 4 - Deploy
+%             Ask user for permission, then deploy.
+%
+% System tools: validate_dml, test_dml, deploy_skill, write_file, bash
+% Proxied tools: web_search, news_search, url_fetch
+% Auto-augmented: ask_user
+%
+%   agent_main(SpecMarkdown)            - create new skill
+%   agent_main(SpecMarkdown, EditSlug)  - edit existing skill
+% ============================================================================
+
+% -- Tools available to the LLM during task() calls --------------------------
+
+tool(search(Query, Results),
+     "Search the web for information. Returns titles, URLs, and snippets.") :-
+    exec(web_search(query: Query), Results).
+
+tool(search_news(Query, Results),
+     "Search for recent news articles.") :-
+    exec(news_search(query: Query), Results).
+
+tool(fetch(Url, Content),
+     "Fetch a URL and return its body. Use for documentation pages, README files, API references.") :-
+    exec(url_fetch(url: Url), Result),
+    get_dict(body, Result, Content).
+
+tool(list_skills(Skills),
+    "List reusable local skills in the current workspace catalog. Use this before re-implementing a capability that might already exist.") :-
+    exec(list_skills, Skills).
+
+tool(shell(Command, Result),
+     "Run a shell command on the VM. Returns dict with: success (boolean), stdout (string), stderr (string), exitCode (integer), summary (string). Use for package installation, environment checks, and helper script creation/testing. Always check the 'success' field.") :-
+    exec(bash(command: Command), Result).
+
+tool(write(Path, Content, Result),
+     "Write (or overwrite) a file in the workspace. Content is passed as a JSON string so there are NO shell escaping issues - ALWAYS use this instead of bash heredocs for writing DML and other code files. Returns dict with: success (boolean), path (string), bytes (number).") :-
+    exec(write_file(path: Path, content: Content), Result).
+
+tool(validate(DmlFile, Result),
+     "Validate DML code from a .dml file using the Prolog parser. You MUST write the DML to a file first with write(), then pass the file path. Returns dict with: valid (boolean), errors (list), warnings (list).") :-
+    exec(validate_dml(dml_file: DmlFile), Result).
+
+tool(test_run(DmlFile, Input, Result),
+     "Run a DML program from a .dml file with test input(s) to verify it works. You MUST write the DML to a file first with write(), then pass the file path. Input can be a single string (for agent_main/1) or a JSON array string like '[\"arg1\", \"arg2\"]' for multi-arg agent_main. Returns dict with: success (boolean), status (string: ok/error/completed_no_answer/failed_silently), answer (string), outputs (list), errors (list), trace (list).") :-
+    exec(test_dml(dml_file: DmlFile, test_args: Input), Result).
+
+tool(deploy(DmlFile, Spec, MetaJSON, Result),
+    "Publish a new skill to the local runtime catalog. IMPORTANT ARG ORDER: deploy(<dml file path>, <original spec markdown>, <metadata json>). The SECOND argument is the original specification text. The THIRD argument is the metadata JSON string with keys: slug, name, description, trigger_phrases (array of 3-5 phrases). Never pass a version number or boolean flag here. Returns dict with: ok (boolean), slug (string), version (number), or error (string).") :-
+    exec(deploy_skill(dml_file: DmlFile, spec_markdown: Spec, metadata_json: MetaJSON), Result).
+
+tool(deploy_update(DmlFile, Spec, MetaJSON, Slug, Result),
+    "Update an existing skill. IMPORTANT ARG ORDER: deploy_update(<dml file path>, <updated spec markdown>, <metadata json>, <existing slug>). The THIRD argument is metadata JSON; the FOURTH argument is the slug override. Never pass a version number or boolean flag. Returns dict with: ok (boolean), slug (string), version (number), or error (string).") :-
+    exec(deploy_skill(dml_file: DmlFile, spec_markdown: Spec, metadata_json: MetaJSON, slug_override: Slug), Result).
+
+tool(ask_user(Prompt, Response), "Ask the user a clarifying question or for confirmation and get their response.") :-
+    exec(ask_user(prompt: Prompt), Result),
+    get_dict(user_response, Result, Response).
+
+
+% -- Create new skill --------------------------------------------------------
+
+agent_main(SpecMarkdown) :-
+    param(system_prompt, "System prompt with DML reference", SysPrompt),
+    system(SysPrompt),
+    output("📋 Starting skill creation..."),
+
+    % -- Phase 1: Understand & Research --------------------------------------
+    output("Phase 1/4: Understanding requirements and researching dependencies..."),
+    format(string(ResearchTask),
+        "You are starting to build a DML skill from the specification below.\n\nYour job in this phase:\n1. Read the specification carefully. If anything is ambiguous or missing, use ask_user to clarify before proceeding.\n2. Call list_skills if an existing local skill might already cover part of the requested functionality.\n3. Identify all external dependencies (Python packages, Node modules, system tools, APIs, CLI tools).\n4. For each dependency, use search or fetch to look up installation instructions, API docs, or usage examples if you are not already familiar with them.\n5. Summarise: what the skill does, whether any existing skills should be reused, its inputs/outputs, all dependencies found, and any tricky parts.\n\nSpecification:\n---\n~w\n---\n\nStore your findings in ResearchSummary.",
+        [SpecMarkdown]),
+    task(ResearchTask, string(ResearchSummary)),
+    output(ResearchSummary),
+
+    % -- Phase 2: Environment Setup -------------------------------------------
+    output("Phase 2/4: Setting up the environment..."),
+    format(string(EnvTask),
+        "Set up the execution environment for the skill you are about to build.\n\nBased on your research:\n~w\n\nYour job in this phase:\n1. Use shell() to check what is already installed (python --version, node --version, which <tool>, pip show <pkg>, etc.).\n2. Install ALL missing packages and tools: pip install, apt-get install (always use sudo and -y), npm install -g.\n3. If the skill needs helper scripts (Python, Shell, etc.), create and smoke-test them now with shell().\n4. When you encounter errors during setup, diagnose the root cause (version mismatch, missing system lib, permissions, ...) and resolve it.\n5. Prefer the simplest approach with the fewest new dependencies when the spec does not specify.\n6. Do NOT install anything inside the DML skill itself - the skill must assume everything is pre-installed.\n\nStore a short environment summary (what was installed, what exists) in EnvSummary.",
+        [ResearchSummary]),
+
+    task(EnvTask, string(EnvSummary)),
+    output(EnvSummary),
+
+    % -- Phase 3: Implement, Validate, Test ----------------------------------
+    output("Phase 3/4: Writing DML, validating, and testing..."),
+    format(string(ImplTask),
+        "Write, validate, and test the DML skill.\n\nBackground:\n- Research: ~w\n- Environment: ~w\n- Original specification: ~w\n\nYour job in this phase:\n1. Write a complete DML implementation plan (tool definitions, agent_main structure, fallback clause).\n2. If you reuse an existing local skill, prefer a narrow wrapper tool predicate that internally calls exec(run_skill(...)) for that specific child skill. Do NOT expose a generic tool(run_skill(...)) predicate unless the user explicitly asked for an orchestration skill.\n3. Write the full DML code to a .dml file using write(). NEVER use bash heredocs for DML - they mangle backslashes and special Prolog characters. NEVER pass DML as an inline string to validate or test_run.\n4. Call validate('my-skill.dml') - if there are syntax errors, fix the code using write() and re-validate until valid.\n5. Call test_run('my-skill.dml', ...) with a realistic test input - if it fails, analyse the error/trace, fix the code with write(), and re-test until passing.\n6. Keep iterating on validate -> test until the skill works correctly.\n\nStore the final .dml file path in FinalDML.",
+        [ResearchSummary, EnvSummary, SpecMarkdown]),
+    task(ImplTask, string(FinalDML)),
+    output("✅ DML implementation ready."),
+
+    % -- Phase 4: Deploy ------------------------------------------------------
+    (   param(auto_deploy, "Automatic publish mode", true)
+    ->  output("Phase 4/4: Publishing skill..."),
+        param(deployment_metadata_json, "Exact metadata JSON for automatic publishing", DeploymentMetaJSON),
+        format(string(DeployTask),
+            "You are ready to publish the skill automatically. Here is the final DML file path:\n\n~w\n\nOriginal specification:\n~w\n\nUse EXACTLY this metadata JSON string and do not modify it:\n\n~w\n\nYour job:\n1. Do NOT call ask_user. Automatic publish mode already serves as deployment approval.\n2. Call deploy() exactly once with the DML file path, the original specification, and the exact metadata JSON string shown above.\n3. Do not add, remove, or rename metadata keys.\n4. After a successful publish, end your response with a structured summary in EXACTLY this format:\n\nDEPLOY_RESULT:\n- name: <skill name>\n- slug: <skill slug>\n- trigger_phrases: <comma-separated list>\n- test_status: passed\n- deploy_status: success",
+            [FinalDML, SpecMarkdown, DeploymentMetaJSON]),
+        system("Automatic publish mode is enabled. Do not ask the user for permission. Use deployment_metadata_json exactly as provided."),
+        system("When you publish, use EXACTLY this argument order: deploy(FinalDMLPath, OriginalSpecMarkdown, MetadataJSONString). MetadataJSONString must be deployment_metadata_json without edits."),
+        task(DeployTask, string(DeployResult))
+    ;   output("Phase 4/4: Requesting deployment permission..."),
+        format(string(DeployTask),
+            "You are ready to deploy the skill. Here is the final DML file path:\n\n~w\n\nOriginal specification:\n~w\n\nYour job:\n1. Use ask_user to present a short summary of the skill (name, slug, what it does, trigger phrases you intend to use) and ask the user for permission to deploy.\n2. If the user approves (yes / ok / go ahead / etc.), call deploy() with the DML file path, the original specification, and a metadata JSON string containing: slug, name, description, trigger_phrases (3-5 phrases).\n3. If the user declines, answer with a message that the skill is ready but was not deployed, and that they can ask to deploy it later.\n4. After a successful deploy, end your response with a structured summary in EXACTLY this format:\n\nDEPLOY_RESULT:\n- name: <skill name>\n- slug: <skill slug>\n- trigger_phrases: <comma-separated list>\n- test_status: passed\n- deploy_status: success",
+            [FinalDML, SpecMarkdown]),
+        system("When you deploy, use EXACTLY this argument order: deploy(FinalDMLPath, OriginalSpecMarkdown, MetadataJSONString). Do not pass a version number, edit flag, or boolean in place of MetadataJSONString."),
+        task(DeployTask, string(DeployResult))
+    ),
+
+    format(string(Summary), "✅ Skill creation complete!\n\n~w\n\nYou can trigger this skill using one of the trigger phrases shown above.", [DeployResult]),
+    answer(Summary).
+
+% -- Fallback for create -----------------------------------------------------
+
+agent_main(SpecMarkdown) :-
+    format(string(Msg), "❌ Skill creation failed.\n\nThe skill could not be compiled, tested, or deployed from the specification provided. This can happen when:\n- The specification is ambiguous or incomplete\n- Required APIs or tools are not available\n- The DML code could not pass validation or testing after multiple attempts\n\nPlease try:\n1. Simplifying the specification\n2. Being more explicit about inputs, outputs, and logic\n3. Breaking into smaller, focused skills\n\nOriginal spec (first 200 chars): ~w", [SpecMarkdown]),
+    answer(Msg).
+
+% -- Edit existing skill -----------------------------------------------------
+
+agent_main(SpecMarkdown, EditSlug) :-
+    param(system_prompt, "System prompt with DML reference", SysPrompt),
+    system(SysPrompt),
+    format(string(Ctx), "You are editing the existing skill '~w'.", [EditSlug]),
+    system(Ctx),
+    output("📋 Starting skill update..."),
+
+    % -- Phase 1: Understand changes ------------------------------------------
+    output("Phase 1/4: Understanding required changes and dependencies..."),
+    format(string(ResearchTask),
+        "You are updating the existing DML skill '~w' from the specification below.\n\nYour job in this phase:\n1. Read the updated specification. If anything is ambiguous, use ask_user to clarify.\n2. Identify what is changing and any new dependencies introduced by the changes.\n3. Research new dependencies if needed (search, fetch).\n4. Summarise: what is changing, new dependencies if any, and any tricky parts.\n\nUpdated specification:\n---\n~w\n---\n\nStore your findings in ResearchSummary.",
+        [EditSlug, SpecMarkdown]),
+    task(ResearchTask, string(ResearchSummary)),
+    output(ResearchSummary),
+
+    % -- Phase 2: Environment Setup -------------------------------------------
+    output("Phase 2/4: Updating the environment if needed..."),
+    format(string(EnvTask),
+        "Review and update the execution environment for the skill changes.\n\nBased on your analysis:\n~w\n\nYour job:\n1. Check whether any new packages or tools need to be installed for the changes.\n2. Install anything missing via shell().\n3. Create or update any helper scripts if needed.\n4. If no environment changes are needed, confirm that with a brief note.\n\nStore an environment summary in EnvSummary.",
+        [ResearchSummary]),
+    task(EnvTask, string(EnvSummary)),
+    output(EnvSummary),
+
+    % -- Phase 3: Implement, Validate, Test ----------------------------------
+    output("Phase 3/4: Writing updated DML, validating, and testing..."),
+    format(string(ImplTask),
+        "Write, validate, and test the updated DML skill.\n\nBackground:\n- Changes summary: ~w\n- Environment: ~w\n- Updated specification: ~w\n\nYour job:\n1. Write the complete updated DML code to a .dml file using write(). NEVER use bash heredocs for DML - they mangle backslashes and special Prolog characters.\n2. Call validate('my-skill.dml') - fix any syntax errors by rewriting the file with write().\n3. Call test_run('my-skill.dml', ...) - fix any runtime failures by rewriting with write().\n4. Iterate until both validation and testing pass.\n\nStore the final .dml file path in FinalDML.",
+        [ResearchSummary, EnvSummary, SpecMarkdown]),
+    task(ImplTask, string(FinalDML)),
+    output("✅ Updated DML implementation ready."),
+
+    % -- Phase 4: Deploy -------------------------------------------------------
+    (   param(auto_deploy, "Automatic publish mode", true)
+    ->  output("Phase 4/4: Publishing update..."),
+        param(deployment_metadata_json, "Exact metadata JSON for automatic publishing", DeploymentMetaJSON),
+        format(string(DeployTask),
+            "You are ready to publish the updated skill '~w' automatically. Here is the final DML file path:\n\n~w\n\nUpdated specification:\n~w\n\nUse EXACTLY this metadata JSON string and do not modify it:\n\n~w\n\nYour job:\n1. Do NOT call ask_user. Automatic publish mode already serves as deployment approval.\n2. Call deploy_update() exactly once with the DML file path, updated specification, the exact metadata JSON shown above, and slug override '~w'.\n3. Do not add, remove, or rename metadata keys.\n4. After a successful publish, end your response with a structured summary in EXACTLY this format:\n\nDEPLOY_RESULT:\n- name: <skill name>\n- slug: ~w\n- changes: <brief summary of what changed>\n- test_status: passed\n- deploy_status: success",
+            [EditSlug, FinalDML, SpecMarkdown, DeploymentMetaJSON, EditSlug, EditSlug]),
+        system("Automatic publish mode is enabled. Do not ask the user for permission. Use deployment_metadata_json exactly as provided."),
+        system("When you publish an update, use EXACTLY this argument order: deploy_update(FinalDMLPath, UpdatedSpecMarkdown, MetadataJSONString, ExistingSlug). MetadataJSONString must be deployment_metadata_json without edits."),
+        task(DeployTask, string(DeployResult))
+    ;   output("Phase 4/4: Requesting deployment permission..."),
+        format(string(DeployTask),
+            "You are ready to deploy the updated skill '~w'. Here is the final DML file path:\n\n~w\n\nUpdated specification:\n~w\n\nYour job:\n1. Use ask_user to summarise what changed and ask the user for permission to deploy.\n2. If approved, call deploy_update() with the DML file path, spec, a metadata JSON (name, description, trigger_phrases), and slug override '~w'.\n3. If declined, answer that the update is ready but not deployed, and they can ask to deploy later.\n4. After a successful deploy, end your response with a structured summary in EXACTLY this format:\n\nDEPLOY_RESULT:\n- name: <skill name>\n- slug: ~w\n- changes: <brief summary of what changed>\n- test_status: passed\n- deploy_status: success",
+            [EditSlug, FinalDML, SpecMarkdown, EditSlug, EditSlug]),
+        system("When you deploy an update, use EXACTLY this argument order: deploy_update(FinalDMLPath, UpdatedSpecMarkdown, MetadataJSONString, ExistingSlug). Do not pass a version number or boolean flag."),
+        task(DeployTask, string(DeployResult))
+    ),
+
+    format(string(Summary), "✅ Skill '~w' updated and deployed!\n\n~w", [EditSlug, DeployResult]),
+    answer(Summary).
+
+% -- Fallback for edit --------------------------------------------------------
+
+agent_main(SpecMarkdown, EditSlug) :-
+    format(string(Msg), "❌ Skill update failed for '~w'.\n\nThe skill could not be updated from the specification provided. Please try:\n1. Simplifying the changes\n2. Providing the full updated specification\n3. Checking if the skill slug '~w' exists\n\nSpec (first 200 chars): ~w", [EditSlug, EditSlug, SpecMarkdown]),
+    answer(Msg).

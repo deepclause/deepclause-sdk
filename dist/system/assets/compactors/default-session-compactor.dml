@@ -1,0 +1,30 @@
+should_skip_session_compaction(MessageCount, _EstimatedTokens) :-
+    MessageCount < 8.
+
+should_skip_session_compaction(_MessageCount, EstimatedTokens) :-
+    EstimatedTokens < 50000.
+
+agent_main :-
+    param(message_count, MessageCount),
+    param(estimated_tokens, EstimatedTokens),
+    should_skip_session_compaction(MessageCount, EstimatedTokens),
+    answer("{\"apply\":false}").
+
+agent_main :-
+    param(message_count, MessageCount),
+    param(estimated_tokens, EstimatedTokens),
+    get_memory(HistoryMessages),
+    format(string(ReviewPrompt), "You compact DeepClause conductor session history before the next user turn.\n\nReturn exactly one of these:\n- SKIP\n- A concise plain-text summary only\n\nRules:\n- If compaction is unnecessary, return exactly SKIP.\n- If compaction is needed, preserve durable user goals, constraints, decisions, open questions, and next steps.\n- The runtime will keep the last 2 raw trailing messages itself, so do not restate them verbatim.\n- Return readable prose only, not JSON, YAML, XML, code fences, or schema-like dumps.\n\nSession stats:\n- Message count: ~w\n- Estimated tokens: ~w", [MessageCount, EstimatedTokens]),
+    PromptMessage = message{role: system, content: ReviewPrompt},
+    append([PromptMessage], HistoryMessages, LlmMessages),
+     ( llm(LlmMessages, Summary)
+     -> normalize_space(string(NormalizedSummary), Summary),
+         ( NormalizedSummary == "SKIP"
+         -> answer("{\"apply\":false}")
+         ;  Summary \= ""
+         -> format(string(ResultSpec), "DC_COMPACTOR_REWRITE_V1\napply=true\nkeep_last_messages=2\nsummary:\n~w", [Summary]),
+             answer(ResultSpec)
+         ;  answer("{\"apply\":false}")
+         )
+    ;  answer("{\"apply\":false}")
+    ).

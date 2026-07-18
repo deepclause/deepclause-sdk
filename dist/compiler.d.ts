@@ -5,6 +5,7 @@
  * with LLM generation and Prolog validation.
  */
 import { CompileOptions, CompileResult, AnalysisResult } from './types.js';
+import { type TokenUsageByModel } from './system/runtime/token-usage.js';
 interface ValidationResult {
     valid: boolean;
     errors: string[];
@@ -18,6 +19,17 @@ export declare function validateWithProlog(dml: string): Promise<ValidationResul
  * Run static analysis on the DML code
  */
 export declare function analyzeDML(dml: string): Promise<AnalysisResult>;
+/**
+ * Run LLM-based security audit
+ */
+export declare function runLLMSecurityAudit(dml: string, staticAnalysis: AnalysisResult, model: string, provider: string, baseUrl?: string, usageByModel?: TokenUsageByModel): Promise<string>;
+export declare function analyzeAndAuditDML(dml: string, options: {
+    audit?: boolean;
+    model: string;
+    provider: string;
+    baseUrl?: string;
+    usageByModel?: TokenUsageByModel;
+}): Promise<AnalysisResult>;
 /**
  * Compile a natural language prompt or markdown directly to DML
  */
