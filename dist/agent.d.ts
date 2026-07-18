@@ -12,16 +12,20 @@ export interface AgentLoopOptions {
     outputVars: (string | TypedVar)[];
     memory: MemoryMessage[];
     tools: Map<string, ToolDefinition>;
+    workspacePath?: string;
     modelOptions: {
         model: string;
         provider: string;
         temperature: number;
         maxOutputTokens: number;
         baseUrl?: string;
+        providerOptions?: Record<string, Record<string, any>>;
     };
     onOutput: (text: string) => void;
     onStream?: (chunk: string, done: boolean) => void;
     onToolCall?: (toolName: string, args: Record<string, unknown>) => void;
+    onUsage?: (usage: import('./types.js').LLMUsage) => void;
+    onBeforeModelCall?: (messages: MemoryMessage[], lastInputTokens?: number) => Promise<MemoryMessage[]>;
     onAskUser: (prompt: string) => Promise<string>;
     signal?: AbortSignal;
     streaming?: boolean;

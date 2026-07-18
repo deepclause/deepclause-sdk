@@ -7,9 +7,10 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { loadConfig } from './config.js';
-import { getAgentVMTools } from './tools.js';
-import { compileToDML, extractParameters, extractDescription } from '../compiler.js';
+import { applyResolvedModelConfig, buildModelOverride, getDefaultConfig, loadConfig, resolveModelSlot, } from './config.js';
+import { promptUser } from './interactive.js';
+import { compileWithSkillCreator } from '../system/runtime/skill-creator.js';
+import { extractDescription as extractDescriptionFromCompiler, extractParameters as extractParametersFromCompiler, extractToolDependencies as extractToolDependenciesFromCompiler, } from '../compiler.js';
 // =============================================================================
 // Status Indicator
 // =============================================================================
@@ -69,8 +70,8 @@ class StatusIndicator {
 export async function compile(sourcePath, outputDir, options = {}) {
     const maxAttempts = options.maxAttempts ?? 3;
     const verbose = options.verbose ?? false;
-    const shouldStream = options.stream ?? true;
-    const shouldAudit = options.audit ?? true;
+    const shouldStream = options.stream ?? false;
+    const shouldAudit = options.audit !== false;
     // Resolve paths
     const absoluteSource = path.resolve(sourcePath);
     const absoluteOutputDir = path.resolve(outputDir);
@@ -103,139 +104,120 @@ export async function compile(sourcePath, outputDir, options = {}) {
     }
     // Load config for model/provider (try cwd first, then source dir, then use defaults)
     let config;
+    let workspaceRoot;
     try {
+        workspaceRoot = process.cwd();
         config = await loadConfig(process.cwd());
     }
     catch {
         try {
             const sourceDir = path.dirname(absoluteSource).split('/.deepclause')[0];
+            workspaceRoot = sourceDir;
             config = await loadConfig(sourceDir);
         }
         catch {
             // Use sensible defaults if no config found
-            config = {
-                model: 'gpt-4o',
-                provider: 'openai',
-                providers: {},
-                mcp: { servers: {} },
-                agentvm: { network: true },
-                dmlBase: '.deepclause/tools',
-                workspace: './'
-            };
+            workspaceRoot = process.cwd();
+            config = getDefaultConfig();
         }
     }
-    const model = options.model || config.model;
-    const provider = options.provider || config.provider;
-    // Get available tools for the prompt
-    const tools = await getAvailableTools(config);
-    // Status indicator
-    const status = new StatusIndicator(verbose || shouldStream);
-    status.start(`Compiling...`);
+    const compileSelection = resolveModelSlot(config, 'compile', {
+        modelId: buildModelOverride(options.model, options.provider),
+        temperature: options.temperature,
+    });
+    applyResolvedModelConfig(compileSelection);
+    const runSelection = resolveModelSlot(config, 'run');
+    const runtimeOutput = [];
+    const events = [];
+    let executionTrace;
+    const captureEvents = (options.headless
+        || shouldStream
+        || verbose
+        || !!options.trace
+        || !!options.onEvent);
+    const status = new StatusIndicator(!captureEvents);
+    if (!captureEvents) {
+        status.start('Compiling...');
+    }
+    const handleEvent = (event) => {
+        events.push(event);
+        if (event.type === 'output' && event.content) {
+            runtimeOutput.push(event.content);
+        }
+        if ((event.type === 'finished' || event.type === 'error') && event.trace) {
+            executionTrace = event.trace;
+        }
+        options.onEvent?.(event);
+    };
     try {
-        // Call the shared compiler
-        const result = await compileToDML(markdown, {
-            model,
-            provider: provider,
-            temperature: options.temperature,
+        const result = await compileWithSkillCreator(markdown, {
+            sourcePath: absoluteSource,
+            outputDir: absoluteOutputDir,
+            baseName,
+            workspaceRoot,
+            workspacePath: path.resolve(config.workspace || './workspace'),
+            config,
+            compileSelection,
+            runSelection,
+            sandbox: options.sandbox,
+            validateOnly: options.validateOnly,
             maxAttempts,
             verbose,
-            tools: tools, // Map CLI tools to compiler tools
-            audit: shouldAudit
+            stream: shouldStream,
+            trace: !!options.trace,
+            audit: shouldAudit,
+            onUserInput: promptUser,
+            signal: options.signal,
+            onEvent: handleEvent,
         });
-        if (result.valid && result.dml) {
+        if (!captureEvents) {
             status.stop();
-            const dml = result.dml;
-            const explanation = result.explanation || 'DML program compiled successfully.';
-            // Print Analysis Warnings
-            if (result.analysis) {
-                if (result.analysis.warnings && result.analysis.warnings.length > 0) {
-                    console.log('\n⚠️  Static Analysis Warnings:');
-                    for (const w of result.analysis.warnings) {
-                        const icon = w.level === 'critical' ? '🔴' : w.level === 'high' ? '🟠' : w.level === 'medium' ? '🟡' : '⚪';
-                        console.log(`  ${icon} [${w.level.toUpperCase()}] ${w.message}`);
-                    }
-                }
-                if (result.analysis.auditorReport) {
-                    console.log('\n🛡️  Security Audit Report:');
-                    console.log(result.analysis.auditorReport);
-                    console.log('--------------------------------------------------');
-                }
+        }
+        if (options.trace && executionTrace) {
+            const tracePath = path.resolve(options.trace);
+            await fs.writeFile(tracePath, JSON.stringify(executionTrace, null, 2) + '\n');
+        }
+        if (!options.onEvent && !options.headless && result.analysis.warnings.length > 0) {
+            console.log('\n⚠️  Static Analysis Warnings:');
+            for (const warning of result.analysis.warnings) {
+                const icon = warning.level === 'critical' ? '🔴' : warning.level === 'high' ? '🟠' : warning.level === 'medium' ? '🟡' : '⚪';
+                console.log(`  ${icon} [${warning.level.toUpperCase()}] ${warning.message}`);
             }
-            // If validate-only, return without saving
-            if (options.validateOnly) {
-                console.log('\n✅ Compilation successful!\n');
-                console.log(explanation);
-                return {
-                    output: dmlPath,
-                    tools: result.tools,
-                    skipped: false,
-                    valid: true,
-                    dml,
-                    explanation,
-                    attempts: result.attempts
-                };
-            }
-            // Save the DML
-            await fs.mkdir(absoluteOutputDir, { recursive: true });
-            // Load existing meta for history
-            const existingMeta = await loadExistingMeta(metaPath);
-            const history = existingMeta?.history || [];
-            const newVersion = history.length + 1;
-            // Create new meta file
-            const extractedTools = result.tools;
-            const extractedParams = extractParameters(dml);
-            const description = extractDescription(markdown);
-            const meta = {
-                version: '1.0.0',
-                source: path.relative(absoluteOutputDir, absoluteSource),
-                sourceHash,
-                compiledAt: new Date().toISOString(),
-                model,
-                provider,
-                description,
-                parameters: extractedParams,
-                tools: extractedTools,
-                history: [
-                    ...history,
-                    {
-                        version: newVersion,
-                        timestamp: new Date().toISOString(),
-                        sourceHash,
-                        model,
-                        provider
-                    }
-                ]
-            };
-            // Write files
-            await fs.writeFile(dmlPath, dml);
-            await fs.writeFile(metaPath, JSON.stringify(meta, null, 2) + '\n');
-            // Print success
+        }
+        if (!options.onEvent && !options.headless) {
             console.log('\n✅ Compilation successful!\n');
-            console.log(explanation);
-            return {
-                output: dmlPath,
-                tools: extractedTools,
-                skipped: false,
-                valid: true,
-                dml,
-                meta,
-                explanation,
-                attempts: result.attempts
-            };
+            console.log(result.explanation);
         }
-        else {
-            status.stop();
-            console.log('\n❌ Compilation failed.\n');
-            console.log('Validation errors:');
-            for (const error of result.errors || []) {
-                console.log(`  - ${error}`);
-            }
-            throw new Error(`Compilation failed: ${(result.errors || []).join(', ')}`);
-        }
+        return {
+            output: dmlPath,
+            tools: result.tools,
+            skipped: false,
+            valid: true,
+            dml: result.dml,
+            meta: result.meta,
+            explanation: result.explanation,
+            attempts: 1,
+            analysis: result.analysis,
+            runtimeOutput,
+            trace: executionTrace,
+            events,
+        };
     }
     catch (error) {
-        status.stop();
-        throw error;
+        if (!captureEvents) {
+            status.stop();
+        }
+        if (options.trace && executionTrace) {
+            const tracePath = path.resolve(options.trace);
+            await fs.writeFile(tracePath, JSON.stringify(executionTrace, null, 2) + '\n');
+        }
+        const compileError = error instanceof Error
+            ? error
+            : new Error(String(error));
+        compileError.runtimeOutput = runtimeOutput;
+        compileError.trace = executionTrace;
+        compileError.events = events;
+        throw compileError;
     }
 }
 /**
@@ -266,7 +248,8 @@ export async function compileAll(sourceDir, outputDir, options = {}) {
             const compileResult = await compile(sourcePath, absoluteOutputDir, {
                 ...options,
                 stream: false, // Don't stream when batch compiling
-                verbose: false
+                verbose: false,
+                headless: true,
             });
             if (compileResult.skipped) {
                 result.skipped++;
@@ -289,36 +272,33 @@ export async function compileAll(sourceDir, outputDir, options = {}) {
  * Compile a natural language prompt directly to DML without saving to disk
  */
 export async function compilePrompt(prompt, options = {}) {
+    const workspaceRoot = process.cwd();
     const config = await loadConfig(process.cwd());
-    const model = options.model || config.model;
-    const provider = options.provider || config.provider;
-    // Get available tools for the prompt
-    const tools = await getAvailableTools(config);
-    const result = await compileToDML(prompt, {
-        model,
-        provider: provider,
+    const compileSelection = resolveModelSlot(config, 'compile', {
+        modelId: buildModelOverride(options.model, options.provider),
         temperature: options.temperature,
-        maxAttempts: options.maxAttempts,
-        tools: tools
     });
-    if (result.valid && result.dml) {
-        return {
-            dml: result.dml,
-            tools: result.tools
-        };
-    }
-    throw new Error(`Failed to generate valid DML: ${(result.errors || []).join(", ")}`);
-}
-// =============================================================================
-// Tool Resolution
-// =============================================================================
-/**
- * Get all available tools for compilation prompt
- */
-async function getAvailableTools(_config) {
-    const tools = [];
-    tools.push(...getAgentVMTools());
-    return tools;
+    const runSelection = resolveModelSlot(config, 'run');
+    const result = await compileWithSkillCreator(prompt, {
+        sourcePath: 'oneshot.md',
+        outputDir: path.resolve(config.dmlBase || '.deepclause/tools'),
+        baseName: 'oneshot',
+        workspaceRoot,
+        workspacePath: path.resolve(config.workspace || './workspace'),
+        config,
+        compileSelection,
+        runSelection,
+        sandbox: options.sandbox,
+        validateOnly: true,
+        maxAttempts: options.maxAttempts,
+        verbose: options.verbose,
+        audit: options.audit !== false,
+        onUserInput: promptUser,
+    });
+    return {
+        dml: result.dml,
+        tools: result.tools,
+    };
 }
 // =============================================================================
 // Helpers
@@ -340,5 +320,44 @@ async function loadExistingMeta(metaPath) {
     catch {
         return null;
     }
+}
+export const extractToolDependencies = extractToolDependenciesFromCompiler;
+export const extractParameters = extractParametersFromCompiler;
+export const extractDescription = extractDescriptionFromCompiler;
+export function validateDMLSyntax(dml) {
+    const errors = [];
+    if (!dml.includes('agent_main')) {
+        errors.push('Missing agent_main predicate');
+    }
+    const stripped = dml
+        .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+        .replace(/%.*$/gm, '')
+        .replace(/\/\*[\s\S]*?\*\//g, '');
+    let parenCount = 0;
+    let bracketCount = 0;
+    for (const char of stripped) {
+        if (char === '(')
+            parenCount++;
+        if (char === ')')
+            parenCount--;
+        if (char === '[')
+            bracketCount++;
+        if (char === ']')
+            bracketCount--;
+    }
+    if (parenCount !== 0) {
+        errors.push('Unbalanced parentheses');
+    }
+    if (bracketCount !== 0) {
+        errors.push('Unbalanced brackets');
+    }
+    const withoutQuotedStrings = dml.replace(/"(?:[^"\\]|\\.)*"/g, '');
+    if ((withoutQuotedStrings.match(/"/g) || []).length % 2 !== 0) {
+        errors.push('Unclosed string literal');
+    }
+    return {
+        valid: errors.length === 0,
+        errors: [...new Set(errors)],
+    };
 }
 //# sourceMappingURL=compile.js.map

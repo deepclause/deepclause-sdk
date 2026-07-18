@@ -1,0 +1,43 @@
+should_skip_loop_compaction(MessageCount, _EstimatedTokens, MaxCtx) :-
+    MaxCtx > 0,
+    Threshold is MaxCtx * 3 // 4,
+    _EstimatedTokens < Threshold,
+    MessageCount < 12.
+
+should_skip_loop_compaction(MessageCount, EstimatedTokens, 0) :-
+    MessageCount < 12.
+
+should_skip_loop_compaction(_MessageCount, EstimatedTokens, 0) :-
+    EstimatedTokens < 50000.
+
+agent_main :-
+    param(message_count, MessageCount),
+    param(estimated_tokens, EstimatedTokens),
+    (   param(max_context_tokens, MaxCtx) -> true ; MaxCtx = 0 ),
+    should_skip_loop_compaction(MessageCount, EstimatedTokens, MaxCtx),
+    answer("{\"apply\":false}").
+
+agent_main :-
+    param(message_count, MessageCount),
+    param(estimated_tokens, EstimatedTokens),
+    (   param(max_context_tokens, MaxCtx) -> true ; MaxCtx = 0 ),
+    get_memory(HistoryMessages),
+    (   MaxCtx > 0
+    ->  Threshold is MaxCtx * 3 // 4,
+        format(string(ThresholdNote), "Context threshold: ~w tokens (75% of ~w).", [Threshold, MaxCtx])
+    ;   format(string(ThresholdNote), "Context threshold: 50000 tokens (default).", [])
+    ),
+    format(string(ReviewPrompt), "You compact the live prompt history of a long-running DeepClause task loop before the next model call.\n\nReturn exactly one of these:\n- SKIP\n- A concise plain-text working-memory summary only\n\nRules:\n- If compaction is unnecessary, return exactly SKIP.\n- If compaction is needed, preserve the active objective, latest state, important tool findings, unresolved blockers, and the next action.\n- The runtime will keep all system messages plus the last 3 raw non-system messages itself, so do not restate them verbatim.\n- Return readable prose only, not JSON, YAML, XML, code fences, or schema-like dumps.\n\nLoop stats:\n- Message count: ~w\n- Estimated tokens: ~w\n- ~w", [MessageCount, EstimatedTokens, ThresholdNote]),
+    PromptMessage = message{role: system, content: ReviewPrompt},
+    append([PromptMessage], HistoryMessages, LlmMessages),
+     ( llm(LlmMessages, Summary)
+     -> normalize_space(string(NormalizedSummary), Summary),
+         ( NormalizedSummary == "SKIP"
+         -> answer("{\"apply\":false}")
+         ;  Summary \= ""
+         -> format(string(ResultSpec), "DC_COMPACTOR_REWRITE_V1\napply=true\nkeep_last_messages=3\nsummary:\n~w", [Summary]),
+             answer(ResultSpec)
+         ;  answer("{\"apply\":false}")
+         )
+    ;  answer("{\"apply\":false}")
+    ).

@@ -5,15 +5,20 @@
  */
 export interface Parameter {
     name: string;
+    position?: number;
     description?: string;
     required?: boolean;
     default?: string;
 }
 export interface CommandInfo {
     name: string;
+    displayName?: string;
     path: string;
     description: string;
+    usage: string;
     parameters?: Parameter[];
+    triggerPhrases?: string[];
+    capabilities?: string[];
     tools?: string[];
     compiledAt?: string;
     model?: string;

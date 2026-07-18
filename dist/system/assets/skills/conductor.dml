@@ -1,0 +1,76 @@
+% ============================================================================
+% Conductor (full tool set)
+% ============================================================================
+%
+% Has all tools: skills, bash, web, skill creation, etc.
+% Runs autonomously to complete the task described in its instructions.
+%
+% ============================================================================
+
+% --- Tool predicates (full tool set) ---
+
+tool(run_skill(Slug, Args, Result), "Run an existing skill. Slug is the skill slug (e.g. 'deep-research'). Args is a JSON array of string arguments. Returns the skill result.") :-
+
+    exec(run_skill(slug: Slug, args: Args), Result).
+
+tool(consult_recipes(Query, Result), "Search the recipe library for workflow guidance and conventions. Query is a natural-language description. Returns matching recipe metadata and content.") :-
+
+    exec(consult_recipes(query: Query, max_results: 3), Result).
+
+tool(search_web(Query, Results), "Search the web for current information. Returns search results.") :-
+    exec(web_search(query: Query), Results).
+
+tool(search_news(Query, Results), "Search recent news articles. Returns news results.") :-
+    exec(news_search(query: Query), Results).
+
+tool(fetch_url(Url, Content), "Fetch the content of a web page by URL. Returns the page body as text.") :-
+    exec(url_fetch(url: Url), Result),
+    get_dict(body, Result, Content).
+
+tool(download_file(Url, FilePath, Size), "Download a file from a URL and save it to disk. Returns the file path and size.") :-
+    exec(url_fetch(url: Url, save_to: FilePath), Result),
+    get_dict(file_path, Result, FilePath),
+    get_dict(size, Result, Size).
+
+tool(run_bash(Command, Output), "Run a shell command in the workspace.") :-
+    exec(bash(command: Command), Output).
+
+tool(create_new_skill(Spec, Result), "Create and deploy a new reusable skill from a natural language spec.") :-
+    exec(create_skill(spec: Spec), Result).
+
+tool(ask_user(Prompt, Response), "Ask the user a clarifying question and get their response.") :-
+    exec(ask_user(prompt: Prompt), Result),
+    get_dict(user_response, Result, Response).
+
+tool(inform_user(Message, Result), "Send a status update or progress report to the user.") :-
+    output(Message),
+    Result = "ok".
+
+% --- Main entry point ---
+
+agent_main(UserMessage) :-
+    param(system_prompt, "Conductor system prompt", SysPrompt),
+    system(SysPrompt),
+    system("When using bash or similar tools, avoid dumping large outputs directly into the conversation context. Write large or uncertain outputs to temporary files first, then inspect them with focused commands such as wc, grep, head, tail, sed, or similar narrow follow-up commands so the context stays small and relevant."),
+    format(string(TaskPrompt), "Task instructions: ~w\n\nComplete this task autonomously using your tools.\n\nIf you can complete the task, do so and report the result.\nIf you are blocked by a task-specific, tool-specific, external-service, environment, permission, dependency, or data issue that is not an LLM/provider/API/transport failure, do not go silent. Diagnose the blocker and explain clearly to the user why the task could not be completed.\nIf the problem appears to be an LLM/provider/API/transport failure, do not invent a speculative diagnosis.\n\nStore the user-facing response in FinalAnswer.\nStore the COMPLETE updated task memory markdown in MemoryUpdate only if this execution produced useful technical insights such as what worked, what failed, useful commands, error resolutions, or reusable lessons from a non-LLM task failure.\nIf nothing technically noteworthy should be recorded, store exactly NONE in MemoryUpdate.\nDo not call update_memory or any separate memory tool from this main task.\n\nReturn a good final answer in all non-LLM cases, including when the task is blocked.", [UserMessage]),
+    task(TaskPrompt, string(FinalAnswer), string(MemoryUpdate)),
+    maybe_update_session_memory(MemoryUpdate),
+    answer(FinalAnswer).
+
+% Fallback for technical failures where the main task itself cannot run to completion
+agent_main(_) :-
+    answer("Task failed. Please try again.").
+
+% Memory update is best-effort and uses the already-produced MemoryUpdate output.
+maybe_update_session_memory("NONE") :-
+    !.
+maybe_update_session_memory("none") :-
+    !.
+maybe_update_session_memory("ok") :-
+    !.
+maybe_update_session_memory("") :-
+    !.
+maybe_update_session_memory(Content) :-
+    catch(exec(update_memory(content: Content), _), _, true),
+    !.
+maybe_update_session_memory(_).

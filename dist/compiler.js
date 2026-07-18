@@ -10,6 +10,7 @@ import { anthropic } from '@ai-sdk/anthropic';
 import { google } from '@ai-sdk/google';
 import { buildCompilationPrompt, buildUserMessage } from './compiler_prompt.js';
 import { loadProlog } from './prolog/loader.js';
+import { recordTokenUsage } from './system/runtime/token-usage.js';
 // =============================================================================
 // Prolog Validation
 // =============================================================================
@@ -88,8 +89,9 @@ export async function validateWithProlog(dml) {
         const delimiterCheck = checkBalancedDelimiters(dml);
         errors.push(...delimiterCheck.errors);
         // Check for common mistakes
-        const lintWarnings = lintDML(dml);
-        warnings.push(...lintWarnings);
+        const lintResult = lintDML(dml);
+        errors.push(...lintResult.errors);
+        warnings.push(...lintResult.warnings);
         // Cleanup temp file
         try {
             swipl.FS.unlink(tempPath);
@@ -156,21 +158,164 @@ function checkBalancedDelimiters(dml) {
     return { errors };
 }
 /**
- * Lint DML for common issues
+ * Extract all string literals from DML code (both single and double quoted)
+ */
+function extractStringLiterals(dml) {
+    const doubleQuoted = [];
+    const singleQuoted = [];
+    // Double-quoted strings
+    for (const m of dml.matchAll(/"((?:[^"\\]|\\.)*)"/g)) {
+        doubleQuoted.push(m[1]);
+    }
+    // Single-quoted atoms
+    for (const m of dml.matchAll(/'((?:[^'\\]|\\.)*)'/g)) {
+        singleQuoted.push(m[1]);
+    }
+    return { doubleQuoted, singleQuoted };
+}
+/**
+ * Strip comments and string contents for structural analysis
+ */
+function stripForAnalysis(dml) {
+    return dml
+        .replace(/%.*$/gm, '') // line comments
+        .replace(/\/\*[\s\S]*?\*\//g, '') // block comments
+        .replace(/"(?:[^"\\]|\\.)*"/g, '""') // double-quoted string contents
+        .replace(/'(?:[^'\\]|\\.)*'/g, "''"); // single-quoted atom contents
+}
+/**
+ * Lint DML for common issues — focused on string handling and structural errors.
+ * Returns errors (will crash at runtime) and warnings (likely wrong).
  */
 function lintDML(dml) {
+    const errors = [];
     const warnings = [];
-    // Check for format() passed directly to answer/output
+    const stripped = stripForAnalysis(dml);
+    const { doubleQuoted, singleQuoted } = extractStringLiterals(dml);
+    const allStrings = [...doubleQuoted, ...singleQuoted];
+    // ═══════════════════════════════════════════════════════════════════════════
+    // STRING HANDLING ERRORS — these WILL crash or produce wrong output
+    // ═══════════════════════════════════════════════════════════════════════════
+    // E1: format() passed directly to output() or answer()
+    //     format/3 binds its first arg, it does NOT return a value.
+    //     output(format("...", [...])) is always wrong.
+    if (/output\s*\(\s*format\s*\(/.test(dml)) {
+        errors.push('ERROR: format/3 does not return a value. `output(format(...))` will crash. Fix: format(string(S), "...", [...]), output(S).');
+    }
     if (/answer\s*\(\s*format\s*\(/.test(dml)) {
-        warnings.push('Avoid passing format() directly to answer/1 - use format/2 with a stream or format_to_atom/3');
+        errors.push('ERROR: format/3 does not return a value. `answer(format(...))` will crash. Fix: format(string(S), "...", [...]), answer(S).');
     }
-    // Check for mixing {Var} and format/3
+    // E2: ~Variable in task/prompt description strings (only ~w, ~d, ~a, ~s work with format)
+    //     task("Analyze ~Topic", R) does NOT interpolate. Use {Topic}.
+    for (const s of doubleQuoted) {
+        if (/~[A-Z][a-zA-Z0-9_]*/.test(s)) {
+            errors.push(`ERROR: ~Variable interpolation does not work in DML. Found in: "...${s.substring(0, 60)}...". Use {Variable} syntax instead (e.g. {Topic} not ~Topic).`);
+            break;
+        }
+    }
+    // E3: {Variable} inside format/3 template string
+    //     format(string(S), "Hello {Name}", []) — the {Name} won't be interpolated by format.
+    //     This is a style-mixing bug.
+    const formatCalls = dml.matchAll(/format\s*\(\s*(?:string|atom)\s*\([^)]*\)\s*,\s*"([^"]*)"/g);
+    for (const m of formatCalls) {
+        const tmpl = m[1];
+        if (/\{[A-Z][a-zA-Z0-9_]*\}/.test(tmpl)) {
+            errors.push(`ERROR: {Variable} inside format() template does nothing — format uses ~w placeholders. Found: "${tmpl.substring(0, 60)}". Use EITHER {Variable} in task() strings OR ~w in format() strings, never both in the same string.`);
+            break;
+        }
+    }
+    // E4: String concatenation with + operator
+    //     "hello" + "world" or Var + Var — Prolog's + is arithmetic only.
+    if (/"\s*\+\s*"/.test(dml) || /"\s*\+\s*[A-Z]/.test(dml) || /[A-Z][a-zA-Z_0-9]*\s*\+\s*"/.test(dml)) {
+        errors.push('ERROR: The + operator is arithmetic only in Prolog, not string concatenation. Use {Variable} interpolation in task() strings, or atom_concat/3, or format/3 for building strings.');
+    }
+    // E5: task() with non-string first arg — task(llm(...)) or task(prompt(...))
+    if (/task\s*\(\s*(?:llm|prompt)\s*\(/.test(stripped)) {
+        errors.push('ERROR: task() takes a plain string as first argument. task(llm(...)) and task(prompt(...)) are wrong. Use: task("description string", Var).');
+    }
+    // E6: Hallucinated predicates — these do NOT exist in DML runtime
+    //     But skip if user defines the predicate themselves (pred(...) :- ...).
+    const hallucinated = [
+        ['json_parse', 'json_parse/2 does not exist. Use task() to extract data from JSON via LLM.'],
+        ['http_get', 'http_get does not exist. Use exec(url_fetch(url: URL), R).'],
+        ['string_format', 'string_format does not exist. Use format(string(R), FormatStr, Args).'],
+        ['get_field', 'get_field does not exist. Use get_dict(Key, Dict, Value) — note: Key comes first.'],
+        ['string_join', 'string_join does not exist. Use atomic_list_concat(List, Sep, Atom).'],
+        ['string_lower', 'string_lower does not exist. Use downcase_atom(Atom, Lower).'],
+        ['string_trim', 'string_trim does not exist. Use normalize_space(string(Out), In).'],
+        ['contains', 'contains/2 does not exist. Use sub_atom/5 or sub_string/5.'],
+    ];
+    for (const [name, msg] of hallucinated) {
+        const usePattern = new RegExp(`(?<!\\w)${name}\\s*\\(`, 'g');
+        if (usePattern.test(stripped)) {
+            // Check if user defines this predicate (name(...) :- or name(...) .)
+            const defPattern = new RegExp(`^${name}\\s*\\([^)]*\\)\\s*(?::-|\\.)`, 'm');
+            if (!defPattern.test(stripped)) {
+                errors.push(`ERROR: ${msg}`);
+            }
+        }
+    }
+    // E7: url_fetch used as a bare predicate (not wrapped in exec)
+    //     url_fetch("url", R) is wrong. Must be exec(url_fetch(url: "..."), R).
+    if (/(?<!exec\s*\(\s*)url_fetch\s*\(\s*"/.test(stripped)) {
+        errors.push('ERROR: url_fetch is not a predicate. Must use exec/2 wrapper: exec(url_fetch(url: URL), R).');
+    }
+    // E8: curl/wget in bash command strings
+    for (const s of allStrings) {
+        if (/\b(?:curl|wget)\s/.test(s)) {
+            errors.push('ERROR: curl and wget are banned — the VM has no direct internet. Use exec(url_fetch(url: URL), R) to fetch web content.');
+            break;
+        }
+    }
+    // E9: writeln() used for user output — not a DML predicate
+    if (/(?<!\w)writeln\s*\(/.test(stripped)) {
+        // Check it's not inside an open/close file I/O block (write to stream is OK)
+        // Simple heuristic: if there's no open() call, writeln is definitely wrong
+        if (!/\bopen\s*\(/.test(stripped) || /writeln\s*\(\s*['"]/.test(dml)) {
+            errors.push('ERROR: writeln() is not a DML output predicate. Use output() for progress messages and answer() for final results.');
+        }
+    }
+    // ═══════════════════════════════════════════════════════════════════════════
+    // STRING HANDLING WARNINGS — likely wrong, should fix
+    // ═══════════════════════════════════════════════════════════════════════════
+    // W1: Mixing {Variable} interpolation and format/3 in the same clause
+    //     Not always wrong (different strings), but a code smell with small models
     const hasInterpolation = /\{[A-Z][a-zA-Z0-9_]*\}/.test(dml);
-    const hasFormat = /format\s*\(/.test(dml);
+    const hasFormat = /format\s*\(/.test(stripped);
     if (hasInterpolation && hasFormat) {
-        warnings.push('Consider using either {Variable} interpolation OR format/3, not both');
+        warnings.push('WARNING: Code mixes {Variable} interpolation and format/3. This is allowed but can confuse the runtime if mixed in the same string. Ensure {Variable} is only in task()/output()/answer() strings and ~w is only in format() strings.');
     }
-    return warnings;
+    // W2: No tool definitions — model probably wrote pure Prolog
+    if (!/\btool\s*\(/.test(dml)) {
+        warnings.push('WARNING: No tool() definitions found. This is fine for pure Prolog or direct exec()-only skills, but LLM-driven skills usually need tool()/3 wrappers for task() calls.');
+    }
+    // W3: No task() call — model probably wrote pure Prolog logic
+    if (!/\btask\s*\(/.test(stripped)) {
+        warnings.push('WARNING: No task() call found. This is fine for deterministic or simple skills. Skills that need open-ended reasoning, summarization, extraction, or classification should usually use task().');
+    }
+    // W4: No system() call — LLM has no instructions
+    if (!/\bsystem\s*\(/.test(stripped)) {
+        warnings.push('WARNING: No system() call found. Add system() when the skill uses task()/prompt() and the LLM needs instructions on how to use tools.');
+    }
+    // W5: No answer() call — skill completes silently
+    if (!/\banswer\s*\(/.test(stripped)) {
+        warnings.push('WARNING: No answer() call found. The skill will complete without returning a result to the user.');
+    }
+    // W6: No output() before task/exec — skill appears frozen
+    if (/\btask\s*\(/.test(stripped) && !/\boutput\s*\(/.test(stripped)) {
+        warnings.push('WARNING: No output() calls found. Add output() before long-running task() or exec() calls so the skill doesn\'t appear frozen.');
+    }
+    // W7: Single agent_main clause — no fallback
+    const mainMatches = stripped.match(/agent_main\s*[\(\.]/g);
+    if (mainMatches && mainMatches.length === 1) {
+        warnings.push('WARNING: Only one agent_main clause. Add a fallback clause with a static error message (no LLM calls) as required by Rule 7.');
+    }
+    // W8: Dict dot notation — Result.field etc.
+    //     Only check outside strings — match Var.key pattern in code
+    if (/[A-Z][a-zA-Z_0-9]*\.[a-z][a-z_]+(?!\s*\()/.test(stripped)) {
+        warnings.push('WARNING: Possible dict dot notation (e.g. Result.stdout). This may not work — use get_dict(Key, Dict, Value) instead.');
+    }
+    return { errors, warnings };
 }
 /**
  * Basic syntax validation (fallback when Prolog fails)
@@ -296,11 +441,20 @@ export async function analyzeDML(dml) {
 /**
  * Run LLM-based security audit
  */
-async function auditDML(dml, staticAnalysis, model, provider) {
-    const llm = getLanguageModel(provider, model);
+export async function runLLMSecurityAudit(dml, staticAnalysis, model, provider, baseUrl, usageByModel) {
+    const llm = getLanguageModel(provider, model, baseUrl);
     const prompt = `
 You are a senior security engineer auditing a DeepClause agent (DML).
 DML is a Prolog dialect for controlling LLMs.
+
+RUNTIME CONSTRAINTS:
+- Only recommend mitigations that are actually supported by the current DeepClause runtime or standard SWI-Prolog predicates used here.
+- Do NOT recommend nonexistent helpers or framework features such as sanitize_for_prompt/2, structured message envelopes for task()/prompt(), or built-in ask_user rate limiting.
+- task()/prompt() take a plain string as their first argument. If you suggest prompt-injection mitigations, prefer prompt() for fresh context, narrower prompt text, explicit quoting/fencing of untrusted data, and minimizing tainted interpolation into system()/user().
+- Positional agent_main arguments arrive as runtime strings by default. If you suggest type checks, prefer must_be(string, Arg) first, then explicit parsing/conversion.
+- Safe concrete suggestions in this codebase include must_be/2, simple string/atom guards, explicit empty-input checks, output-shape checks written in Prolog, atom_json_dict/3, get_dict/3, prompt(), and using gas limits or explicit counters for retry loops.
+- If an idea would require adding a new runtime helper or framework feature, label it clearly as "not currently built in" instead of presenting it as already available.
+- Do not invent warnings or remediation steps when the static findings do not support them.
 
 CODE:
 \`\`\`prolog
@@ -326,6 +480,10 @@ Provide a concise Markdown report with:
 - Critical Issues (if any)
 - Warnings
 - Suggestions for improvement
+
+Each suggestion must be either:
+- A supported mitigation that exists in this runtime, or
+- Explicitly labeled as requiring new runtime support.
 `;
     try {
         const result = await generateText({
@@ -333,11 +491,25 @@ Provide a concise Markdown report with:
             prompt,
             temperature: 0.1
         });
+        if (result.usage && usageByModel) {
+            recordTokenUsage(usageByModel, model, {
+                inputTokens: result.usage.inputTokens ?? 0,
+                outputTokens: result.usage.outputTokens ?? 0,
+                totalTokens: result.usage.totalTokens ?? 0,
+            });
+        }
         return result.text;
     }
     catch (e) {
         return `Audit failed: ${e}`;
     }
+}
+export async function analyzeAndAuditDML(dml, options) {
+    const analysis = await analyzeDML(dml);
+    if (options.audit) {
+        analysis.auditorReport = await runLLMSecurityAudit(dml, analysis, options.model, options.provider, options.baseUrl, options.usageByModel);
+    }
+    return analysis;
 }
 // =============================================================================
 // Main Compilation Function
@@ -351,35 +523,40 @@ export async function compileToDML(source, options) {
     const maxAttempts = options.maxAttempts ?? 3;
     const temperature = options.temperature ?? 0.3;
     const tools = options.tools || [];
+    const baseUrl = options.baseUrl;
     // Build the compilation prompt
     const systemPrompt = buildCompilationPrompt(tools);
     const userMessage = buildUserMessage(source);
     const attempts = [];
     let lastDml = "";
     let lastValidation = { valid: false, errors: [] };
+    const usageByModel = {};
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-            const dml = await generateDML(systemPrompt, userMessage, attempts, model, provider, temperature);
+            const dml = await generateDML(systemPrompt, userMessage, attempts, model, provider, temperature, baseUrl, usageByModel);
             lastDml = dml;
             const validation = await validateWithProlog(dml);
             lastValidation = validation;
             attempts.push({ dml, validation });
             if (validation.valid) {
                 // Run Static Analysis
-                const analysis = await analyzeDML(dml);
-                // Optionally Run Auditor
-                if (options.audit) {
-                    analysis.auditorReport = await auditDML(dml, analysis, model, provider);
-                }
+                const analysis = await analyzeAndAuditDML(dml, {
+                    audit: options.audit,
+                    model,
+                    provider,
+                    baseUrl,
+                    usageByModel,
+                });
                 // Generate explanation
-                const explanation = await generateExplanation(dml, model, provider);
+                const explanation = await generateExplanation(dml, model, provider, baseUrl, usageByModel);
                 return {
                     dml,
                     tools: extractToolDependencies(dml),
                     explanation,
                     attempts: attempt,
                     valid: true,
-                    analysis
+                    analysis,
+                    usageByModel: Object.keys(usageByModel).length > 0 ? usageByModel : undefined,
                 };
             }
         }
@@ -391,12 +568,19 @@ export async function compileToDML(source, options) {
             });
         }
     }
+    const allErrors = new Set(lastValidation.errors);
+    for (const attempt of attempts) {
+        for (const err of attempt.validation.errors) {
+            allErrors.add(err);
+        }
+    }
     return {
         dml: lastDml,
         tools: extractToolDependencies(lastDml),
         valid: false,
-        errors: lastValidation.errors,
-        attempts: maxAttempts
+        errors: Array.from(allErrors),
+        attempts: maxAttempts,
+        usageByModel: Object.keys(usageByModel).length > 0 ? usageByModel : undefined,
     };
 }
 // =============================================================================
@@ -405,8 +589,8 @@ export async function compileToDML(source, options) {
 /**
  * Generate DML using LLM (non-streaming)
  */
-async function generateDML(systemPrompt, userMessage, previousAttempts, model, provider, temperature) {
-    const llm = getLanguageModel(provider, model);
+async function generateDML(systemPrompt, userMessage, previousAttempts, model, provider, temperature, baseUrl, usageByModel) {
+    const llm = getLanguageModel(provider, model, baseUrl);
     // Build messages including previous attempts for self-correction
     const messages = buildMessages(systemPrompt, userMessage, previousAttempts);
     const result = await generateText({
@@ -415,6 +599,13 @@ async function generateDML(systemPrompt, userMessage, previousAttempts, model, p
         temperature: temperature ?? 0.3,
         maxOutputTokens: 8192
     });
+    if (result.usage && usageByModel) {
+        recordTokenUsage(usageByModel, model, {
+            inputTokens: result.usage.inputTokens ?? 0,
+            outputTokens: result.usage.outputTokens ?? 0,
+            totalTokens: result.usage.totalTokens ?? 0,
+        });
+    }
     return cleanDMLResponse(result.text);
 }
 /**
@@ -447,8 +638,8 @@ function buildMessages(systemPrompt, userMessage, previousAttempts) {
 /**
  * Generate a brief explanation of the compiled DML
  */
-async function generateExplanation(dml, model, provider) {
-    const llm = getLanguageModel(provider, model);
+async function generateExplanation(dml, model, provider, baseUrl, usageByModel) {
+    const llm = getLanguageModel(provider, model, baseUrl);
     try {
         const result = await generateText({
             model: llm,
@@ -457,6 +648,13 @@ async function generateExplanation(dml, model, provider) {
             temperature: 0.3,
             maxOutputTokens: 256
         });
+        if (result.usage && usageByModel) {
+            recordTokenUsage(usageByModel, model, {
+                inputTokens: result.usage.inputTokens ?? 0,
+                outputTokens: result.usage.outputTokens ?? 0,
+                totalTokens: result.usage.totalTokens ?? 0,
+            });
+        }
         return result.text.trim();
     }
     catch {
@@ -478,15 +676,35 @@ function cleanDMLResponse(text) {
 /**
  * Get the appropriate language model instance
  */
-function getLanguageModel(provider, model) {
+function getLanguageModel(provider, model, baseUrl) {
+    // If a custom baseUrl is provided (e.g. a proxy), route all providers through it
+    if (baseUrl) {
+        const proxy = createOpenAI({
+            baseURL: baseUrl,
+            apiKey: process.env.OPENAI_API_KEY || process.env.OPENROUTER_API_KEY || 'proxy',
+        });
+        return proxy.chat(model);
+    }
     switch (provider) {
         case 'openai':
+            if (!process.env.OPENAI_API_KEY) {
+                throw new Error('Missing OPENAI_API_KEY environment variable');
+            }
             return openai(model);
         case 'anthropic':
+            if (!process.env.ANTHROPIC_API_KEY) {
+                throw new Error('Missing ANTHROPIC_API_KEY environment variable');
+            }
             return anthropic(model);
         case 'google':
+            if (!process.env.GOOGLE_GENERATIVE_AI_API_KEY) {
+                throw new Error('Missing GOOGLE_GENERATIVE_AI_API_KEY environment variable');
+            }
             return google(model);
         case 'openrouter': {
+            if (!process.env.OPENROUTER_API_KEY) {
+                throw new Error('Missing OPENROUTER_API_KEY environment variable');
+            }
             const openrouter = createOpenAI({
                 baseURL: 'https://openrouter.ai/api/v1',
                 apiKey: process.env.OPENROUTER_API_KEY
@@ -526,13 +744,11 @@ export function extractParameters(dml) {
         .map(arg => arg.trim())
         .filter(arg => arg.length > 0);
     return args
-        .map((arg) => ({
+        .map((arg, index) => ({
         name: arg.replace(/([A-Z])/g, (_m, c, i) => (i > 0 ? '_' : '') + c.toLowerCase()).replace(/^_/, ''),
-        position: 0,
+        position: index,
         required: true
-    }))
-        .sort((a, b) => a.name.localeCompare(b.name))
-        .map((param, index) => ({ ...param, position: index }));
+    }));
 }
 /**
  * Extract description from markdown
