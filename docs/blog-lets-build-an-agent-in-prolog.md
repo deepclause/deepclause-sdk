@@ -62,9 +62,9 @@ agent_main :-
 
 A few things to unpack:
 
-**`tool/2`** makes a predicate visible to the LLM as a callable function. When the model decides it needs user input during a `task()`, it calls `ask` — DML routes that to the `exec/2` call under the hood, which invokes the registered `ask_user` external tool. The response flows back into the Prolog variable.
+**`tool/2`** makes a predicate visible to the LLM as a callable function. When we tell the model to "ask the user" in a `task()`, it can call our `ask` tool — DML routes that to the `exec/2` call under the hood, which invokes the registered `ask_user` external tool. The response flows back into the Prolog variable. The key insight: tools defined with `tool/2` are *available to the LLM during any `task()` call*. The model decides when to use them.
 
-**`task/2`** (with two arguments) is where DML gets interesting. The second argument is an *output variable*. The LLM's response is parsed and bound to `Target`. You reference the variable name *in the prompt itself* — `"Store their response in Target"` — and the runtime extracts it. This is how data flows between steps: not through callbacks or shared mutable state, but through Prolog unification.
+**`task/2`** (with two arguments) is where DML gets interesting. The second argument is an *output variable*. We instruct the model to "ask the user" and "store their response in Target" — the LLM calls the `ask` tool, gets the user's answer, and the runtime binds it to `Target`. You reference the variable name *in the prompt itself*, and the runtime extracts it. This is how data flows between steps: not through callbacks or shared mutable state, but through Prolog unification.
 
 **`output/1`** emits progress to the caller without ending execution. Unlike `answer/1`, it doesn't commit — the program keeps running.
 
@@ -207,7 +207,8 @@ agent_main :-
     system("You are a senior security researcher.
             Be precise about vulnerability counts."),
 
-    task("Ask the user which directory to audit.",
+    task("Ask the user which directory to audit
+          using the ask tool. Store their answer in Target.",
          Target),
 
     output("Scanning..."),
