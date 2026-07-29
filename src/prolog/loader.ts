@@ -29,10 +29,19 @@ interface FSFilesystems {
   MEMFS: unknown;
 }
 
+interface SWIPLFileSystem {
+  filesystems: FSFilesystems;
+  mount(type: unknown, options: { root: string }, mountpoint: string): void;
+  unmount(mountpoint: string): void;
+  mkdir(path: string): void;
+  writeFile(path: string, data: string): void;
+  unlink(path: string): void;
+}
+
 // Type definition for SWI-Prolog WASM module
 export interface SWIPLModule {
   prolog: Prolog;
-  FS: typeof FS & { filesystems: FSFilesystems };
+  FS: SWIPLFileSystem;
 }
 
 let swiplInstance: SWIPLModule | null = null;
