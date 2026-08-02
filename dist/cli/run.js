@@ -5,61 +5,12 @@
  */
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import * as readline from 'readline';
-import { createDeepClause } from '../sdk.js';
-import { loadConfig } from './config.js';
-import { getAgentVMTools } from './tools.js';
-import { webSearch, newsSearch } from './search.js';
+import { applyResolvedModelConfig, buildModelOverride, getToolsDir, loadConfig, resolveModelSlot, } from './config.js';
+import { promptUser } from './interactive.js';
 import { compilePrompt } from './compile.js';
-// Dynamic import for AgentVM (ESM module)
-let AgentVMClass = null;
-let agentVMInstance = null;
-async function getAgentVM(workspacePath, network) {
-    if (!AgentVMClass) {
-        const mod = await import('deepclause-agentvm');
-        AgentVMClass = mod.AgentVM;
-    }
-    if (!agentVMInstance) {
-        agentVMInstance = new AgentVMClass({
-            network,
-            mounts: { '/workspace': workspacePath }
-        });
-        await agentVMInstance.start();
-        // Set initial working directory to the workspace mount point
-        await agentVMInstance.exec('cd /workspace');
-    }
-    return agentVMInstance;
-}
-async function stopAgentVM() {
-    if (agentVMInstance) {
-        await agentVMInstance.stop();
-        agentVMInstance = null;
-    }
-}
-/**
- * Prompt the user for input from stdin
- */
-function promptUser(prompt) {
-    console.error(`[CLI] promptUser called with prompt length: ${prompt?.length}`);
-    return new Promise((resolve) => {
-        const rl = readline.createInterface({
-            input: process.stdin,
-            output: process.stdout,
-        });
-        // Print the prompt with a visual indicator
-        console.log('\n' + '─'.repeat(60));
-        console.log('📝 USER INPUT REQUIRED:');
-        console.log('─'.repeat(60));
-        console.log(prompt);
-        console.log('─'.repeat(60));
-        rl.question('Your response: ', (answer) => {
-            rl.close();
-            console.log('─'.repeat(60) + '\n');
-            console.error(`[CLI] promptUser resolving with: "${answer}"`);
-            resolve(answer);
-        });
-    });
-}
+import { executeDml } from '../system/runtime/dml-executor.js';
+import { buildDmlParams } from '../system/runtime/dml-params.js';
+import { verifyRuntimeToolsAvailable } from '../system/runtime/runtime-tools.js';
 // =============================================================================
 // Main Run Function
 // =============================================================================
@@ -67,8 +18,7 @@ function promptUser(prompt) {
  * Execute a compiled DML program or generate and run DML from a prompt
  */
 export async function run(file, args, options = {}) {
-    // Config is always loaded from current working directory
-    const configRoot = process.cwd();
+    const configRoot = path.resolve(options.configRoot ?? process.cwd());
     const config = await loadConfig(configRoot);
     let dmlCode;
     let meta = null;
@@ -77,13 +27,19 @@ export async function run(file, args, options = {}) {
         if (options.verbose) {
             console.log(`[CLI] One-shot mode: generating DML from prompt...`);
         }
+        const modelOverride = buildModelOverride(options.model, options.provider);
         const compileResult = await compilePrompt(options.prompt, {
-            model: options.model || config.model,
-            provider: options.provider || config.provider,
+            model: modelOverride,
             temperature: options.temperature,
-            verbose: options.verbose
+            verbose: options.verbose,
+            sandbox: options.sandbox,
+            audit: options.audit,
         });
         dmlCode = compileResult.dml;
+        const compileSelection = resolveModelSlot(config, 'compile', {
+            modelId: modelOverride,
+            temperature: options.temperature,
+        });
         if (options.verbose) {
             console.log('\n--- Final Validated DML ---');
             console.log(dmlCode);
@@ -95,8 +51,8 @@ export async function run(file, args, options = {}) {
             source: 'oneshot',
             sourceHash: '',
             compiledAt: new Date().toISOString(),
-            model: options.model || config.model,
-            provider: options.provider || config.provider,
+            model: compileSelection.model,
+            provider: compileSelection.provider,
             description: options.prompt,
             parameters: [],
             tools: compileResult.tools,
@@ -107,12 +63,12 @@ export async function run(file, args, options = {}) {
         if (!file) {
             throw new Error('Either a DML file or a --prompt must be provided');
         }
-        absolutePath = path.resolve(file);
+        absolutePath = await resolveDmlPath(file, configRoot);
         // Load DML file
         try {
             dmlCode = await fs.readFile(absolutePath, 'utf-8');
         }
-        catch (error) {
+        catch {
             throw new Error(`Failed to read DML file: ${absolutePath}`);
         }
         // Try to load meta file
@@ -125,309 +81,106 @@ export async function run(file, args, options = {}) {
             // Meta file is optional
         }
     }
-    const model = options.model || config.model;
-    const provider = options.provider || config.provider;
+    const runSelection = resolveModelSlot(config, 'run', {
+        modelId: buildModelOverride(options.model, options.provider),
+        temperature: options.temperature,
+    });
+    applyResolvedModelConfig(runSelection);
     // Resolve workspace path
     const workspacePath = options.workspace
-        ? path.resolve(options.workspace)
-        : path.resolve(config.workspace || './workspace');
+        ? path.resolve(configRoot, options.workspace)
+        : path.resolve(configRoot, config.workspace || './workspace');
     // Ensure workspace exists
     await fs.mkdir(workspacePath, { recursive: true });
     // Dry run mode - show what would be executed
     if (options.dryRun) {
-        const params = buildParams(args, options.params, meta);
+        const params = buildDmlParams(args, options.params, meta);
         return {
             output: [],
             dryRun: true,
-            wouldExecute: formatDryRun(absolutePath || 'oneshot', meta, params, model, provider, workspacePath)
+            wouldExecute: formatDryRun(absolutePath || 'oneshot', meta, params, runSelection.id, workspacePath)
         };
     }
     // Verify required tools are available
     if (meta?.tools && meta.tools.length > 0) {
-        const toolCheck = await verifyToolsAvailable(config, meta.tools);
+        const toolCheck = verifyRuntimeToolsAvailable(config, meta.tools);
         if (!toolCheck.available) {
             throw new Error(`Missing required tools: ${toolCheck.missing.join(', ')}. ` +
                 `Configure MCP servers or check tool names.`);
         }
     }
     // Build params from args and options
-    const params = buildParams(args, options.params, meta);
-    // Create SDK instance
-    const sdk = await createDeepClause({
-        model,
-        provider,
+    const params = buildDmlParams(args, options.params, meta);
+    const currentSkillSlug = absolutePath ? resolveCatalogSkillSlug(configRoot, absolutePath) : undefined;
+    const result = await executeDml({
+        dmlCode,
+        config,
+        workspaceRoot: configRoot,
+        workspacePath,
+        selection: runSelection,
+        args,
+        params,
+        gasLimit: options.gasLimit,
+        stream: options.stream,
         trace: !!options.trace,
-        streaming: options.stream,
-        debug: options.verbose,
-        maxTokens: 65536,
-        temperature: options.temperature ?? 0.0
+        verbose: options.verbose,
+        headless: options.headless,
+        sandbox: options.sandbox,
+        signal: options.signal,
+        toolAbortSignalRef: options.toolAbortSignalRef,
+        onEvent: options.onEvent,
+        skillCatalog: {
+            workspaceRoot: configRoot,
+            currentSkillSlug,
+            onChildEvent: options.onChildEvent,
+        },
+        onUserInput: options.onUserInput ?? (options.headless
+            ? async () => ''
+            : promptUser),
     });
-    // Register tools from MCP servers and AgentVM
-    await registerTools(sdk, config, workspacePath, options.verbose);
-    // Execute DML
-    const result = {
-        output: [],
-        events: []
+    if (options.trace && result.trace) {
+        const tracePath = path.resolve(options.trace);
+        await fs.writeFile(tracePath, JSON.stringify(result.trace, null, 2) + '\n');
+        if (options.verbose) {
+            console.log(`Trace saved to: ${tracePath}`);
+        }
+    }
+    const runResult = {
+        output: result.output,
+        answer: result.answer,
+        error: result.error,
+        trace: result.trace,
+        events: result.events,
+        usageByModel: result.usageByModel,
     };
-    let finished = false;
+    return runResult;
+}
+async function resolveDmlPath(file, configRoot) {
+    const candidate = path.resolve(configRoot, file);
+    if (await fileExists(candidate)) {
+        return candidate;
+    }
+    if (!candidate.endsWith('.dml') && await fileExists(`${candidate}.dml`)) {
+        return `${candidate}.dml`;
+    }
+    return candidate;
+}
+function resolveCatalogSkillSlug(configRoot, absolutePath) {
+    const toolsDir = path.resolve(getToolsDir(configRoot));
+    const fileDir = path.dirname(path.resolve(absolutePath));
+    if (fileDir !== toolsDir) {
+        return undefined;
+    }
+    return path.basename(absolutePath, '.dml');
+}
+async function fileExists(filePath) {
     try {
-        for await (const event of sdk.runDML(dmlCode, {
-            params,
-            args,
-            workspacePath,
-            gasLimit: options.gasLimit,
-            // Handle user input requests from ask_user tool
-            onUserInput: options.headless
-                ? async () => '' // In headless mode, return empty string
-                : promptUser
-        })) {
-            if (finished)
-                break;
-            result.events?.push(event);
-            switch (event.type) {
-                case 'output':
-                    if (event.content) {
-                        result.output.push(event.content);
-                        if (!options.headless) {
-                            console.log(event.content);
-                        }
-                    }
-                    break;
-                case 'stream':
-                    // Real-time streaming of LLM responses
-                    if (options.stream && !options.headless && event.content) {
-                        process.stdout.write(event.content);
-                    }
-                    // Add newline when stream chunk is done
-                    if (options.stream && !options.headless && event.done) {
-                        process.stdout.write('\n');
-                    }
-                    break;
-                case 'log':
-                    if (options.verbose && event.content && !options.headless) {
-                        console.log(`[log] ${event.content}`);
-                    }
-                    break;
-                case 'tool_call':
-                    // Show tool calls in shortened form (always, unless headless)
-                    if (!options.headless && event.toolName) {
-                        // Format args for display - truncate long values
-                        const formatArgs = (args) => {
-                            if (!args)
-                                return '';
-                            const parts = [];
-                            for (const [key, value] of Object.entries(args)) {
-                                let strVal = typeof value === 'string' ? value : JSON.stringify(value);
-                                if (strVal.length > 50) {
-                                    strVal = strVal.substring(0, 47) + '...';
-                                }
-                                parts.push(`${key}=${strVal}`);
-                            }
-                            return parts.join(', ');
-                        };
-                        console.log(`  🔧 ${event.toolName}(${formatArgs(event.toolArgs)})`);
-                    }
-                    break;
-                case 'answer':
-                    result.answer = event.content;
-                    break;
-                case 'error':
-                    result.error = event.content;
-                    if (event.trace) {
-                        result.trace = event.trace;
-                    }
-                    finished = true;
-                    break;
-                case 'finished':
-                    if (event.trace) {
-                        result.trace = event.trace;
-                    }
-                    // Mark as finished to break out of the loop
-                    finished = true;
-                    break;
-                case 'input_required':
-                    // For CLI, we'd need to handle stdin - for now just skip
-                    if (options.verbose) {
-                        console.log(`[input_required] ${event.prompt}`);
-                    }
-                    break;
-            }
-        }
-        // Save trace if requested
-        if (options.trace && result.trace) {
-            const tracePath = path.resolve(options.trace);
-            await fs.writeFile(tracePath, JSON.stringify(result.trace, null, 2) + '\n');
-            if (options.verbose) {
-                console.log(`Trace saved to: ${tracePath}`);
-            }
-        }
-        return result;
-    }
-    finally {
-        // Clean up AgentVM if it was started
-        await stopAgentVM();
-        await sdk.dispose();
-    }
-}
-// =============================================================================
-// Parameter Building
-// =============================================================================
-/**
- * Build params dict from positional args, named params, and meta info
- */
-function buildParams(args, namedParams, meta) {
-    const params = {};
-    // Always store raw args for fallback (use 'args' not '_args' - underscore is special in Prolog)
-    if (args.length > 0) {
-        params['args'] = args.map(parseArgValue);
-    }
-    // If we have meta info with parameters, map positional args by name
-    if (meta?.parameters && args.length > 0) {
-        // Parameters are sorted by position in meta
-        const sortedParams = [...meta.parameters].sort((a, b) => a.position - b.position);
-        for (let i = 0; i < args.length && i < sortedParams.length; i++) {
-            const param = sortedParams[i];
-            params[param.name] = parseArgValue(args[i]);
-        }
-        // If more args than meta params, add them with generic names
-        for (let i = sortedParams.length; i < args.length; i++) {
-            params[`arg${i + 1}`] = parseArgValue(args[i]);
-        }
-    }
-    // Add named params (override positional)
-    if (namedParams) {
-        for (const [key, value] of Object.entries(namedParams)) {
-            params[key] = parseArgValue(value);
-        }
-    }
-    return params;
-}
-/**
- * Parse argument value - try to convert to appropriate type
- */
-function parseArgValue(value) {
-    // Try number
-    const num = Number(value);
-    if (!isNaN(num) && value.trim() !== '') {
-        return num;
-    }
-    // Try boolean
-    if (value.toLowerCase() === 'true')
+        await fs.access(filePath);
         return true;
-    if (value.toLowerCase() === 'false')
+    }
+    catch {
         return false;
-    // Try JSON
-    if ((value.startsWith('{') && value.endsWith('}')) ||
-        (value.startsWith('[') && value.endsWith(']'))) {
-        try {
-            return JSON.parse(value);
-        }
-        catch {
-            // Not valid JSON, return as string
-        }
     }
-    return value;
-}
-// =============================================================================
-// Tool Registration
-// =============================================================================
-/**
- * Register tools from MCP servers and AgentVM
- */
-async function registerTools(sdk, config, workspacePath, verbose) {
-    // Register AgentVM tools (built-in)
-    const agentVmTools = getAgentVMTools();
-    for (const tool of agentVmTools) {
-        sdk.registerTool(tool.name, createToolDefinition(tool, config, workspacePath));
-        if (verbose) {
-            console.log(`[tool] Registered: ${tool.name} (agentvm)`);
-        }
-    }
-    // TODO: In future, register MCP server tools here
-    // This would involve:
-    // 1. Starting MCP servers from config
-    // 2. Querying their tool lists
-    // 3. Creating proxy tool definitions
-}
-/**
- * Create a ToolDefinition from our Tool interface
- */
-function createToolDefinition(tool, config, workspacePath) {
-    const defaultSchema = {
-        type: 'object',
-        properties: {},
-        required: []
-    };
-    return {
-        description: tool.description,
-        parameters: tool.schema || defaultSchema,
-        execute: async (args) => {
-            // Handle built-in tools
-            switch (tool.name) {
-                case 'web_search':
-                    return await webSearch({
-                        query: String(args.query || args.arg1 || ''),
-                        count: typeof args.count === 'number' ? args.count : 10,
-                        freshness: typeof args.freshness === 'string' ? args.freshness : undefined,
-                    });
-                case 'news_search':
-                    return await newsSearch({
-                        query: String(args.query || args.arg1 || ''),
-                        count: typeof args.count === 'number' ? args.count : 10,
-                        freshness: typeof args.freshness === 'string' ? args.freshness : undefined,
-                    });
-                case 'vm_exec': {
-                    const command = String(args.command || args.arg1 || '');
-                    if (!command) {
-                        return { stdout: '', stderr: 'Error: No command provided', exitCode: 1 };
-                    }
-                    const networkEnabled = config.agentvm?.network ?? false;
-                    const vm = await getAgentVM(workspacePath, networkEnabled);
-                    //console.log(`[CLI] vm_exec executing command: ${command}`);
-                    const result = await vm.exec(command);
-                    //console.log(`[CLI] vm_exec completed with: ${result}`);
-                    return {
-                        stdout: result.stdout,
-                        stderr: result.stderr,
-                        exitCode: result.exitCode
-                    };
-                }
-                default:
-                    throw new Error(`Tool ${tool.name} has no implementation`);
-            }
-        }
-    };
-}
-/**
- * Verify that all required tools are available
- */
-async function verifyToolsAvailable(config, toolNames) {
-    // Internal tools are automatically provided by the agent - don't require external config
-    const internalTools = ['ask_user', 'finish', 'set_result', 'store'];
-    const agentVmToolNames = getAgentVMTools().map(t => t.name);
-    const missing = [];
-    for (const name of toolNames) {
-        // Skip internal tools - they're auto-provided by the agent
-        if (internalTools.includes(name)) {
-            continue;
-        }
-        if (!agentVmToolNames.includes(name)) {
-            // Tool not in AgentVM, would need MCP server
-            // For now, assume MCP tools are available if configured
-            // TODO: Actually check MCP servers
-            missing.push(name);
-        }
-    }
-    // If there are MCP servers configured, assume missing tools might be there
-    // In a full implementation, we'd actually query the servers
-    if (config.mcp?.servers && Object.keys(config.mcp.servers).length > 0) {
-        // Assume MCP servers might have the missing tools
-        return { available: true, missing: [] };
-    }
-    return {
-        available: missing.length === 0,
-        missing
-    };
 }
 // =============================================================================
 // Formatting
@@ -435,14 +188,14 @@ async function verifyToolsAvailable(config, toolNames) {
 /**
  * Format dry run output
  */
-function formatDryRun(dmlPath, meta, params, model, provider, workspacePath) {
+function formatDryRun(dmlPath, meta, params, modelId, workspacePath) {
     const lines = [
         '═══════════════════════════════════════════════════════════════',
         '  DRY RUN - Would execute the following:',
         '═══════════════════════════════════════════════════════════════',
         '',
         `  DML File:    ${dmlPath}`,
-        `  Model:       ${provider}/${model}`,
+        `  Model:       ${modelId}`,
         `  Workspace:   ${workspacePath}`,
         ''
     ];

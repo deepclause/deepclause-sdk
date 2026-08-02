@@ -1,9 +1,16 @@
 /**
  * DML Runner - Executes DML code using SWI-Prolog WASM
  */
+import * as fs from 'fs/promises';
+import * as path from 'path';
 import { mountWorkspace } from './prolog/loader.js';
 import { runAgentLoop } from './agent.js';
+import { executeCompactor, getCompactionBindings, resolveCompactionOptions, } from './compaction.js';
+import { buildToolCompletionEvent, buildToolFailureEvent, buildToolStartEvent, } from './system/runtime/shell-tool-events.js';
 import { checkToolPolicy } from './tools.js';
+import { generateLlmReply, sampleSingleToken } from './prolog/bridge.js';
+import { recordTokenUsage } from './system/runtime/token-usage.js';
+import { buildReasoningProviderOptions } from './system/config/model-database.js';
 /**
  * Convert swipl-wasm value to plain JavaScript value
  * Handles PrologString, PrologAtom, PrologList, etc.
@@ -52,6 +59,63 @@ function toJsValue(value) {
     }
     return value;
 }
+function detectProvider(model) {
+    const lower = model.toLowerCase();
+    if (lower.includes('gpt') || lower.includes('o1') || lower.includes('o3')) {
+        return 'openai';
+    }
+    if (lower.includes('claude')) {
+        return 'anthropic';
+    }
+    if (lower.includes('gemini') || lower.includes('palm')) {
+        return 'google';
+    }
+    return 'openrouter';
+}
+function createChildAbortController(parentSignal, timeoutMs) {
+    const controller = new AbortController();
+    const disposers = [];
+    if (parentSignal) {
+        if (parentSignal.aborted) {
+            controller.abort(parentSignal.reason);
+        }
+        else {
+            const onAbort = () => controller.abort(parentSignal.reason);
+            parentSignal.addEventListener('abort', onAbort, { once: true });
+            disposers.push(() => parentSignal.removeEventListener('abort', onAbort));
+        }
+    }
+    let timeout;
+    if (timeoutMs > 0) {
+        timeout = setTimeout(() => controller.abort(new Error(`Compactor timed out after ${timeoutMs}ms`)), timeoutMs);
+        disposers.push(() => clearTimeout(timeout));
+    }
+    return {
+        signal: controller.signal,
+        dispose: () => {
+            for (const dispose of disposers) {
+                dispose();
+            }
+        },
+    };
+}
+export function decodeAgentOutputVars(rawOutputVars) {
+    const normalized = toJsValue(rawOutputVars);
+    if (!Array.isArray(normalized)) {
+        return [];
+    }
+    return normalized.map((value) => {
+        if (typeof value === 'object'
+            && value !== null
+            && 'name' in value
+            && 'type' in value
+            && typeof value.name === 'string'
+            && typeof value.type === 'string') {
+            return value;
+        }
+        return String(value);
+    });
+}
 /**
  * Map Prolog types to JSON Schema types
  */
@@ -80,6 +144,7 @@ export class DMLRunner {
     engine = null;
     sessionId = '';
     currentMemory = [];
+    stepCounter = 0;
     constructor(swipl, options) {
         this.swipl = swipl;
         this.options = options;
@@ -109,8 +174,11 @@ export class DMLRunner {
                     return;
                 }
             }
-            // Memory is now managed internally by the MI via state threading
-            // No external initialization needed
+            // Seed the MI state so top-level DML can inspect initial messages via get_memory/1.
+            this.currentMemory = (options.initialMessages ?? []).map((message) => ({
+                role: message.role,
+                content: message.content,
+            }));
             // Build args and params
             const args = this.buildArgs(options);
             const params = this.buildParams(options);
@@ -130,7 +198,13 @@ export class DMLRunner {
             while (true) {
                 // Check for abort
                 if (options.signal?.aborted) {
-                    yield { type: 'error', content: 'Execution aborted' };
+                    const reason = options.signal.reason;
+                    const abortMessage = reason instanceof Error
+                        ? reason.message
+                        : typeof reason === 'string' && reason.trim().length > 0
+                            ? reason
+                            : 'Execution aborted';
+                    yield { type: 'error', content: abortMessage };
                     break;
                 }
                 // Step the engine
@@ -162,6 +236,12 @@ export class DMLRunner {
                     case 'request_exec':
                         // Execute external tool
                         yield* this.handleExec(step.payload, options);
+                        break;
+                    case 'request_sample_token':
+                        yield* this.handleSampleToken(step.payload, options);
+                        break;
+                    case 'request_llm':
+                        yield* this.handleLlm(step.payload, options);
                         break;
                     case 'wait_input':
                         // Request user input
@@ -250,6 +330,17 @@ export class DMLRunner {
         return `params{${entries}}`;
     }
     /**
+     * Quote a string as a Prolog atom if it contains non-atom characters.
+     * Valid unquoted atoms: start with lowercase letter, contain only [a-zA-Z0-9_]
+     */
+    quoteAtom(str) {
+        if (/^[a-z][a-zA-Z0-9_]*$/.test(str)) {
+            return str;
+        }
+        // Quote and escape internal single quotes
+        return `'${str.replace(/'/g, "''")}'`;
+    }
+    /**
      * Convert JS value to Prolog term string
      */
     toPrologTerm(value) {
@@ -272,7 +363,7 @@ export class DMLRunner {
         }
         if (value && typeof value === 'object') {
             const entries = Object.entries(value)
-                .map(([k, v]) => `${k}: ${this.toPrologTerm(v)}`)
+                .map(([k, v]) => `${this.quoteAtom(k)}: ${this.toPrologTerm(v)}`)
                 .join(', ');
             return `dict{${entries}}`;
         }
@@ -283,7 +374,8 @@ export class DMLRunner {
      */
     createEngine(memoryId, args, params) {
         try {
-            const result = this.query(`deepclause_mi:create_engine('${this.sessionId}', '${memoryId}', ${args}, ${params}, Engine)`);
+            const initialMemory = this.serializeMemoryMessages(this.currentMemory);
+            const result = this.query(`deepclause_mi:create_engine('${this.sessionId}', '${memoryId}', ${args}, ${params}, [${initialMemory}], Engine)`);
             if (result && result.Engine) {
                 this.engine = result.Engine;
                 return {};
@@ -322,180 +414,327 @@ export class DMLRunner {
      */
     async *handleAgentLoop(payload, _memoryId, // No longer used - memory comes from payload
     options) {
-        // Safely extract payload fields with proper conversion
         const rawPayload = payload;
         const taskDescription = String(toJsValue(rawPayload.taskDescription) ?? '');
-        // Ensure outputVars is an array of either strings or TypedVar objects
-        let outputVars = [];
-        const rawOutputVars = toJsValue(rawPayload.outputVars);
-        if (Array.isArray(rawOutputVars)) {
-            outputVars = rawOutputVars.map(v => {
-                const val = toJsValue(v);
-                if (typeof val === 'object' && val !== null && 'name' in val && 'type' in val) {
-                    return val;
-                }
-                return String(val);
-            });
-        }
-        // Parse userTools - now contains schema info as array of tool_info dicts
-        const userTools = [];
-        const rawUserTools = toJsValue(rawPayload.userTools);
-        if (process.env.DEBUG_RUNNER) {
-            console.log('[RUNNER] Raw userTools from Prolog:', JSON.stringify(rawUserTools, null, 2));
-        }
-        if (Array.isArray(rawUserTools)) {
-            for (const tool of rawUserTools) {
-                const toolObj = toJsValue(tool);
-                const toolInfo = this.parseUserToolInfo(toolObj);
-                if (toolInfo) {
-                    userTools.push(toolInfo);
+        const stepId = `step_${this.stepCounter++}`;
+        yield { type: 'task_activity', taskState: 'started', taskDescription, taskId: stepId };
+        let stepSucceeded = null;
+        try {
+            // Ensure outputVars is an array of either strings or TypedVar objects
+            const outputVars = decodeAgentOutputVars(rawPayload.outputVars);
+            // Parse userTools - now contains schema info as array of tool_info dicts
+            const userTools = [];
+            const rawUserTools = toJsValue(rawPayload.userTools);
+            if (process.env.DEBUG_RUNNER) {
+                console.log('[RUNNER] Raw userTools from Prolog:', JSON.stringify(rawUserTools, null, 2));
+            }
+            if (Array.isArray(rawUserTools)) {
+                for (const tool of rawUserTools) {
+                    const toolObj = toJsValue(tool);
+                    const toolInfo = this.parseUserToolInfo(toolObj);
+                    if (toolInfo) {
+                        userTools.push(toolInfo);
+                    }
                 }
             }
-        }
-        // Extract memory from payload (now passed via state threading)
-        const memory = this.extractMemoryFromPayload(rawPayload);
-        // Store current memory for getMemory() access
-        this.currentMemory = memory;
-        // Callback for tool output events
-        const onToolOutput = (text) => {
-            streamQueue.push({ type: 'output', content: text });
-            if (streamResolve) {
-                streamResolve();
-                streamResolve = null;
+            // Queue for streaming and internal runtime events
+            const streamQueue = [];
+            let streamResolve = null;
+            const emitRunnerEvent = (event) => {
+                streamQueue.push(event);
+                if (streamResolve) {
+                    streamResolve();
+                    streamResolve = null;
+                }
+            };
+            // Extract memory from payload (now passed via state threading)
+            const preparedMemory = this.extractMemoryFromPayload(rawPayload);
+            // Extract reasoning effort and recipe context (from with_reasoning/with_recipe scoping)
+            const reasoningEffort = String(toJsValue(rawPayload.reasoningEffort) ?? 'none');
+            const recipeContext = String(toJsValue(rawPayload.recipeContext) ?? '');
+            // Build provider options — merge reasoning effort if set
+            const baseProviderOptions = this.options.providerOptions ?? {};
+            let effectiveProviderOptions = baseProviderOptions;
+            if (reasoningEffort !== 'none' && this.options.reasoningType && this.options.reasoningType !== 'none') {
+                const reasoningOpts = buildReasoningProviderOptions(reasoningEffort, this.options.reasoningType, this.options.reasoningBudgetMap);
+                effectiveProviderOptions = { ...baseProviderOptions, ...reasoningOpts };
             }
-        };
-        // Augment registered tools with internal ask_user so DML tools can call exec(ask_user(...))
-        const augmentedTools = new Map(options.tools);
-        if (!augmentedTools.has('ask_user')) {
-            augmentedTools.set('ask_user', {
-                description: 'Ask the user for input or clarification',
-                parameters: {
-                    type: 'object',
-                    properties: {
-                        prompt: { type: 'string', description: 'The question or prompt to show the user' }
+            // Prepend recipe context as a system message if present
+            let effectiveMemory = preparedMemory;
+            if (recipeContext) {
+                effectiveMemory = [
+                    { role: 'system', content: `Recipe guidance:\n\n${recipeContext}` },
+                    ...preparedMemory,
+                ];
+            }
+            // Store current memory for getMemory() access
+            this.currentMemory = effectiveMemory;
+            const emitToolEvent = (event) => {
+                emitRunnerEvent(event);
+            };
+            // Callback for tool output events
+            const onToolOutput = (text) => {
+                emitToolEvent({ type: 'output', content: text });
+            };
+            // Augment registered tools with internal ask_user so DML tools can call exec(ask_user(...))
+            const augmentedTools = new Map(options.tools);
+            if (!augmentedTools.has('ask_user')) {
+                augmentedTools.set('ask_user', {
+                    description: 'Ask the user for input or clarification',
+                    parameters: {
+                        type: 'object',
+                        properties: {
+                            prompt: { type: 'string', description: 'The question or prompt to show the user' }
+                        },
+                        required: ['prompt']
                     },
-                    required: ['prompt']
-                },
-                execute: async (args) => {
-                    const argsObj = args;
-                    const prompt = (argsObj.prompt ?? argsObj.arg1 ?? Object.values(argsObj).find(v => typeof v === 'string'));
-                    if (!prompt) {
-                        return { error: 'No prompt provided to ask_user' };
-                    }
-                    try {
-                        const response = await options.onInputRequired(prompt);
-                        return { user_response: response };
-                    }
-                    catch (err) {
-                        return { error: String(err) };
-                    }
-                },
-            });
-        }
-        // Callback to emit tool call events
-        const emitToolCall = (toolName, args) => {
-            streamQueue.push({ type: 'tool_call', toolName, toolArgs: args });
-            if (streamResolve) {
-                streamResolve();
-                streamResolve = null;
+                    execute: async (args) => {
+                        const argsObj = args;
+                        const prompt = (argsObj.prompt ?? argsObj.arg1 ?? Object.values(argsObj).find(v => typeof v === 'string'));
+                        if (!prompt) {
+                            return { error: 'No prompt provided to ask_user' };
+                        }
+                        try {
+                            emitToolEvent({ type: 'input_required', prompt });
+                            const response = await options.onInputRequired(prompt);
+                            return { user_response: response };
+                        }
+                        catch (err) {
+                            return { error: String(err) };
+                        }
+                    },
+                });
             }
-        };
-        // Build available tools for agent - SIMPLIFIED: tools run in isolated engines
-        const availableTools = this.buildAgentTools(userTools, options.toolPolicy, 
-        // executeToolIsolated callback - runs tool in separate engine (no state sharing)
-        async (toolName, args) => {
-            return this.executeToolIsolated(toolName, args, augmentedTools, onToolOutput, [], emitToolCall);
-        });
-        // Queue for streaming events
-        const streamQueue = [];
-        let streamResolve = null;
-        // Run agent loop with streaming support
-        const resultPromise = runAgentLoop({
-            taskDescription,
-            outputVars,
-            memory,
-            tools: availableTools,
-            modelOptions: {
-                model: this.options.model,
-                provider: this.options.provider,
-                temperature: this.options.temperature,
-                maxOutputTokens: this.options.maxTokens,
-                baseUrl: this.options.baseUrl,
-            },
-            streaming: this.options.streaming,
-            debug: this.options.debug,
-            onOutput: (_text) => { },
-            onStream: (chunk, done) => {
-                streamQueue.push({ type: 'stream', content: chunk, done });
-                if (streamResolve) {
-                    streamResolve();
-                    streamResolve = null;
-                }
-            },
-            onToolCall: (toolName, args) => {
-                streamQueue.push({ type: 'tool_call', toolName, toolArgs: args });
-                if (streamResolve) {
-                    streamResolve();
-                    streamResolve = null;
-                }
-            },
-            onAskUser: options.onInputRequired,
-            signal: options.signal,
-        });
-        // Yield streaming events as they arrive
-        if (this.options.streaming) {
-            while (true) {
-                // Process any queued events
-                while (streamQueue.length > 0) {
-                    yield streamQueue.shift();
-                }
-                // Check if result is ready
-                const raceResult = await Promise.race([
-                    resultPromise.then(r => ({ type: 'done', result: r })),
-                    new Promise(resolve => {
-                        streamResolve = () => resolve({ type: 'stream' });
-                    }),
-                ]);
-                if (raceResult.type === 'done') {
-                    // Drain remaining queue
+            // Callback to emit tool call events
+            const emitToolCall = (toolName, args) => {
+                emitToolEvent({ type: 'tool_call', toolName, toolArgs: args });
+            };
+            // Build available tools for agent - SIMPLIFIED: tools run in isolated engines
+            const availableTools = this.buildAgentTools(userTools, options.toolPolicy, 
+            // executeToolIsolated callback - runs tool in separate engine (no state sharing)
+            async (toolName, args) => {
+                return this.executeToolIsolated(toolName, args, augmentedTools, onToolOutput, {
+                    workspacePath: options.workspacePath,
+                    signal: options.signal,
+                    compaction: options.compaction,
+                    toolPolicy: options.toolPolicy,
+                }, [], emitToolCall, emitToolEvent);
+            });
+            // Run agent loop with streaming support
+            const resultPromise = runAgentLoop({
+                taskDescription,
+                outputVars,
+                memory: effectiveMemory,
+                tools: availableTools,
+                workspacePath: options.workspacePath,
+                modelOptions: {
+                    model: this.options.model,
+                    provider: this.options.provider,
+                    temperature: this.options.temperature,
+                    maxOutputTokens: this.options.maxTokens,
+                    baseUrl: this.options.baseUrl,
+                    providerOptions: effectiveProviderOptions,
+                },
+                streaming: this.options.streaming,
+                debug: this.options.debug,
+                onOutput: (_text) => { },
+                onStream: (chunk, done) => {
+                    streamQueue.push({ type: 'stream', content: chunk, done });
+                    if (streamResolve) {
+                        streamResolve();
+                        streamResolve = null;
+                    }
+                },
+                onToolCall: (toolName, args) => {
+                    streamQueue.push({ type: 'tool_call', toolName, toolArgs: args });
+                    if (streamResolve) {
+                        streamResolve();
+                        streamResolve = null;
+                    }
+                },
+                onUsage: (usage) => {
+                    streamQueue.push({ type: 'usage', usage });
+                    if (streamResolve) {
+                        streamResolve();
+                        streamResolve = null;
+                    }
+                },
+                onBeforeModelCall: async (messages, lastInputTokens) => this.applyCompactionBindings({
+                    messages,
+                    lastInputTokens,
+                    scope: 'loop',
+                    trigger: 'before_model_call',
+                    options,
+                    executionContext: {
+                        workspacePath: options.workspacePath,
+                        signal: options.signal,
+                        compaction: options.compaction,
+                    },
+                    registeredTools: options.tools,
+                    toolPolicy: options.toolPolicy,
+                    emitEvent: emitRunnerEvent,
+                }),
+                onAskUser: options.onInputRequired,
+                signal: options.signal,
+            });
+            // Yield streaming events as they arrive
+            if (this.options.streaming) {
+                while (true) {
+                    // Process any queued events
                     while (streamQueue.length > 0) {
                         yield streamQueue.shift();
                     }
-                    // In streaming mode, output was already shown via onStream - don't repeat it
-                    // The outputs array is kept for memory/history purposes only
-                    // Update memory with full agent conversation
-                    this.currentMemory = raceResult.result.messages;
-                    // Post result back to Prolog
-                    this.postAgentResult(raceResult.result);
-                    return;
+                    // Check if result is ready
+                    const raceResult = await Promise.race([
+                        resultPromise.then(r => ({ type: 'done', result: r })),
+                        new Promise(resolve => {
+                            streamResolve = () => resolve({ type: 'stream' });
+                        }),
+                    ]);
+                    if (raceResult.type === 'done') {
+                        // Drain remaining queue
+                        while (streamQueue.length > 0) {
+                            yield streamQueue.shift();
+                        }
+                        // In streaming mode, output was already shown via onStream - don't repeat it
+                        // The outputs array is kept for memory/history purposes only
+                        const finalizedMemory = [
+                            ...preparedMemory.filter((message) => message.role === 'system'),
+                            ...raceResult.result.messages,
+                        ];
+                        while (streamQueue.length > 0) {
+                            yield streamQueue.shift();
+                        }
+                        // Update memory with full agent conversation
+                        this.currentMemory = finalizedMemory;
+                        // Post result back to Prolog
+                        stepSucceeded = raceResult.result.success;
+                        this.postAgentResult(raceResult.result, finalizedMemory);
+                        return;
+                    }
+                    // Otherwise continue loop to yield queued stream events
                 }
-                // Otherwise continue loop to yield queued stream events
+            }
+            else {
+                // Non-streaming mode - wait for completion
+                const result = await resultPromise;
+                // Drain tool_call events from queue (they were queued during agent execution)
+                if (process.env.DEBUG_QUEUE) {
+                    console.log('[RUNNER] Non-streaming: streamQueue length before drain:', streamQueue.length);
+                    if (streamQueue.length > 0) {
+                        console.log('[RUNNER] streamQueue contents:', streamQueue.map(e => `${e.type}:${e.content?.substring(0, 40)}`));
+                    }
+                }
+                while (streamQueue.length > 0) {
+                    yield streamQueue.shift();
+                }
+                if (process.env.DEBUG_QUEUE) {
+                    console.log('[RUNNER] Non-streaming agent result.outputs:', result.outputs);
+                }
+                // Stream any output from the agent
+                for (const output of result.outputs) {
+                    yield { type: 'output', content: output };
+                }
+                const finalizedMemory = [
+                    ...preparedMemory.filter((message) => message.role === 'system'),
+                    ...result.messages,
+                ];
+                while (streamQueue.length > 0) {
+                    yield streamQueue.shift();
+                }
+                // Update memory with full agent conversation
+                this.currentMemory = finalizedMemory;
+                // Post result back to Prolog
+                stepSucceeded = result.success;
+                this.postAgentResult(result, finalizedMemory);
             }
         }
-        else {
-            // Non-streaming mode - wait for completion
-            const result = await resultPromise;
-            // Drain tool_call events from queue (they were queued during agent execution)
-            if (process.env.DEBUG_QUEUE) {
-                console.log('[RUNNER] Non-streaming: streamQueue length before drain:', streamQueue.length);
-                if (streamQueue.length > 0) {
-                    console.log('[RUNNER] streamQueue contents:', streamQueue.map(e => `${e.type}:${e.content?.substring(0, 40)}`));
-                }
+        finally {
+            yield {
+                type: 'task_activity',
+                taskState: stepSucceeded === true ? 'completed' : 'failed',
+                taskId: stepId,
+            };
+        }
+    }
+    /**
+     * Handle one-token sampling request (sample_token/2-3)
+     */
+    async *handleSampleToken(payload, options) {
+        const data = payload;
+        const prompt = String(toJsValue(data.prompt) ?? '');
+        const rawAllowedTokens = toJsValue(data.allowedTokens);
+        const allowedTokens = Array.isArray(rawAllowedTokens)
+            ? rawAllowedTokens.map((token) => String(token))
+            : [];
+        const stepId = `step_${this.stepCounter++}`;
+        const taskDescription = prompt || 'sample_token';
+        yield { type: 'task_activity', taskState: 'started', taskDescription, taskId: stepId };
+        let succeeded = false;
+        try {
+            const { token, usage } = await sampleSingleToken({
+                prompt,
+                allowedTokens,
+                modelOptions: {
+                    provider: this.options.provider,
+                    model: this.options.model,
+                    temperature: this.options.temperature,
+                    baseUrl: this.options.baseUrl,
+                    providerOptions: this.options.providerOptions,
+                },
+                signal: options.signal,
+            });
+            succeeded = true;
+            this.postSampleTokenResult({ success: true, token });
+            if (usage) {
+                yield { type: 'usage', usage };
             }
-            while (streamQueue.length > 0) {
-                yield streamQueue.shift();
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.postSampleTokenResult({ success: false, error: message });
+            yield { type: 'log', content: `sample_token failed: ${message}` };
+        }
+        finally {
+            yield { type: 'task_activity', taskState: succeeded ? 'completed' : 'failed', taskId: stepId };
+        }
+    }
+    /**
+     * Handle direct one-shot LLM request (llm/2)
+     */
+    async *handleLlm(payload, options) {
+        const data = payload;
+        const messages = this.extractMessagesFromValue(data.messages);
+        const stepId = `step_${this.stepCounter++}`;
+        const taskDescription = summarizeLlmMessages(messages);
+        yield { type: 'task_activity', taskState: 'started', taskDescription, taskId: stepId };
+        let succeeded = false;
+        try {
+            const { text, usage } = await generateLlmReply({
+                messages,
+                modelOptions: {
+                    provider: this.options.provider,
+                    model: this.options.model,
+                    temperature: this.options.temperature,
+                    maxOutputTokens: this.options.maxTokens,
+                    baseUrl: this.options.baseUrl,
+                    providerOptions: this.options.providerOptions,
+                },
+                signal: options.signal,
+            });
+            succeeded = true;
+            this.postLlmResult({ success: true, text });
+            if (usage) {
+                yield { type: 'usage', usage };
             }
-            if (process.env.DEBUG_QUEUE) {
-                console.log('[RUNNER] Non-streaming agent result.outputs:', result.outputs);
-            }
-            // Stream any output from the agent
-            for (const output of result.outputs) {
-                yield { type: 'output', content: output };
-            }
-            // Update memory with full agent conversation
-            this.currentMemory = result.messages;
-            // Post result back to Prolog
-            this.postAgentResult(result);
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.postLlmResult({ success: false, error: message });
+            yield { type: 'log', content: `llm/2 failed: ${message}` };
+        }
+        finally {
+            yield { type: 'task_activity', taskState: succeeded ? 'completed' : 'failed', taskId: stepId };
         }
     }
     /**
@@ -517,17 +756,22 @@ export class DMLRunner {
             this.postExecResult({ success: false, error: `Tool not found: ${toolName}` });
             return;
         }
+        let argsObj = null;
         try {
             // Execute tool
-            const argsObj = this.argsToObject(args, tool);
+            argsObj = this.argsToObject(args, tool);
             // Emit tool_call event before execution
-            yield { type: 'tool_call', toolName, toolArgs: argsObj };
+            yield buildToolStartEvent(toolName, argsObj);
             const result = await tool.execute(argsObj);
+            yield buildToolCompletionEvent(toolName, argsObj, result);
             // Post result back to Prolog
             this.postExecResult({ success: true, result });
         }
         catch (error) {
             const message = error instanceof Error ? error.message : String(error);
+            if (argsObj) {
+                yield buildToolFailureEvent(toolName, argsObj, error);
+            }
             yield { type: 'log', content: `Tool '${toolName}' error: ${message}` };
             this.postExecResult({ success: false, error: message });
         }
@@ -748,7 +992,7 @@ export class DMLRunner {
      * @param excludedTools - Tools currently on the call stack (for recursion prevention)
      * @param onToolCall - Callback to emit tool call events from nested tasks
      */
-    async executeToolIsolated(toolName, args, registeredTools, onOutput, excludedTools = [], onToolCall) {
+    async executeToolIsolated(toolName, args, registeredTools, onOutput, runContext, excludedTools = [], onToolCall, onToolEvent) {
         const outputs = [];
         if (process.env.DEBUG_RUNNER) {
             console.log('[RUNNER] executeToolIsolated called for:', toolName);
@@ -809,16 +1053,92 @@ export class DMLRunner {
                             this.query(postGoal);
                         }
                         else {
+                            let argsObj = null;
                             try {
-                                const argsObj = this.argsToObject(execArgs, tool);
+                                argsObj = this.argsToObject(execArgs, tool);
+                                onToolEvent?.(buildToolStartEvent(execToolName, argsObj));
                                 const execResult = await tool.execute(argsObj);
+                                onToolEvent?.(buildToolCompletionEvent(execToolName, argsObj, execResult));
                                 const postGoal = `deepclause_mi:post_exec_result('${this.sessionId}', success, ${this.toPrologTerm(execResult)})`;
                                 this.query(postGoal);
                             }
                             catch (error) {
                                 const message = error instanceof Error ? error.message : String(error);
+                                if (argsObj) {
+                                    onToolEvent?.(buildToolFailureEvent(execToolName, argsObj, error));
+                                }
                                 const postGoal = `deepclause_mi:post_exec_result('${this.sessionId}', failure, "${message.replace(/"/g, '\\"')}")`;
                                 this.query(postGoal);
+                            }
+                        }
+                        break;
+                    }
+                    case 'request_sample_token': {
+                        const prompt = String(toJsValue(payload?.prompt) ?? '');
+                        const rawAllowedTokens = toJsValue(payload?.allowedTokens);
+                        const allowedTokens = Array.isArray(rawAllowedTokens)
+                            ? rawAllowedTokens.map((token) => String(token))
+                            : [];
+                        const nestedStepId = `step_${this.stepCounter++}`;
+                        onToolEvent?.({ type: 'task_activity', taskState: 'started', taskDescription: prompt || 'sample_token', taskId: nestedStepId });
+                        try {
+                            const { token, usage } = await sampleSingleToken({
+                                prompt,
+                                allowedTokens,
+                                modelOptions: {
+                                    provider: this.options.provider,
+                                    model: this.options.model,
+                                    temperature: this.options.temperature,
+                                    baseUrl: this.options.baseUrl,
+                                    providerOptions: this.options.providerOptions,
+                                },
+                                signal: runContext.signal,
+                            });
+                            this.postSampleTokenResult({ success: true, token });
+                            if (usage) {
+                                onToolEvent?.({ type: 'usage', usage });
+                            }
+                            onToolEvent?.({ type: 'task_activity', taskState: 'completed', taskId: nestedStepId });
+                        }
+                        catch (error) {
+                            const message = error instanceof Error ? error.message : String(error);
+                            this.postSampleTokenResult({ success: false, error: message });
+                            onToolEvent?.({ type: 'task_activity', taskState: 'failed', taskId: nestedStepId });
+                            if (process.env.DEBUG_RUNNER) {
+                                console.log('[RUNNER] sample_token request failed:', message);
+                            }
+                        }
+                        break;
+                    }
+                    case 'request_llm': {
+                        const messages = this.extractMessagesFromValue(payload?.messages);
+                        const nestedStepId = `step_${this.stepCounter++}`;
+                        onToolEvent?.({ type: 'task_activity', taskState: 'started', taskDescription: summarizeLlmMessages(messages), taskId: nestedStepId });
+                        try {
+                            const { text, usage } = await generateLlmReply({
+                                messages,
+                                modelOptions: {
+                                    provider: this.options.provider,
+                                    model: this.options.model,
+                                    temperature: this.options.temperature,
+                                    maxOutputTokens: this.options.maxTokens,
+                                    baseUrl: this.options.baseUrl,
+                                    providerOptions: this.options.providerOptions,
+                                },
+                                signal: runContext.signal,
+                            });
+                            this.postLlmResult({ success: true, text });
+                            if (usage) {
+                                onToolEvent?.({ type: 'usage', usage });
+                            }
+                            onToolEvent?.({ type: 'task_activity', taskState: 'completed', taskId: nestedStepId });
+                        }
+                        catch (error) {
+                            const message = error instanceof Error ? error.message : String(error);
+                            this.postLlmResult({ success: false, error: message });
+                            onToolEvent?.({ type: 'task_activity', taskState: 'failed', taskId: nestedStepId });
+                            if (process.env.DEBUG_RUNNER) {
+                                console.log('[RUNNER] llm/2 request failed:', message);
                             }
                         }
                         break;
@@ -827,11 +1147,7 @@ export class DMLRunner {
                         // Tool is calling task() or prompt() - run nested agent loop
                         const taskDescription = String(payload?.taskDescription ?? '');
                         // Parse output vars
-                        let outputVars = [];
-                        const rawOutputVars = toJsValue(payload?.outputVars);
-                        if (Array.isArray(rawOutputVars)) {
-                            outputVars = rawOutputVars.map(v => String(v));
-                        }
+                        const outputVars = decodeAgentOutputVars(payload?.outputVars);
                         // Parse userTools for the nested agent
                         const userTools = [];
                         const rawUserTools = toJsValue(payload?.userTools);
@@ -904,6 +1220,25 @@ export class DMLRunner {
                         }
                         // Extract memory
                         const memory = this.extractMemoryFromPayload(payload);
+                        const preparedMemory = memory;
+                        // Extract reasoning effort and recipe context for nested loops
+                        const nestedReasoningEffort = String(toJsValue(payload?.reasoningEffort) ?? 'none');
+                        const nestedRecipeContext = String(toJsValue(payload?.recipeContext) ?? '');
+                        // Build provider options for nested loop
+                        const nestedBaseProviderOptions = this.options.providerOptions ?? {};
+                        let nestedProviderOptions = nestedBaseProviderOptions;
+                        if (nestedReasoningEffort !== 'none' && this.options.reasoningType && this.options.reasoningType !== 'none') {
+                            const reasoningOpts = buildReasoningProviderOptions(nestedReasoningEffort, this.options.reasoningType, this.options.reasoningBudgetMap);
+                            nestedProviderOptions = { ...nestedBaseProviderOptions, ...reasoningOpts };
+                        }
+                        // Prepend recipe context if present
+                        let nestedEffectiveMemory = preparedMemory;
+                        if (nestedRecipeContext) {
+                            nestedEffectiveMemory = [
+                                { role: 'system', content: `Recipe guidance:\n\n${nestedRecipeContext}` },
+                                ...preparedMemory,
+                            ];
+                        }
                         if (process.env.DEBUG_RUNNER) {
                             console.log('[RUNNER] Tool agent loop request:', taskDescription.substring(0, 100));
                             console.log('[RUNNER] Tool agent outputVars:', outputVars);
@@ -917,16 +1252,18 @@ export class DMLRunner {
                         }
                         // Build tools for nested agent with filtered tool list
                         const nestedToolCallback = async (nestedToolName, nestedArgs) => {
-                            return this.executeToolIsolated(nestedToolName, nestedArgs, registeredTools, onOutput, nestedExcludedTools, onToolCall);
+                            return this.executeToolIsolated(nestedToolName, nestedArgs, registeredTools, onOutput, runContext, nestedExcludedTools, onToolCall, onToolEvent);
                         };
                         const availableTools = this.buildAgentTools(filteredTools, null, // No policy override for nested
                         nestedToolCallback);
+                        const nestedStepId = `step_${this.stepCounter++}`;
+                        onToolEvent?.({ type: 'task_activity', taskState: 'started', taskDescription, taskId: nestedStepId });
                         try {
                             // Run the nested agent loop
                             const result = await runAgentLoop({
                                 taskDescription,
                                 outputVars,
-                                memory,
+                                memory: nestedEffectiveMemory,
                                 tools: availableTools,
                                 modelOptions: {
                                     model: this.options.model,
@@ -934,26 +1271,49 @@ export class DMLRunner {
                                     temperature: this.options.temperature,
                                     maxOutputTokens: this.options.maxTokens,
                                     baseUrl: this.options.baseUrl,
+                                    providerOptions: nestedProviderOptions,
                                 },
-                                streaming: false, // Nested loops don't stream
+                                streaming: this.options.streaming,
                                 debug: this.options.debug,
                                 onOutput: (text) => {
                                     outputs.push(text);
                                     onOutput(text);
                                 },
-                                onStream: () => { }, // No streaming for nested
+                                onStream: (chunk, done) => {
+                                    onToolEvent?.({ type: 'stream', content: chunk, done });
+                                },
+                                onUsage: (usage) => {
+                                    onToolEvent?.({ type: 'usage', usage });
+                                },
                                 onToolCall: onToolCall ?? (() => { }), // Forward tool call events to parent
+                                onBeforeModelCall: async (messages, lastInputTokens) => this.applyCompactionBindings({
+                                    messages,
+                                    lastInputTokens,
+                                    scope: 'loop',
+                                    trigger: 'before_model_call',
+                                    options: { compaction: runContext.compaction },
+                                    executionContext: runContext,
+                                    registeredTools,
+                                    toolPolicy: runContext.toolPolicy ?? null,
+                                    emitEvent: onToolEvent,
+                                }),
                                 onAskUser: async () => {
                                     // Nested agent loops don't support ask_user directly
                                     // If needed, the tool should use exec(ask_user, ...) instead
                                     return '';
                                 },
+                                signal: runContext.signal,
                             });
                             if (process.env.DEBUG_RUNNER) {
                                 console.log('[RUNNER] Nested agent loop completed:', result.success);
                             }
+                            const finalizedMemory = [
+                                ...preparedMemory.filter((message) => message.role === 'system'),
+                                ...result.messages,
+                            ];
                             // Post result back to tool engine
-                            this.postToolAgentResult(toolEngineId, result);
+                            this.postToolAgentResult(toolEngineId, result, finalizedMemory);
+                            onToolEvent?.({ type: 'task_activity', taskState: 'completed', taskId: nestedStepId });
                         }
                         catch (error) {
                             const message = error instanceof Error ? error.message : String(error);
@@ -965,8 +1325,9 @@ export class DMLRunner {
                                 success: false,
                                 outputs: [],
                                 variables: {},
-                                messages: memory,
+                                messages: preparedMemory.filter((message) => message.role !== 'system'),
                             });
+                            onToolEvent?.({ type: 'task_activity', taskState: 'failed', taskId: nestedStepId });
                         }
                         break;
                     }
@@ -1002,38 +1363,152 @@ export class DMLRunner {
             }
         }
     }
+    async applyCompactionBindings(params) {
+        const resolved = resolveCompactionOptions(this.options.compaction, params.options.compaction);
+        const bindings = getCompactionBindings(resolved, params.scope, params.trigger);
+        if (bindings.length === 0) {
+            return params.messages;
+        }
+        let messages = params.messages;
+        for (const binding of bindings) {
+            const result = await executeCompactor({
+                binding,
+                messages,
+                knownInputTokens: params.lastInputTokens,
+                maxContextTokens: this.options.contextWindow,
+                emitEvent: params.emitEvent,
+                execute: (request) => this.runBoundCompactor({
+                    request,
+                    executionContext: params.executionContext,
+                    registeredTools: params.registeredTools,
+                    toolPolicy: params.toolPolicy,
+                }),
+            });
+            params.emitEvent?.(result.event);
+            if (result.usageByModel) {
+                for (const totals of Object.values(result.usageByModel)) {
+                    params.emitEvent?.({ type: 'usage', usage: {
+                            inputTokens: totals.inputTokens,
+                            outputTokens: totals.outputTokens,
+                            totalTokens: totals.totalTokens,
+                            cacheReadTokens: totals.cacheReadTokens || undefined,
+                            cacheWriteTokens: totals.cacheWriteTokens || undefined,
+                            reasoningTokens: totals.reasoningTokens || undefined,
+                        } });
+                }
+            }
+            messages = result.messages;
+        }
+        return messages;
+    }
+    async runBoundCompactor(params) {
+        const { binding, params: compactorParams } = params.request;
+        const code = await this.resolveCompactorSource(binding.compactor.source, binding.compactor.sourceType, params.executionContext.workspacePath);
+        const model = binding.compactor.model ?? this.options.model;
+        const provider = binding.compactor.provider
+            ?? (binding.compactor.model ? detectProvider(model) : this.options.provider);
+        const compactorRunner = new DMLRunner(this.swipl, {
+            ...this.options,
+            model,
+            provider,
+            streaming: false,
+            compaction: { enabled: false },
+        });
+        const { signal, dispose } = createChildAbortController(params.executionContext.signal, binding.compactor.timeoutMs);
+        try {
+            const tools = binding.compactor.inheritTools ? params.registeredTools : new Map();
+            let answer = '';
+            let errorContent = '';
+            const usageByModel = {};
+            for await (const event of compactorRunner.run(code, {
+                workspacePath: params.executionContext.workspacePath,
+                gasLimit: binding.compactor.gasLimit,
+                params: compactorParams,
+                initialMessages: params.request.messages,
+                tools,
+                toolPolicy: binding.compactor.toolPolicy ?? (binding.compactor.inheritTools ? params.toolPolicy : null) ?? null,
+                onInputRequired: async (prompt) => {
+                    throw new Error(`Compactor requested unexpected input: ${prompt}`);
+                },
+                signal,
+                compaction: { enabled: false },
+            })) {
+                if (event.type === 'answer' && event.content) {
+                    answer = event.content;
+                }
+                else if (event.type === 'error' && event.content) {
+                    errorContent = event.content;
+                }
+                else if (event.type === 'usage' && event.usage) {
+                    recordTokenUsage(usageByModel, this.options.model, event.usage);
+                }
+            }
+            return {
+                answer,
+                error: errorContent || undefined,
+                usageByModel: Object.keys(usageByModel).length > 0 ? usageByModel : undefined,
+            };
+        }
+        finally {
+            dispose();
+            await compactorRunner.dispose();
+        }
+    }
+    async resolveCompactorSource(source, sourceType, workspacePath) {
+        if (sourceType === 'inline') {
+            return source;
+        }
+        const basePath = workspacePath ?? process.cwd();
+        const candidatePath = path.isAbsolute(source) ? source : path.resolve(basePath, source);
+        try {
+            return await fs.readFile(candidatePath, 'utf8');
+        }
+        catch (error) {
+            if (sourceType === 'file') {
+                throw error;
+            }
+            return source;
+        }
+    }
     /**
      * Extract memory from payload (now passed via state threading)
      */
-    extractMemoryFromPayload(rawPayload) {
-        const rawMemory = toJsValue(rawPayload.memory);
-        if (!Array.isArray(rawMemory)) {
+    extractMessagesFromValue(rawMessages) {
+        const normalized = toJsValue(rawMessages);
+        if (!Array.isArray(normalized)) {
             return [];
         }
-        return rawMemory.map((m) => {
-            const msg = toJsValue(m);
+        return normalized.map((messageValue) => {
+            const msg = toJsValue(messageValue);
             const role = String(toJsValue(msg.role) ?? 'user');
             const content = String(toJsValue(msg.content) ?? '');
-            // Validate role
             if (role !== 'system' && role !== 'user' && role !== 'assistant') {
                 return { role: 'user', content };
             }
             return { role: role, content };
         });
     }
+    extractMemoryFromPayload(rawPayload) {
+        const rawMemory = toJsValue(rawPayload.memory);
+        return this.extractMessagesFromValue(rawMemory);
+    }
+    serializeMemoryMessages(messages) {
+        return messages
+            .map((message) => `message{role: ${message.role}, content: ${this.toPrologTerm(message.content)}}`)
+            .join(', ');
+    }
     /**
      * Post agent loop result back to Prolog
      */
-    postAgentResult(result) {
+    postAgentResult(result, fullMemory) {
         // Keys need to be quoted because they start with uppercase (Var1, Var2, etc.)
         const varsStr = Object.entries(result.variables)
             .map(([k, v]) => `'${k}': ${this.toPrologTerm(v)}`)
             .join(', ');
         // Convert messages to Prolog list format
-        const messagesStr = result.messages
-            .map(m => `message{role: ${m.role}, content: ${this.toPrologTerm(m.content)}}`)
-            .join(', ');
-        this.query(`deepclause_mi:post_agent_result('${this.sessionId}', ${result.success}, vars{${varsStr}}, [${messagesStr}])`);
+        const messagesStr = this.serializeMemoryMessages(result.messages);
+        const fullMemoryStr = this.serializeMemoryMessages(fullMemory ?? []);
+        this.query(`deepclause_mi:post_agent_result('${this.sessionId}', ${result.success}, vars{${varsStr}}, [${messagesStr}], [${fullMemoryStr}])`);
     }
     /**
      * Post exec result back to Prolog
@@ -1049,18 +1524,43 @@ export class DMLRunner {
         }
     }
     /**
+     * Post one-token sampling result back to Prolog
+     */
+    postSampleTokenResult(result) {
+        if (result.success) {
+            const token = this.toPrologTerm(result.token ?? '');
+            this.query(`deepclause_mi:post_sample_token_result('${this.sessionId}', success, ${token})`);
+        }
+        else {
+            const error = this.toPrologTerm(result.error ?? 'Unknown error');
+            this.query(`deepclause_mi:post_sample_token_result('${this.sessionId}', failure, ${error})`);
+        }
+    }
+    /**
+     * Post direct llm/2 result back to Prolog
+     */
+    postLlmResult(result) {
+        if (result.success) {
+            const text = this.toPrologTerm(result.text ?? '');
+            this.query(`deepclause_mi:post_llm_result('${this.sessionId}', success, ${text})`);
+        }
+        else {
+            const error = this.toPrologTerm(result.error ?? 'Unknown error');
+            this.query(`deepclause_mi:post_llm_result('${this.sessionId}', failure, ${error})`);
+        }
+    }
+    /**
      * Post tool engine agent loop result back to Prolog
      */
-    postToolAgentResult(toolEngineId, result) {
+    postToolAgentResult(toolEngineId, result, fullMemory) {
         // Keys need to be quoted because they start with uppercase (Var1, Var2, etc.)
         const varsStr = Object.entries(result.variables)
             .map(([k, v]) => `'${k}': ${this.toPrologTerm(v)}`)
             .join(', ');
         // Convert messages to Prolog list format
-        const messagesStr = result.messages
-            .map(m => `message{role: ${m.role}, content: ${this.toPrologTerm(m.content)}}`)
-            .join(', ');
-        this.query(`deepclause_mi:post_tool_agent_result('${this.sessionId}', '${toolEngineId}', ${result.success}, vars{${varsStr}}, [${messagesStr}])`);
+        const messagesStr = this.serializeMemoryMessages(result.messages);
+        const fullMemoryStr = this.serializeMemoryMessages(fullMemory ?? []);
+        this.query(`deepclause_mi:post_tool_agent_result('${this.sessionId}', '${toolEngineId}', ${result.success}, vars{${varsStr}}, [${messagesStr}], [${fullMemoryStr}])`);
     }
     /**
      * Provide user input to waiting Prolog
@@ -1103,5 +1603,15 @@ export class DMLRunner {
     async dispose() {
         this.cleanup();
     }
+}
+function summarizeLlmMessages(messages) {
+    if (messages.length === 0)
+        return 'llm()';
+    const last = messages[messages.length - 1];
+    const text = typeof last.content === 'string' ? last.content : '';
+    const summary = text.replace(/\s+/g, ' ').trim();
+    if (!summary)
+        return `llm(${messages.length} messages)`;
+    return summary.length > 80 ? summary.slice(0, 77) + '...' : summary;
 }
 //# sourceMappingURL=runner.js.map

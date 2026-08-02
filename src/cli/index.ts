@@ -16,6 +16,7 @@ import { listCommands } from './commands.js';
 import { formatToolArgs } from './tool-args.js';
 import { buildModelOverride, type ModelSlot } from '../system/config/model-slots.js';
 import { runPromptHeadless, startTui } from './tui.js';
+import { startTuiV2 } from './tui/index.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -35,7 +36,8 @@ program
   .description('Compile Markdown to DML and run neurosymbolic AI agents')
   .version(version)
   .option('-p, --prompt <text>', 'Run a prompt in headless conductor mode with a fresh session')
-  .option('--sandbox', 'Run shell tools inside AgentVM instead of the local workspace shell');
+  .option('--sandbox', 'Run shell tools inside AgentVM instead of the local workspace shell')
+  .option('--tui <version>', 'TUI version to use (v1 or v2)', 'v1');
 
 // =============================================================================
 // Configuration Commands
@@ -703,13 +705,17 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (argv.length === 0) {
-    await startTui(process.cwd(), { sandbox: rootSandbox });
-    return;
-  }
+  const tuiVersion = readTuiVersion(argv);
+  // Determine if argv contains only flags we handle at root level (no subcommand)
+  const onlyRootFlags = !hasSubcommand(argv) && !rootPrompt;
+  const effectiveArgCount = argv.filter((a) => !a.startsWith('--tui') && a !== tuiVersion && a !== '--sandbox').length;
 
-  if (argv.length === 1 && rootSandbox) {
-    await startTui(process.cwd(), { sandbox: true });
+  if (effectiveArgCount === 0 && onlyRootFlags) {
+    if (tuiVersion === 'v2') {
+      await startTuiV2(process.cwd(), { sandbox: rootSandbox });
+    } else {
+      await startTui(process.cwd(), { sandbox: rootSandbox });
+    }
     return;
   }
 
@@ -736,6 +742,17 @@ function readRootPrompt(argv: string[]): string | undefined {
 
 function hasRootSandbox(argv: string[]): boolean {
   return argv.includes('--sandbox');
+}
+
+function readTuiVersion(argv: string[]): string {
+  const idx = argv.indexOf('--tui');
+  if (idx >= 0 && idx + 1 < argv.length) {
+    return argv[idx + 1];
+  }
+  // Also handle --tui=v2 format
+  const eq = argv.find((a) => a.startsWith('--tui='));
+  if (eq) return eq.slice('--tui='.length);
+  return 'v1';
 }
 
 function requiresInitializedWorkspace(argv: string[]): boolean {

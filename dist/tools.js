@@ -7,7 +7,7 @@
 export const BUILTIN_COMPILE_TOOLS = [
     {
         name: 'vm_exec',
-        description: 'Execute a shell command in a sandboxed Alpine Linux VM with Python. Returns stdout, stderr, and exit code.',
+        description: 'Execute a shell command using the active workspace shell backend. With --sandbox, this runs inside AgentVM.',
         provider: 'agentvm',
         schema: {
             type: 'object',
@@ -19,7 +19,7 @@ export const BUILTIN_COMPILE_TOOLS = [
     },
     {
         name: 'web_search',
-        description: 'Search the web using Brave Search API. Returns structured results with titles, URLs, and descriptions.',
+        description: 'Search the web. Uses Brave Search API if BRAVE_API_KEY is set, otherwise falls back to Bing (no key required).',
         provider: 'brave',
         schema: {
             type: 'object',
@@ -33,7 +33,7 @@ export const BUILTIN_COMPILE_TOOLS = [
     },
     {
         name: 'news_search',
-        description: 'Search for recent news articles using Brave Search API.',
+        description: 'Search for recent news articles. Uses Brave Search API if BRAVE_API_KEY is set, otherwise falls back to Bing (no key required).',
         provider: 'brave',
         schema: {
             type: 'object',

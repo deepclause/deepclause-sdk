@@ -1,0 +1,337 @@
+% Security planner — generates a multi-strategy DML plan for finding bugs and vulnerabilities.
+% The planner itself does NOT analyze code. It only generates strategies and task descriptions.
+% Analysis happens when the generated plan is executed.
+
+tool(consult_recipes(Query, Result),
+     "Search the recipe library for workflow guidance and conventions.") :-
+    exec(consult_recipes(query: Query, max_results: 3), Result).
+
+tool(search_web(Query, Results),
+     "Search the web for context about the target project or technology stack.") :-
+    exec(web_search(query: Query), Results).
+
+tool(ask_user(Prompt, Response),
+    "Ask the user for clarification about scope, severity thresholds, or context.") :-
+    exec(ask_user(prompt: Prompt), Result),
+    get_dict(user_response, Result, Response).
+
+agent_main(Request) :-
+    load_dml_reference(DmlReference),
+    resolve_model_info(ModelId, Complexity, Reasoning, TaskCount),
+    format(string(SystemPrompt), "You are a SECURITY PLAN GENERATOR. You do NOT analyze code yourself. You only create plans for other agents to execute.~n~nTarget: ~w~n~nYour job:~n1. Generate a short slug for the plan file.~n2. Generate ~w fundamentally different strategies for finding bugs and vulnerabilities.~n3. For each strategy, generate a task list with tool assignments and reasoning effort.~n4. The assembler creates a DML file with one agent_main clause per strategy.~n~nRules:~n- Do NOT run shell commands, read files, or examine the codebase. That is the job of the generated plan.~n- Generate strategies based on the target description and your knowledge of common vulnerability patterns.~n- Each strategy must use a different analysis approach (static patterns, data flow, dependency audit, config review, input validation, auth review, etc.).~n- Each strategy gets 3 to 7 analysis tasks plus a final verification task (added automatically).~n- The final task in each strategy asks the model to write findings to a file if vulnerabilities are found, or fail if nothing is found.~n~nDML language reference:~n~n~s", [Request, TaskCount, DmlReference]),
+    system(SystemPrompt),
+
+    task("Create a short file-safe slug for this security analysis target: '{Request}'.~nRequirements:~n- lowercase letters, digits, and underscores only~n- 2 to 6 words when possible~n- no file extension~n- prefix with 'audit_' if not already present~nStore only the slug in PlanSlug.", string(PlanSlug)),
+
+    generate_strategies(Request, TaskCount, Strategies),
+
+    generate_all_strategy_tasks(Request, Strategies, StrategyPlans),
+
+    make_directory_path('plans'),
+    format(string(FilePath), "plans/~w.dml", [PlanSlug]),
+
+    build_review_message(FilePath, StrategyPlans, ReviewMessage),
+    output(ReviewMessage),
+
+    output("Assembling multi-strategy security plan file..."),
+    assemble_multi_strategy_dml(StrategyPlans, PlanDml),
+    exec(write_file(path: FilePath, content: PlanDml), _),
+    exec(validate_dml(dml_file: FilePath), ValidationResult),
+    finish_plan_creation(FilePath, PlanSlug, ValidationResult, ReviewMessage).
+
+%% resolve_model_info(-ModelId, -Complexity, -Reasoning, -TaskCount)
+resolve_model_info(ModelId, Complexity, Reasoning, TaskCount) :-
+    (   catch(
+            (   param(model_info, ModelInfo),
+                is_dict(ModelInfo),
+                get_dict(modelId, ModelInfo, ModelId),
+                (   get_dict(complexity, ModelInfo, C) -> Complexity = C ; Complexity = medium ),
+                (   get_dict(reasoning, ModelInfo, R), R == true -> Reasoning = true ; Reasoning = false )
+            ),
+            _,
+            fail
+        )
+    ->  true
+    ;   ModelId = "unknown",
+        Complexity = medium,
+        Reasoning = false
+    ),
+    task_count_for_complexity(Complexity, TaskCount).
+
+task_count_for_complexity("high", "3").
+task_count_for_complexity("medium", "3").
+task_count_for_complexity("low", "3").
+task_count_for_complexity(high, "3").
+task_count_for_complexity(medium, "3").
+task_count_for_complexity(low, "3").
+
+%% generate_strategies(+Request, +TaskCount, -Strategies)
+generate_strategies(Request, TaskCount, Strategies) :-
+    task("Generate {TaskCount} fundamentally different security analysis strategies for this target:
+
+'{Request}'
+
+Each strategy must use a different analysis approach:
+- Different tooling (grep vs static analyzer vs dependency scanner vs manual review)
+- Different vulnerability classes (injection vs auth vs config vs crypto vs deps)
+- Different code perspectives (input paths vs output paths vs state management vs error handling)
+
+For each strategy provide:
+- A short name identifying the approach
+- A colon
+- A brief description of what it looks for and how
+
+One strategy per line. Each strategy should be independently capable of finding real issues.
+
+Store the list of strategy strings in Strategies.", list(string(Strategies))).
+
+%% generate_all_strategy_tasks(+Request, +Strategies, -StrategyPlans)
+generate_all_strategy_tasks(_Request, [], []).
+generate_all_strategy_tasks(Request, [Strategy|RestStrategies], [plan{strategy: Strategy, steps: Steps}|RestPlans]) :-
+    generate_strategy_tasks(Request, Strategy, Steps),
+    generate_all_strategy_tasks(Request, RestStrategies, RestPlans).
+
+%% generate_strategy_tasks(+Request, +Strategy, -Steps)
+generate_strategy_tasks(Request, Strategy, Steps) :-
+    (   param(model_info, ModelInfo)
+    ->  (   get_dict(reasoning, ModelInfo, R), R == true
+        ->  ReasoningNote = "The execution model supports reasoning. Assign reasoning effort per task: none, low, medium, or high."
+        ;   ReasoningNote = "The execution model does not support reasoning. Set reasoning to 'none' for all tasks."
+        )
+    ;   ReasoningNote = "Set reasoning to 'none' for all tasks."
+    ),
+    task("List 3 to 7 focused execution tasks for this security analysis strategy.
+
+Target: {Request}
+Strategy: {Strategy}
+
+Each task should be one concrete analysis step. Be specific about what to look for and which files to examine.
+
+Available tools (use ONLY these exact names):
+- consult_recipes: Search recipe guidance and conventions
+- search_web: Search the web for advisories, docs, and references
+- search_news: Search recent news for relevant incidents or advisories
+- fetch_url: Fetch a specific advisory or documentation page
+- run_bash: Run grep, find, test, and scanner commands in the workspace
+- ask_user: Ask the user to narrow scope or clarify assumptions
+- inform_user: Send a status update
+
+{ReasoningNote}
+
+Also specify a recipe query for each task if relevant (NONE otherwise).
+
+Return four ordered lists aligned 1:1:
+- TaskDescriptions: plain task descriptions.
+- ToolSpecs: each item must be either ALL or a comma-separated list of exact tool names from the available tools list above.
+- ReasoningSpecs: each item must be exactly one of none, low, medium, high.
+- RecipeSpecs: each item must be either NONE or a recipe query string.
+
+Store the ordered task descriptions in TaskDescriptions.
+Store the ordered tool specs in ToolSpecs.
+Store the ordered reasoning specs in ReasoningSpecs.
+Store the ordered recipe specs in RecipeSpecs.", list(string(TaskDescriptions)), list(string(ToolSpecs)), list(string(ReasoningSpecs)), list(string(RecipeSpecs))),
+    (   build_steps_from_specs(TaskDescriptions, ToolSpecs, ReasoningSpecs, RecipeSpecs, Steps)
+    ->  true
+    ;   fallback_plan_steps_from_strategy(Strategy, Steps)
+    ).
+
+valid_plan_tool(consult_recipes).
+valid_plan_tool(search_web).
+valid_plan_tool(search_news).
+valid_plan_tool(fetch_url).
+valid_plan_tool(run_bash).
+valid_plan_tool(ask_user).
+valid_plan_tool(inform_user).
+
+default_plan_tools([consult_recipes, search_web, search_news, fetch_url, run_bash, ask_user, inform_user]).
+
+build_steps_from_specs([], [], [], [], []).
+build_steps_from_specs([Desc|RestDesc], [ToolSpec|RestTools], [ReasoningSpec|RestReasoning], [RecipeSpec|RestRecipes], [plan_step{description: Desc, tools: Tools, reasoning: Reasoning, recipe: Recipe}|RestSteps]) :-
+    normalize_tools_spec(ToolSpec, Tools),
+    normalize_reasoning_spec(ReasoningSpec, Reasoning),
+    normalize_recipe_spec(RecipeSpec, Recipe),
+    build_steps_from_specs(RestDesc, RestTools, RestReasoning, RestRecipes, RestSteps).
+
+normalize_tools_spec(Raw, Tools) :-
+    format(string(Text), "~w", [Raw]),
+    string_lower(Text, Lower),
+    (   Lower = "all"
+    ->  default_plan_tools(Tools)
+    ;   split_string(Text, ",", " []\t\n", Parts0),
+        include(non_empty_string, Parts0, Parts),
+        findall(ToolAtom,
+            ( member(Part, Parts),
+              tool_name_string_to_atom(Part, ToolAtom),
+              valid_plan_tool(ToolAtom)
+            ),
+            ValidTools),
+        (   ValidTools = []
+        ->  default_plan_tools(Tools)
+        ;   Tools = ValidTools
+        )
+    ).
+
+normalize_reasoning_spec(Raw, Reasoning) :-
+    format(string(Text), "~w", [Raw]),
+    string_lower(Text, Lower),
+    normalize_reasoning_label(Lower, Reasoning).
+
+normalize_reasoning_label("high", "high").
+normalize_reasoning_label("medium", "medium").
+normalize_reasoning_label("low", "low").
+normalize_reasoning_label("none", "none").
+normalize_reasoning_label(_, "none").
+
+normalize_recipe_spec(Raw, Recipe) :-
+    format(string(Text0), "~w", [Raw]),
+    normalize_space(string(Text), Text0),
+    string_lower(Text, Lower),
+    (   Lower = ""
+    ->  Recipe = "none"
+    ;   Lower = "none"
+    ->  Recipe = "none"
+    ;   Recipe = Text
+    ).
+
+tool_name_string_to_atom(Text, Atom) :-
+    string_lower(Text, Lower),
+    atom_string(Atom, Lower).
+
+non_empty_string(Text) :-
+    Text \= "".
+
+fallback_plan_steps_from_strategy(Strategy, [plan_step{description: Strategy, tools: Tools, reasoning: "none", recipe: "none"}]) :-
+    default_plan_tools(Tools).
+
+%% assemble_multi_strategy_dml(+StrategyPlans, -PlanDml)
+assemble_multi_strategy_dml(StrategyPlans, PlanDml) :-
+    conductor_tool_definitions(ToolBlock),
+    build_strategy_clauses(StrategyPlans, Clauses),
+    format(string(PlanDml), "% Generated DeepClause security analysis plan.~n% Prolog tries strategies in order; answer/1 commits on success.~n~n~s~n~n~s~nagent_main :-~n    answer(\"No vulnerabilities found by any strategy.\").~n", [ToolBlock, Clauses]).
+
+%% build_strategy_clauses(+StrategyPlans, -Clauses)
+build_strategy_clauses([], "").
+build_strategy_clauses([Plan|Rest], Clauses) :-
+    Strategy = Plan.strategy,
+    Steps = Plan.steps,
+    build_system_prompt_for_strategy(Strategy, SystemPrompt),
+    build_task_lines(Steps, TaskLines, LastSumVar),
+    format(string(StratOutput), "Starting strategy: ~w", [Strategy]),
+    format(string(StratAnswer), "Vulnerabilities found and reported via strategy: ~w. See .deepclause.tmp/findings.md for details.", [Strategy]),
+    (   LastSumVar = ""
+    ->  format(string(VerifyTask), "    task(\"If vulnerabilities were found, write a findings report to .deepclause.tmp/findings.md and succeed. If no vulnerabilities were found, fail this task.\"),~n", [])
+    ;   format(string(VerifyTask), "    task(\"Based on the analysis summary: {~w}. If vulnerabilities were found, write a findings report to .deepclause.tmp/findings.md and succeed. If no vulnerabilities were found, fail this task.\"),~n", [LastSumVar])
+    ),
+    format(string(Clause), "agent_main :-~n    system(~q),~n    output(~q),~n~s~s    answer(~q).~n~n", [SystemPrompt, StratOutput, TaskLines, VerifyTask, StratAnswer]),
+    build_strategy_clauses(Rest, RestClauses),
+    string_concat(Clause, RestClauses, Clauses).
+
+%% build_system_prompt_for_strategy(+Strategy, -SystemPrompt)
+build_system_prompt_for_strategy(Strategy, SystemPrompt) :-
+    format(string(SystemPrompt), "You are a security analyst executing a generated DeepClause plan using this strategy:~n~nStrategy: ~w~n~nWorkflow:~n- Start by understanding the codebase structure and identifying the relevant files~n- Read source files and configuration to understand the attack surface~n- Apply the strategy's analysis approach systematically~n- For each finding, record: severity (critical/high/medium/low/info), file path, line number (if applicable), description, and recommendation~n- Write findings to .deepclause.tmp/scratchpad.md (append with >>) so other strategies can see them~n- Read the scratchpad at the start: run_bash('cat .deepclause.tmp/scratchpad.md 2>/dev/null || echo empty')~n- A final verification task runs automatically after your analysis tasks: it asks you to write .deepclause.tmp/findings.md if vulnerabilities were found~n- If no vulnerabilities are found, the findings file is NOT written and this strategy fails — a different strategy is tried automatically~n- Be thorough but avoid false positives — verify each finding before reporting", [Strategy]).
+
+%% build_task_lines(+PlanSteps, -TaskLines, -LastSumVar)
+build_task_lines(Steps, TaskLines, LastSumVar) :-
+    length(Steps, Count),
+    (   Count > 0
+    ->  format(string(LastSumVar), "Sum~w", [Count])
+    ;   LastSumVar = ""
+    ),
+    build_task_lines(Steps, 1, "", TaskLines).
+
+build_task_lines([], _, _, "").
+build_task_lines([Step|Rest], Num, PrevSum, TaskLines) :-
+    build_single_task_line(Step, Num, PrevSum, Line),
+    NextNum is Num + 1,
+    format(string(VarName), "Sum~w", [Num]),
+    build_task_lines(Rest, NextNum, VarName, RestLines),
+    string_concat(Line, RestLines, TaskLines).
+
+build_single_task_line(Step, Num, PrevSum, Line) :-
+    Desc = Step.description,
+    format(string(VarName), "Sum~w", [Num]),
+    format(string(DescWithCtx), "~w. Store your findings summary in ~w.", [Desc, VarName]),
+    Tools = Step.tools,
+    Reasoning = Step.reasoning,
+    Recipe = Step.recipe,
+    format(string(BaseTask), "task(~q, string(~w))", [DescWithCtx, VarName]),
+    format(string(WithTools), "with_tools(~w, ~w)", [Tools, BaseTask]),
+    (   Reasoning \= "none"
+    ->  format(string(WithReasoning), "with_reasoning(~n        ~w~n    , ~w)", [WithTools, Reasoning])
+    ;   WithReasoning = WithTools
+    ),
+    (   Recipe \= "none"
+    ->  format(string(Line), "    with_recipe(~n        ~w~n    , '~w'),~n", [WithReasoning, Recipe])
+    ;   format(string(Line), "    ~w,~n", [WithReasoning])
+    ).
+
+%% build_review_message(+FilePath, +StrategyPlans, -ReviewMessage)
+build_review_message(FilePath, StrategyPlans, ReviewMessage) :-
+    length(StrategyPlans, Count),
+    build_strategy_review_lines(StrategyPlans, 1, StrategyLines),
+    format(string(ReviewMessage), "Proposed security analysis plan~n- Output file: ~w~n- Strategies: ~w~n~n~s", [FilePath, Count, StrategyLines]).
+
+build_strategy_review_lines([], _, "").
+build_strategy_review_lines([Plan|Rest], Num, Lines) :-
+    Strategy = Plan.strategy,
+    Steps = Plan.steps,
+    length(Steps, StepCount),
+    format(string(Current), "~w. ~w (~w tasks)~n", [Num, Strategy, StepCount]),
+    NextNum is Num + 1,
+    build_strategy_review_lines(Rest, NextNum, RestLines),
+    string_concat(Current, RestLines, Lines).
+
+finish_plan_creation(FilePath, PlanSlug, ValidationResult, FinalPlanReview) :-
+    get_dict(valid, ValidationResult, true),
+    output("Security plan validated successfully."),
+    format(string(Message), "I've created a security analysis plan in ~w.\n\n~s\nRun it with /run ~w or /~w.", [FilePath, FinalPlanReview, FilePath, PlanSlug]),
+    answer(Message).
+
+finish_plan_creation(FilePath, _, ValidationResult, _) :-
+    format(string(Message), "I wrote ~w, but the plan failed validation: ~w", [FilePath, ValidationResult]),
+    answer(Message).
+
+conductor_tool_definitions(ToolBlock) :-
+    atomics_to_string([
+        '% --- Tool predicates ---',
+        '',
+        'tool(consult_recipes(Query, Result), "Search the recipe library for workflow guidance and conventions.") :-',
+        '',
+        '    exec(consult_recipes(query: Query, max_results: 3), Result).',
+        '',
+        'tool(search_web(Query, Results), "Search the web for CVEs, security advisories, and documentation.") :-',
+        '',
+        '    exec(web_search(query: Query), Results).',
+        '',
+        'tool(search_news(Query, Results), "Search recent news for security advisories.") :-',
+        '',
+        '    exec(news_search(query: Query), Results).',
+        '',
+        'tool(fetch_url(Url, Content), "Fetch a web page for security documentation or advisory details.") :-',
+        '',
+        '    exec(url_fetch(url: Url), Result),',
+        '    get_dict(body, Result, Content).',
+        '',
+        'tool(run_bash(Command, Output), "Run a shell command. Use for grep, find, cat, static analyzers, etc.") :-',
+        '',
+        '    exec(bash(command: Command), Output).',
+        '',
+        'tool(ask_user(Prompt, Response), "Ask the user for clarification about scope or severity thresholds.") :-',
+        '',
+        '    exec(ask_user(prompt: Prompt), Result),',
+        '    get_dict(user_response, Result, Response).',
+        '',
+        'tool(inform_user(Message, Result), "Send a status update.") :-',
+        '    output(Message),',
+        '    Result = "ok".'
+    ], "\n", ToolBlock).
+
+load_dml_reference(DmlReference) :-
+    (   exists_file('.deepclause/docs/DML_REFERENCE.md')
+    ->  read_file('.deepclause/docs/DML_REFERENCE.md', DmlReference)
+    ;   DmlReference = "DML reference unavailable. Use standard DeepClause DML conventions."
+    ).
+
+agent_main(Request) :-
+    format(string(Message), "I could not create a valid security analysis plan for this target: ~w. Try specifying the target more precisely (e.g., a directory path, file pattern, or specific concern).", [Request]),
+    answer(Message).

@@ -5,12 +5,12 @@
  */
 import { getMCPServers } from './config.js';
 // =============================================================================
-// Built-in AgentVM Tools
+// Built-in runtime tools
 // =============================================================================
 const AGENTVM_TOOLS = [
     {
         name: 'vm_exec',
-        description: 'Execute a shell command in a sandboxed Alpine Linux VM with Python. Returns stdout, stderr, and exit code.',
+        description: 'Execute a shell command using the active workspace shell backend. With --sandbox, this runs inside AgentVM.',
         provider: 'agentvm',
         schema: {
             type: 'object',
@@ -18,6 +18,31 @@ const AGENTVM_TOOLS = [
                 command: { type: 'string', description: 'Shell command to execute (e.g., "python3 script.py", "echo hello", "ls -la")' }
             },
             required: ['command']
+        }
+    },
+    {
+        name: 'bash',
+        description: 'Execute a shell command in the active workspace shell. Alias of vm_exec.',
+        provider: 'agentvm',
+        schema: {
+            type: 'object',
+            properties: {
+                command: { type: 'string', description: 'Shell command to execute' }
+            },
+            required: ['command']
+        }
+    },
+    {
+        name: 'url_fetch',
+        description: 'Fetch a URL and optionally save the response into the workspace.',
+        provider: 'agentvm',
+        schema: {
+            type: 'object',
+            properties: {
+                url: { type: 'string', description: 'Absolute URL to fetch' },
+                save_to: { type: 'string', description: 'Optional workspace-relative output file' }
+            },
+            required: ['url']
         }
     }
 ];
@@ -27,7 +52,7 @@ const AGENTVM_TOOLS = [
 const SEARCH_TOOLS = [
     {
         name: 'web_search',
-        description: 'Search the web using Brave Search API. Returns structured results with titles, URLs, and descriptions.',
+        description: 'Search the web. Uses Brave Search API if BRAVE_API_KEY is set, otherwise falls back to Bing (no key required).',
         provider: 'brave',
         schema: {
             type: 'object',
@@ -41,7 +66,7 @@ const SEARCH_TOOLS = [
     },
     {
         name: 'news_search',
-        description: 'Search for recent news articles using Brave Search API.',
+        description: 'Search for recent news articles. Uses Brave Search API if BRAVE_API_KEY is set, otherwise falls back to Bing (no key required).',
         provider: 'brave',
         schema: {
             type: 'object',
@@ -58,7 +83,7 @@ const SEARCH_TOOLS = [
 // Tool Resolution
 // =============================================================================
 /**
- * List all available tools from AgentVM, Search, and configured MCP servers
+ * List all available built-in runtime tools, search tools, and configured MCP servers
  */
 export async function listTools(workspaceRoot, options = {}) {
     const { loadConfig } = await import('./config.js');
@@ -92,7 +117,7 @@ export async function listTools(workspaceRoot, options = {}) {
 export async function resolveTools(config, toolNames) {
     const resolved = {};
     const missing = [];
-    // All built-in tools (AgentVM + Search)
+    // All built-in tools (runtime shell + search)
     const builtInTools = [...AGENTVM_TOOLS, ...SEARCH_TOOLS];
     // Check built-in tools first
     for (const name of toolNames) {
@@ -196,7 +221,7 @@ function formatToolsList(tools) {
     return lines.join('\n');
 }
 /**
- * Get all built-in tools (AgentVM + Search)
+ * Get all built-in tools (runtime shell + search)
  */
 export function getAgentVMTools() {
     return [...AGENTVM_TOOLS, ...SEARCH_TOOLS];

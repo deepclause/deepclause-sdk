@@ -1,8 +1,9 @@
 /**
- * DeepClause CLI - Brave Search Integration
+ * DeepClause CLI - Search Integration
  *
- * Provides web and news search functionality using Brave Search API.
- * Requires BRAVE_API_KEY or BRAVE_KEY environment variable.
+ * Provides web and news search functionality.
+ * Primary: Brave Search API (requires BRAVE_API_KEY or BRAVE_KEY).
+ * Fallback: Bing web scraping (no API key, works globally including China).
  *
  * Returns plain text results for easier LLM consumption.
  */
@@ -11,15 +12,8 @@ export interface WebSearchParams {
     count?: number;
     freshness?: string;
     country?: string;
+    signal?: AbortSignal;
 }
-/**
- * Perform a web search using Brave Search API
- * Returns plain text formatted results
- */
 export declare function webSearch(params: WebSearchParams): Promise<string>;
-/**
- * Perform a news search using Brave Search API
- * Returns plain text formatted results
- */
 export declare function newsSearch(params: WebSearchParams): Promise<string>;
 //# sourceMappingURL=search.d.ts.map
