@@ -3,7 +3,7 @@ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
  * Root <App> component for the Ink-based TUI.
  * Replaces the monolithic FullscreenTui class with a React component tree.
  */
-import { useReducer, useCallback, useEffect } from 'react';
+import React, { useReducer, useCallback, useEffect } from 'react';
 import { Box, useApp, useStdout } from 'ink';
 import { MenuBar } from './components/layout/MenuBar.js';
 import { StatusBar } from './components/layout/StatusBar.js';

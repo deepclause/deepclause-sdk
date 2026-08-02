@@ -1,4 +1,9 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+/**
+ * Context pane component.
+ * Displays token usage and cost information per model.
+ */
+import React from 'react';
 import { Box, Text } from 'ink';
 export const ContextPane = ({ tokenUsage, focused, height }) => {
     const models = Object.entries(tokenUsage);

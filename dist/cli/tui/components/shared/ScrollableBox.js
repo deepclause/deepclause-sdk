@@ -1,9 +1,9 @@
-import { jsxs as _jsxs, jsx as _jsx } from "react/jsx-runtime";
+import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 /**
  * Scrollable box component with content caching.
  * Renders a viewport into a list of lines, handling scroll position.
  */
-import { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Box, Text, useInput } from 'ink';
 export const ScrollableBox = ({ lines, height, focused = false, autoScroll = true, title, borderColor = 'gray', }) => {
     const [scrollTop, setScrollTop] = useState(0);

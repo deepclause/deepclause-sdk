@@ -3,7 +3,7 @@ import { jsxs as _jsxs } from "react/jsx-runtime";
  * Animated spinner component using Ink's built-in rendering.
  * Only re-renders when the frame changes (no setInterval abuse).
  */
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Text } from 'ink';
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const INTERVAL_MS = 80;

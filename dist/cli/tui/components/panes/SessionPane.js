@@ -1,4 +1,9 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+/**
+ * Session pane component.
+ * Collapsible sidebar showing session list. Default collapsed to icon-width.
+ */
+import React from 'react';
 import { Box, Text } from 'ink';
 export const SessionPane = ({ sessions, activeSessionId, collapsed, focused, }) => {
     if (collapsed) {

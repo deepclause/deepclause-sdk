@@ -12,7 +12,7 @@ export interface TUIOptions {
 /**
  * Start the Ink-based TUI (v2).
  */
-export declare function startTuiV2(workspaceRoot?: string, options?: {
+export declare function startTuiV2(workspaceRoot?: any, options?: {
     sandbox?: boolean;
 }): Promise<void>;
 /**

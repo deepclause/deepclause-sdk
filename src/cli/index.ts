@@ -17,6 +17,7 @@ import { formatToolArgs } from './tool-args.js';
 import { buildModelOverride, type ModelSlot } from '../system/config/model-slots.js';
 import { runPromptHeadless, startTui } from './tui.js';
 import { startTuiV2 } from './tui/index.js';
+import { startTuiV3 } from './tui-v3/index.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -711,7 +712,9 @@ async function main(): Promise<void> {
   const effectiveArgCount = argv.filter((a) => !a.startsWith('--tui') && a !== tuiVersion && a !== '--sandbox').length;
 
   if (effectiveArgCount === 0 && onlyRootFlags) {
-    if (tuiVersion === 'v2') {
+    if (tuiVersion === 'v3') {
+      await startTuiV3(process.cwd(), { sandbox: rootSandbox });
+    } else if (tuiVersion === 'v2') {
       await startTuiV2(process.cwd(), { sandbox: rootSandbox });
     } else {
       await startTui(process.cwd(), { sandbox: rootSandbox });

@@ -3,7 +3,7 @@ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
  * Fuzzy picker overlay component.
  * Provides a searchable list for selecting sessions, skills, files, etc.
  */
-import { useState } from 'react';
+import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 export const Picker = ({ title, items, onSelect, onCancel, emptyText = 'No items found.', }) => {
     const [query, setQuery] = useState('');

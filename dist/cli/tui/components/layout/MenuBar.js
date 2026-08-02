@@ -1,4 +1,8 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+/**
+ * Top menu bar component.
+ */
+import React from 'react';
 import { Box, Text } from 'ink';
 const MENU_ITEMS = ['Session', 'Skills', 'Files', 'Run', 'View', 'Help'];
 export const MenuBar = ({ sessionTitle, busy }) => {

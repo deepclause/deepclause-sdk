@@ -65,10 +65,10 @@ export interface SessionExecutionLogWriter {
     }): Promise<void>;
     flush(): Promise<void>;
 }
-export declare function listConductorSessions(workspaceRoot?: string): Promise<ConductorSessionSummary[]>;
-export declare function createConductorSession(workspaceRoot?: string, title?: string): Promise<ConductorSessionSummary>;
-export declare function getConductorSessionDetail(workspaceRoot: string | undefined, sessionId: string): Promise<ConductorSessionDetail>;
-export declare function appendConductorSessionMessages(workspaceRoot: string | undefined, sessionId: string, messages: Array<{
+export declare function listConductorSessions(workspaceRoot?: any): Promise<ConductorSessionSummary[]>;
+export declare function createConductorSession(workspaceRoot?: any, title?: string): Promise<ConductorSessionSummary>;
+export declare function getConductorSessionDetail(workspaceRoot: any, sessionId: string): Promise<ConductorSessionDetail>;
+export declare function appendConductorSessionMessages(workspaceRoot: any, sessionId: string, messages: Array<{
     role: 'user' | 'assistant';
     content: string;
 }>): Promise<void>;
