@@ -30,6 +30,7 @@ export interface AppState {
 
 export type AppAction =
   | { type: 'SET_FOCUSED_PANE'; pane: PaneKind }
+  | { type: 'CYCLE_PANE' }
   | { type: 'SET_MODE'; mode: UiMode }
   | { type: 'TOGGLE_SESSION_PANE' }
   | { type: 'SET_OVERLAY'; overlay: OverlayKind }
@@ -52,10 +53,17 @@ export function createInitialAppState(): AppState {
   };
 }
 
+const PANE_ORDER: PaneKind[] = ['sessions', 'messages', 'process', 'tasks', 'context'];
+
 export function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case 'SET_FOCUSED_PANE':
       return { ...state, focusedPane: action.pane };
+    case 'CYCLE_PANE': {
+      const idx = PANE_ORDER.indexOf(state.focusedPane);
+      const next = PANE_ORDER[(idx + 1) % PANE_ORDER.length];
+      return { ...state, focusedPane: next };
+    }
     case 'SET_MODE':
       return { ...state, mode: action.mode };
     case 'TOGGLE_SESSION_PANE':

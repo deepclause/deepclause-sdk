@@ -1,5 +1,6 @@
 /**
  * Hook for managing keyboard shortcuts in the Ink TUI.
+ * Only intercepts modifier-key combos and special keys when input is not active.
  */
 
 import { useInput } from 'ink';
@@ -7,7 +8,6 @@ import type { AppAction, PaneKind } from '../store/app-state.js';
 
 export interface KeyBindingOptions {
   dispatch: (action: AppAction) => void;
-  onSubmit: (text: string) => void;
   onCancel: () => void;
   inputActive: boolean;
 }
@@ -20,9 +20,7 @@ const PANE_KEYS: Record<string, PaneKind> = {
   '5': 'context',
 };
 
-const PANE_ORDER: PaneKind[] = ['sessions', 'messages', 'process', 'tasks', 'context'];
-
-export function useKeyBindings({ dispatch, onSubmit, onCancel, inputActive }: KeyBindingOptions): void {
+export function useKeyBindings({ dispatch, onCancel, inputActive }: KeyBindingOptions): void {
   useInput((input, key) => {
     // Global shortcuts (always active)
     if (key.ctrl && input === 'c') {
@@ -30,16 +28,8 @@ export function useKeyBindings({ dispatch, onSubmit, onCancel, inputActive }: Ke
       return;
     }
 
-    if (key.ctrl && input === 'l') {
-      // Refresh / redraw
-      return;
-    }
-
-    // When input is active, don't intercept normal keys
+    // When input is active, don't intercept anything else
     if (inputActive) {
-      if (key.return) {
-        onSubmit(input);
-      }
       return;
     }
 
@@ -51,8 +41,7 @@ export function useKeyBindings({ dispatch, onSubmit, onCancel, inputActive }: Ke
 
     // Tab to cycle panes
     if (key.tab) {
-      // nextPane requires current state; dispatch will be enhanced later
-      dispatch({ type: 'SET_FOCUSED_PANE', pane: nextPane('messages') });
+      dispatch({ type: 'CYCLE_PANE' });
       return;
     }
 
@@ -68,12 +57,6 @@ export function useKeyBindings({ dispatch, onSubmit, onCancel, inputActive }: Ke
       return;
     }
 
-    // Enter command mode
-    if (input === ':' || input === '/') {
-      dispatch({ type: 'SET_MODE', mode: 'command' });
-      return;
-    }
-
     // Help overlay
     if (input === '?') {
       dispatch({ type: 'SET_OVERLAY', overlay: 'help' });
@@ -86,9 +69,4 @@ export function useKeyBindings({ dispatch, onSubmit, onCancel, inputActive }: Ke
       dispatch({ type: 'SET_MODE', mode: 'normal' });
     }
   });
-}
-
-function nextPane(current: PaneKind): PaneKind {
-  const idx = PANE_ORDER.indexOf(current);
-  return PANE_ORDER[(idx + 1) % PANE_ORDER.length];
 }

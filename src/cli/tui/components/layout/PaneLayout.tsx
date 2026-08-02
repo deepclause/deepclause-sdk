@@ -1,6 +1,6 @@
 /**
  * Flexible pane layout component.
- * Arranges panes in a configurable grid based on terminal size.
+ * Arranges panes in a configurable grid that uses the full terminal width.
  */
 
 import React from 'react';
@@ -18,34 +18,40 @@ interface PaneLayoutProps {
     context: React.ReactNode;
   };
   height: number;
+  columns: number;
 }
 
 export const PaneLayout: React.FC<PaneLayoutProps> = ({
   sessionPaneCollapsed,
   children,
   height,
+  columns,
 }) => {
   const sessionWidth = sessionPaneCollapsed ? 3 : 24;
-  const rightColumnHeight = Math.floor(height / 2);
+  // Right column: allocate ~30% of remaining width, minimum 30, maximum 50
+  const remainingWidth = columns - sessionWidth;
+  const rightWidth = Math.max(30, Math.min(50, Math.floor(remainingWidth * 0.3)));
+  const rightColumnHeight = Math.max(3, Math.floor(height * 0.5));
+  const tasksHeight = Math.max(3, Math.floor(height * 0.25));
 
   return (
-    <Box flexDirection="row" height={height} width="100%">
+    <Box flexDirection="row" height={height} width={columns}>
       {/* Left: Session pane */}
-      <Box width={sessionWidth} flexDirection="column">
+      <Box width={sessionWidth} flexDirection="column" height={height}>
         {children.sessions}
       </Box>
 
       {/* Center: Messages pane (takes remaining space) */}
-      <Box flexGrow={1} flexDirection="column">
+      <Box flexGrow={1} flexDirection="column" height={height}>
         {children.messages}
       </Box>
 
       {/* Right: Process, Tasks, Context stacked */}
-      <Box width={40} flexDirection="column">
+      <Box width={rightWidth} flexDirection="column" height={height}>
         <Box height={rightColumnHeight}>
           {children.process}
         </Box>
-        <Box height={Math.floor(rightColumnHeight / 2)}>
+        <Box height={tasksHeight}>
           {children.tasks}
         </Box>
         <Box flexGrow={1}>

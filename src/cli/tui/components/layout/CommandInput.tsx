@@ -1,5 +1,6 @@
 /**
  * Command input bar with basic Emacs/Vi key bindings.
+ * Always visible; activates on any character input when in normal mode.
  */
 
 import React, { useState } from 'react';
@@ -8,23 +9,36 @@ import { Box, Text, useInput } from 'ink';
 interface CommandInputProps {
   onSubmit: (value: string) => void;
   onEscape: () => void;
+  onActivate: () => void;
   placeholder?: string;
   prefix?: string;
   active: boolean;
+  busy?: boolean;
 }
 
 export const CommandInput: React.FC<CommandInputProps> = ({
   onSubmit,
   onEscape,
+  onActivate,
   placeholder = 'Type a message or /command…',
   prefix = '> ',
   active,
+  busy,
 }) => {
   const [value, setValue] = useState('');
   const [cursorPos, setCursorPos] = useState(0);
 
   useInput((input, key) => {
-    if (!active) return;
+    // If not active, activate on any printable key or ':' or '/'
+    if (!active) {
+      if (input && !key.ctrl && !key.meta && !key.escape) {
+        onActivate();
+        // Also capture this first character
+        setValue(input);
+        setCursorPos(input.length);
+      }
+      return;
+    }
 
     if (key.escape) {
       onEscape();
@@ -83,14 +97,15 @@ export const CommandInput: React.FC<CommandInputProps> = ({
       setValue((v) => v.slice(0, cursorPos) + input + v.slice(cursorPos));
       setCursorPos((p) => p + input.length);
     }
-  }, { isActive: active });
+  });
 
+  const displayPrefix = busy ? '⏳ ' : prefix;
   const displayValue = value || (active ? '' : placeholder);
   const isPlaceholder = !value && !active;
 
   return (
     <Box height={1} width="100%">
-      <Text color={active ? 'green' : 'gray'}>{prefix}</Text>
+      <Text color={active ? 'green' : 'gray'}>{displayPrefix}</Text>
       <Text dimColor={isPlaceholder}>
         {displayValue}
       </Text>

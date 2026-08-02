@@ -1,5 +1,6 @@
 /**
  * Hook for managing keyboard shortcuts in the Ink TUI.
+ * Only intercepts modifier-key combos and special keys when input is not active.
  */
 import { useInput } from 'ink';
 const PANE_KEYS = {
@@ -9,23 +10,15 @@ const PANE_KEYS = {
     '4': 'tasks',
     '5': 'context',
 };
-const PANE_ORDER = ['sessions', 'messages', 'process', 'tasks', 'context'];
-export function useKeyBindings({ dispatch, onSubmit, onCancel, inputActive }) {
+export function useKeyBindings({ dispatch, onCancel, inputActive }) {
     useInput((input, key) => {
         // Global shortcuts (always active)
         if (key.ctrl && input === 'c') {
             onCancel();
             return;
         }
-        if (key.ctrl && input === 'l') {
-            // Refresh / redraw
-            return;
-        }
-        // When input is active, don't intercept normal keys
+        // When input is active, don't intercept anything else
         if (inputActive) {
-            if (key.return) {
-                onSubmit(input);
-            }
             return;
         }
         // Pane focus shortcuts (Alt+1..5)
@@ -35,8 +28,7 @@ export function useKeyBindings({ dispatch, onSubmit, onCancel, inputActive }) {
         }
         // Tab to cycle panes
         if (key.tab) {
-            // nextPane requires current state; dispatch will be enhanced later
-            dispatch({ type: 'SET_FOCUSED_PANE', pane: nextPane('messages') });
+            dispatch({ type: 'CYCLE_PANE' });
             return;
         }
         // Toggle session pane
@@ -47,11 +39,6 @@ export function useKeyBindings({ dispatch, onSubmit, onCancel, inputActive }) {
         // Toggle auto-scroll
         if (key.ctrl && input === 'f') {
             dispatch({ type: 'TOGGLE_AUTO_SCROLL' });
-            return;
-        }
-        // Enter command mode
-        if (input === ':' || input === '/') {
-            dispatch({ type: 'SET_MODE', mode: 'command' });
             return;
         }
         // Help overlay
@@ -65,9 +52,5 @@ export function useKeyBindings({ dispatch, onSubmit, onCancel, inputActive }) {
             dispatch({ type: 'SET_MODE', mode: 'normal' });
         }
     });
-}
-function nextPane(current) {
-    const idx = PANE_ORDER.indexOf(current);
-    return PANE_ORDER[(idx + 1) % PANE_ORDER.length];
 }
 //# sourceMappingURL=useKeyBindings.js.map

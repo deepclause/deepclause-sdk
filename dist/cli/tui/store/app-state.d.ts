@@ -29,6 +29,8 @@ export type AppAction = {
     type: 'SET_FOCUSED_PANE';
     pane: PaneKind;
 } | {
+    type: 'CYCLE_PANE';
+} | {
     type: 'SET_MODE';
     mode: UiMode;
 } | {

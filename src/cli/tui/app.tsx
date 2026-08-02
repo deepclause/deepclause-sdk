@@ -18,7 +18,6 @@ import { appReducer, createInitialAppState } from './store/app-state.js';
 import { sessionReducer, createInitialSessionState } from './store/session-store.js';
 import { executionReducer, createInitialExecutionState } from './store/execution-store.js';
 import { useSession } from './hooks/useSession.js';
-import { useExecution } from './hooks/useExecution.js';
 import { useKeyBindings } from './hooks/useKeyBindings.js';
 
 interface AppProps {
@@ -26,7 +25,7 @@ interface AppProps {
   sandbox?: boolean;
 }
 
-export const App: React.FC<AppProps> = ({ workspaceRoot }) => {
+export const App: React.FC<AppProps> = ({ workspaceRoot, sandbox }) => {
   const { exit } = useApp();
   const { stdout } = useStdout();
 
@@ -43,29 +42,85 @@ export const App: React.FC<AppProps> = ({ workspaceRoot }) => {
         rows: stdout.rows ?? 24,
       });
     };
+    // Set initial size
+    handleResize();
     stdout.on('resize', handleResize);
     return () => { stdout.off('resize', handleResize); };
   }, [stdout]);
 
-  // Session management
-  const { sendMessage, selectSession } = useSession({
+  // Session management - wire execution dispatch for activity tracking
+  const { sendMessage, selectSession, createSession } = useSession({
     workspaceRoot,
     dispatch: sessionDispatch,
+    executionDispatch,
+    sandbox,
   });
 
-  // Execution monitoring
-  useExecution({ dispatch: executionDispatch });
-
-  // Handle command submission
+  // Handle command submission (text or slash commands)
   const handleSubmit = useCallback(async (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    // Handle slash commands
+    if (trimmed.startsWith('/')) {
+      const parts = trimmed.slice(1).split(/\s+/);
+      const command = parts[0];
+      const rawArgs = trimmed.slice(1 + command.length).trim();
+
+      switch (command) {
+        case 'exit':
+        case 'quit':
+          exit();
+          return;
+        case 'new':
+          appDispatch({ type: 'SET_BUSY', busy: true });
+          try {
+            await createSession(rawArgs || undefined);
+          } finally {
+            appDispatch({ type: 'SET_BUSY', busy: false });
+          }
+          return;
+        case 'sessions':
+          appDispatch({ type: 'TOGGLE_SESSION_PANE' });
+          return;
+        case 'help':
+          sessionDispatch({
+            type: 'APPEND_MESSAGE',
+            message: {
+              role: 'system',
+              content: [
+                'Commands:',
+                '  /new [title]    Create a new session',
+                '  /sessions       Toggle session list',
+                '  /help           Show this help',
+                '  /exit           Quit the TUI',
+                '',
+                'Shortcuts:',
+                '  Ctrl+C          Cancel / Quit',
+                '  Ctrl+B          Toggle session pane',
+                '  Alt+1..5        Focus pane',
+                '  Tab             Cycle panes',
+                '  ?               Help',
+              ].join('\n'),
+            },
+          });
+          return;
+        case 'cancel':
+          // TODO: wire abort signal
+          return;
+        default:
+          // Pass unknown slash commands as messages to conductor (skill invocations)
+          break;
+      }
+    }
+
     appDispatch({ type: 'SET_BUSY', busy: true });
-    appDispatch({ type: 'SET_MODE', mode: 'normal' });
     try {
-      await sendMessage(text);
+      await sendMessage(trimmed);
     } finally {
       appDispatch({ type: 'SET_BUSY', busy: false });
     }
-  }, [sendMessage]);
+  }, [sendMessage, createSession, exit, sessionDispatch, appDispatch]);
 
   // Handle cancel/quit
   const handleCancel = useCallback(() => {
@@ -80,13 +135,12 @@ export const App: React.FC<AppProps> = ({ workspaceRoot }) => {
   // Keyboard bindings
   useKeyBindings({
     dispatch: appDispatch,
-    onSubmit: (text: string) => { void handleSubmit(text); },
     onCancel: handleCancel,
     inputActive: appState.mode === 'command',
   });
 
-  const contentHeight = Math.max(1, appState.rows - 4); // menu + status + input + borders
-  const sessionTitle = sessionState.activeDetail?.title ?? 'No session';
+  const contentHeight = Math.max(1, appState.rows - 3); // menu + input + status
+  const sessionTitle = sessionState.activeDetail?.title ?? (sessionState.loading ? 'Loading…' : 'No session');
 
   return (
     <Box flexDirection="column" width={appState.columns} height={appState.rows}>
@@ -98,6 +152,7 @@ export const App: React.FC<AppProps> = ({ workspaceRoot }) => {
         sessionPaneCollapsed={appState.sessionPaneCollapsed}
         focusedPane={appState.focusedPane}
         height={contentHeight}
+        columns={appState.columns}
       >
         {{
           sessions: (
@@ -143,10 +198,12 @@ export const App: React.FC<AppProps> = ({ workspaceRoot }) => {
         }}
       </PaneLayout>
 
-      {/* Command input */}
+      {/* Command input - always active */}
       <CommandInput
         active={appState.mode === 'command'}
+        busy={appState.busy}
         onSubmit={(text) => { void handleSubmit(text); }}
+        onActivate={() => appDispatch({ type: 'SET_MODE', mode: 'command' })}
         onEscape={() => appDispatch({ type: 'SET_MODE', mode: 'normal' })}
       />
 

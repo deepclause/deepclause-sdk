@@ -16,10 +16,16 @@ export function createInitialAppState() {
         autoScroll: true,
     };
 }
+const PANE_ORDER = ['sessions', 'messages', 'process', 'tasks', 'context'];
 export function appReducer(state, action) {
     switch (action.type) {
         case 'SET_FOCUSED_PANE':
             return { ...state, focusedPane: action.pane };
+        case 'CYCLE_PANE': {
+            const idx = PANE_ORDER.indexOf(state.focusedPane);
+            const next = PANE_ORDER[(idx + 1) % PANE_ORDER.length];
+            return { ...state, focusedPane: next };
+        }
         case 'SET_MODE':
             return { ...state, mode: action.mode };
         case 'TOGGLE_SESSION_PANE':
