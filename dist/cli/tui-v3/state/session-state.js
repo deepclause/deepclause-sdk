@@ -38,6 +38,10 @@ export function sessionReducer(state, action) {
                     },
                 }
                 : state;
+        case 'SET_EXECUTION_TASK':
+            return state.executionPreview
+                ? { ...state, executionPreview: { ...state.executionPreview, task: action.task } }
+                : state;
         case 'COMPLETE_EXECUTION_PREVIEW':
             return state.executionPreview
                 ? { ...state, executionPreview: { ...state.executionPreview, complete: true, expanded: false } }

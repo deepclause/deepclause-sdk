@@ -16,6 +16,7 @@ export interface SessionSummary {
 export interface ExecutionPreview {
     label: string;
     content: string;
+    task?: string;
     complete: boolean;
     expanded: boolean;
 }
@@ -47,6 +48,9 @@ export type SessionAction = {
     type: 'UPDATE_EXECUTION_PREVIEW';
     content: string;
     label?: string;
+} | {
+    type: 'SET_EXECUTION_TASK';
+    task?: string;
 } | {
     type: 'COMPLETE_EXECUTION_PREVIEW';
 } | {

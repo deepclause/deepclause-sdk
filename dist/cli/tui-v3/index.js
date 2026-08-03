@@ -36,6 +36,8 @@ import { createInitialSessionState, sessionReducer, } from './state/session-stat
 import { createInitialExecutionState, executionReducer, } from './state/execution-state.js';
 import { style, ANSI, padRight, truncate } from './util/ansi.js';
 import { createConductorSession, getConductorSessionDetail, listConductorSessions, runConductorTurn, } from '../../system/runtime/conductor.js';
+import { formatSkillCreatorSummary, parseCommandBarInput, parseSetModelCommandArgs, runFileCommand, runSkillCreatorCommand, runSlashCommand, } from '../tui.js';
+import { setModel } from '../config.js';
 /**
  * Start the TUI v3 (differential renderer).
  * Returns when the user exits.
@@ -290,7 +292,7 @@ export async function startTuiV3(workspaceRoot = process.cwd(), options = {}) {
         // Sync context pane
         contextComp.setTokenUsage(executionState.tokenUsage);
         contextComp.setContextTokens(executionState.contextTokens);
-        input.setActive(!appState.busy);
+        input.setActive(true);
         // Sync status bar
         statusBar.setMode(appState.mode);
         statusBar.setFocusedPane(appState.focusedPane);
@@ -302,14 +304,24 @@ export async function startTuiV3(workspaceRoot = process.cwd(), options = {}) {
     // --- Command handling ---
     async function handleSubmit(text) {
         const trimmed = text.trim();
-        if (!trimmed || appState.busy)
+        if (!trimmed)
             return;
-        // Slash commands
-        if (trimmed.startsWith('/')) {
-            const parts = trimmed.slice(1).split(/\s+/);
-            const command = parts[0];
-            const rawArgs = trimmed.slice(1 + command.length).trim();
-            switch (command) {
+        const parsed = parseCommandBarInput(trimmed);
+        if (appState.busy) {
+            if (parsed.kind === 'builtin' && parsed.name === 'cancel') {
+                cancelExecution();
+            }
+            else if (parsed.kind === 'builtin' && (parsed.name === 'exit' || parsed.name === 'quit')) {
+                cancelExecution();
+                eventLoop.stop();
+            }
+            else {
+                appendCommandError(new Error('An execution is already running. Use /cancel or Ctrl+C first.'));
+            }
+            return;
+        }
+        if (parsed.kind === 'builtin') {
+            switch (parsed.name) {
                 case 'exit':
                 case 'quit':
                     eventLoop.stop();
@@ -317,7 +329,7 @@ export async function startTuiV3(workspaceRoot = process.cwd(), options = {}) {
                 case 'new':
                     dispatchApp({ type: 'SET_BUSY', busy: true });
                     try {
-                        await createNewSession(rawArgs || undefined);
+                        await createNewSession(parsed.rawArgs || undefined);
                     }
                     finally {
                         dispatchApp({ type: 'SET_BUSY', busy: false });
@@ -330,18 +342,66 @@ export async function startTuiV3(workspaceRoot = process.cwd(), options = {}) {
                     helpDialog.show();
                     return;
                 case 'cancel':
-                    if (abortController) {
-                        abortController.abort();
+                    cancelExecution();
+                    return;
+                case 'set-model': {
+                    try {
+                        const { model, slot } = parseSetModelCommandArgs(parsed.rawArgs);
+                        const result = await setModel(workspaceRoot, model, slot);
+                        dispatchSession({
+                            type: 'APPEND_MESSAGE',
+                            message: {
+                                role: 'system',
+                                content: `Model set to ${result.modelId} (${result.updatedSlots.join(', ')}).`,
+                            },
+                        });
+                    }
+                    catch (error) {
+                        appendCommandError(error);
                     }
                     return;
-                default:
-                    break;
+                }
+                case 'run':
+                    if (parsed.args.length === 0) {
+                        appendCommandError(new Error('Provide a DML file after /run.'));
+                        return;
+                    }
+                    await runDirectCommand(`/${parsed.name} ${parsed.rawArgs}`, (signal, onEvent) => runFileCommand(workspaceRoot, parsed.args[0], parsed.args.slice(1), {
+                        sessionId: sessionState.activeSessionId ?? undefined,
+                        sandbox: options.sandbox,
+                        signal,
+                        onEvent,
+                        onUserInput: requestUserInput,
+                    }));
+                    return;
+                case 'compile':
+                case 'skill-creator':
+                    if (!parsed.rawArgs) {
+                        appendCommandError(new Error(`Provide a skill specification after /${parsed.name}.`));
+                        return;
+                    }
+                    await runDirectCommand(`/${parsed.name} ${parsed.rawArgs}`, async (signal, onEvent) => {
+                        if (!sessionState.activeSessionId)
+                            await createNewSession();
+                        const result = await runSkillCreatorCommand(workspaceRoot, sessionState.activeSessionId, parsed.rawArgs, { sandbox: options.sandbox, signal, onEvent, onUserInput: requestUserInput });
+                        return { answer: formatSkillCreatorSummary(workspaceRoot, result) };
+                    });
+                    return;
             }
         }
-        // Send message
+        if (parsed.kind === 'skill') {
+            await runDirectCommand(`/${parsed.name}${parsed.rawArgs ? ` ${parsed.rawArgs}` : ''}`, (signal, onEvent) => runSlashCommand(workspaceRoot, parsed.name, parsed.args, {
+                sessionId: sessionState.activeSessionId ?? undefined,
+                sandbox: options.sandbox,
+                signal,
+                onEvent,
+                onUserInput: requestUserInput,
+            }));
+            return;
+        }
         dispatchApp({ type: 'SET_BUSY', busy: true });
         try {
-            await sendMessage(trimmed);
+            await sendMessage(parsed.kind === 'text' ? parsed.prompt : trimmed);
         }
         finally {
             dispatchApp({ type: 'SET_BUSY', busy: false });
@@ -349,7 +409,83 @@ export async function startTuiV3(workspaceRoot = process.cwd(), options = {}) {
     }
     // --- Session management ---
     let abortController = null;
+    let cancelRequested = false;
+    let pendingInputResolve = null;
     let memoryContextTokens = 0;
+    function appendCommandError(error) {
+        dispatchSession({
+            type: 'APPEND_MESSAGE',
+            message: { role: 'system', content: error.message, error: true },
+        });
+    }
+    function requestUserInput(question) {
+        dispatchSession({ type: 'APPEND_MESSAGE', message: { role: 'system', content: question } });
+        input.setPrompt('? ');
+        return new Promise((resolve) => {
+            pendingInputResolve = resolve;
+        });
+    }
+    function cancelExecution() {
+        cancelRequested = true;
+        abortController?.abort();
+        if (pendingInputResolve) {
+            pendingInputResolve('');
+            pendingInputResolve = null;
+            input.setPrompt('› ');
+        }
+    }
+    async function runDirectCommand(label, execute) {
+        if (!sessionState.activeSessionId)
+            await createNewSession();
+        dispatchApp({ type: 'SET_BUSY', busy: true });
+        dispatchSession({ type: 'APPEND_MESSAGE', message: { role: 'user', content: label } });
+        dispatchSession({ type: 'START_EXECUTION_PREVIEW', label });
+        abortController = new AbortController();
+        cancelRequested = false;
+        let preview = '';
+        const activeTasks = new Map();
+        try {
+            const result = await execute(abortController.signal, (logEvent) => {
+                const content = logEvent.event.content;
+                if (content && (logEvent.event.type === 'stream' || logEvent.event.type === 'log')) {
+                    preview += content;
+                    dispatchSession({ type: 'UPDATE_EXECUTION_PREVIEW', content: preview, label });
+                }
+                updateExecutionTask(logEvent, activeTasks);
+            });
+            const message = result.answer || result.error;
+            if (message) {
+                dispatchSession({
+                    type: 'APPEND_MESSAGE',
+                    message: { role: result.error ? 'system' : 'assistant', content: message, error: Boolean(result.error) },
+                });
+            }
+        }
+        catch (error) {
+            appendCommandError(error);
+        }
+        finally {
+            dispatchSession({ type: 'COMPLETE_EXECUTION_PREVIEW' });
+            abortController = null;
+            dispatchApp({ type: 'SET_BUSY', busy: false });
+        }
+    }
+    function updateExecutionTask(logEvent, activeTasks) {
+        const { event } = logEvent;
+        if (event.type !== 'task_activity' || !event.taskId)
+            return;
+        const key = `${logEvent.scope}:${logEvent.childSlug ?? ''}:${event.taskId}`;
+        if (event.taskState === 'started') {
+            activeTasks.set(key, event.taskDescription || 'Task');
+        }
+        else {
+            activeTasks.delete(key);
+        }
+        dispatchSession({
+            type: 'SET_EXECUTION_TASK',
+            task: Array.from(activeTasks.values()).at(-1),
+        });
+    }
     async function createNewSession(title) {
         dispatchSession({ type: 'SET_LOADING', loading: true });
         try {
@@ -412,7 +548,9 @@ export async function startTuiV3(workspaceRoot = process.cwd(), options = {}) {
         let streamBuffer = '';
         let answerReceived = false;
         const displayedTools = new Set();
+        const activeTasks = new Map();
         abortController = new AbortController();
+        cancelRequested = false;
         try {
             const result = await runConductorTurn(text, {
                 workspaceRoot,
@@ -423,6 +561,7 @@ export async function startTuiV3(workspaceRoot = process.cwd(), options = {}) {
                 signal: abortController.signal,
                 onEvent: (logEvent) => {
                     const { event } = logEvent;
+                    updateExecutionTask(logEvent, activeTasks);
                     // Handle streaming text
                     if (!answerReceived && event.type === 'stream' && event.content) {
                         streamBuffer += event.content;
@@ -515,7 +654,23 @@ export async function startTuiV3(workspaceRoot = process.cwd(), options = {}) {
         }
     }
     // --- Wire callbacks ---
-    input.setOnSubmit((text) => { void handleSubmit(text); });
+    input.setOnSubmit((text) => {
+        if (pendingInputResolve) {
+            const parsed = parseCommandBarInput(text);
+            if (parsed.kind === 'builtin'
+                && (parsed.name === 'cancel' || parsed.name === 'exit' || parsed.name === 'quit')) {
+                void handleSubmit(text);
+                return;
+            }
+            const resolve = pendingInputResolve;
+            pendingInputResolve = null;
+            input.setPrompt('› ');
+            dispatchSession({ type: 'APPEND_MESSAGE', message: { role: 'user', content: text } });
+            resolve(text);
+            return;
+        }
+        void handleSubmit(text);
+    });
     sessionsComp.setOnSelect((id) => {
         if (!appState.busy) {
             dispatchApp({ type: 'SET_BUSY', busy: true });
@@ -536,8 +691,8 @@ export async function startTuiV3(workspaceRoot = process.cwd(), options = {}) {
     const eventLoop = new EventLoop({
         root: rootComponent,
         onExit: () => {
-            if (appState.busy && abortController) {
-                abortController.abort();
+            if (appState.busy && abortController && !cancelRequested) {
+                cancelExecution();
             }
             else {
                 eventLoop.stop();

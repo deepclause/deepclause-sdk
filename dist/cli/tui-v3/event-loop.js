@@ -24,15 +24,52 @@ const FUNCTION_KEY_SEQUENCES = {
 export function normalizeKeyEvent(ch, key) {
     const sequence = key?.sequence ?? ch ?? '';
     const functionKey = FUNCTION_KEY_SEQUENCES[sequence];
-    const modifiedEnter = sequence.match(/^\x1b\[13;([2-8])u$/)
-        ?? sequence.match(/^\x1b\[27;([2-8]);13~$/);
-    const modifier = modifiedEnter ? Number(modifiedEnter[1]) - 1 : 0;
+    const csiUnicodeKey = sequence.match(/^\x1b\[(\d+)(?::\d+)?(?:;(\d+)(?::\d+)?)?u$/);
+    const modifyOtherKey = sequence.match(/^\x1b\[27;(\d+);(\d+)~$/);
+    const enhancedCodepoint = csiUnicodeKey
+        ? Number(csiUnicodeKey[1])
+        : modifyOtherKey
+            ? Number(modifyOtherKey[2])
+            : undefined;
+    const modifier = csiUnicodeKey
+        ? Number(csiUnicodeKey[2] ?? 1) - 1
+        : modifyOtherKey
+            ? Number(modifyOtherKey[1]) - 1
+            : 0;
+    const controlCode = sequence.length === 1 ? sequence.charCodeAt(0) : 0;
+    const controlName = controlCode >= 1 && controlCode <= 26
+        && controlCode !== 9 && controlCode !== 10 && controlCode !== 13
+        ? String.fromCharCode(controlCode + 96)
+        : '';
+    const enhancedName = enhancedCodepoint === 27
+        ? 'escape'
+        : enhancedCodepoint === 13
+            ? 'return'
+            : enhancedCodepoint === 9
+                ? 'tab'
+                : enhancedCodepoint === 127
+                    ? 'backspace'
+                    : enhancedCodepoint !== undefined
+                        ? String.fromCodePoint(enhancedCodepoint).toLowerCase()
+                        : '';
+    const normalizedSequence = enhancedCodepoint === 27
+        ? '\x1b'
+        : enhancedCodepoint !== undefined && enhancedCodepoint >= 32
+            ? String.fromCodePoint(enhancedCodepoint)
+            : sequence;
     return {
-        name: functionKey ?? (modifiedEnter ? 'return' : key?.name === 'enter' ? 'return' : key?.name ?? ''),
-        sequence,
-        ctrl: key?.ctrl ?? Boolean(modifier & 4),
-        meta: key?.meta ?? Boolean(modifier & 2),
-        shift: key?.shift ?? Boolean(modifier & 1),
+        name: functionKey
+            ?? (enhancedName
+                ? enhancedName
+                : sequence === '\x1b'
+                    ? 'escape'
+                    : key?.name === 'enter'
+                        ? 'return'
+                        : key?.name || controlName),
+        sequence: normalizedSequence,
+        ctrl: Boolean(key?.ctrl || controlName || (modifier & 4)),
+        meta: Boolean(key?.meta || (modifier & 2)),
+        shift: Boolean(key?.shift || (modifier & 1)),
     };
 }
 /**
