@@ -15,6 +15,35 @@ export function visibleLength(text) {
     return stripAnsi(text).length;
 }
 /**
+ * Clip a string to a maximum visible width without splitting ANSI sequences.
+ * Unlike truncate(), this does not add an ellipsis.
+ */
+export function clipAnsi(text, maxWidth) {
+    if (maxWidth <= 0)
+        return '';
+    if (visibleLength(text) <= maxWidth)
+        return text;
+    let visible = 0;
+    let result = '';
+    let i = 0;
+    let styled = false;
+    while (i < text.length && visible < maxWidth) {
+        if (text[i] === '\x1b') {
+            const match = text.slice(i).match(/^\u001b\[[0-9;]*[A-Za-z]/);
+            if (match) {
+                result += match[0];
+                styled = true;
+                i += match[0].length;
+                continue;
+            }
+        }
+        result += text[i];
+        visible++;
+        i++;
+    }
+    return styled ? result + ANSI.reset : result;
+}
+/**
  * Truncate a string to a maximum visible width, preserving ANSI codes.
  * Appends '…' if truncated.
  */

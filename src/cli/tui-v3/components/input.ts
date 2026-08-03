@@ -4,7 +4,7 @@
  */
 
 import type { Component, KeyEvent, RequestRender } from '../types.js';
-import { style, ANSI } from '../util/ansi.js';
+import { style, ANSI, visibleLength } from '../util/ansi.js';
 
 export class Input implements Component {
   dirty = true;
@@ -16,7 +16,7 @@ export class Input implements Component {
   private cursorRow = 0;
   private cursorCol = 0;
   private _active = true;
-  private prompt = '│ ';
+  private prompt = '› ';
   private maxVisibleLines = 5;
   private scrollOffset = 0;
   private onSubmit: ((text: string) => void) | null = null;
@@ -86,7 +86,8 @@ export class Input implements Component {
 
   render(width: number): string[] {
     const rows: string[] = [];
-    const contentWidth = Math.max(10, width - this.prompt.length);
+    const promptWidth = visibleLength(this.prompt);
+    const contentWidth = Math.max(1, width - promptWidth - 2);
 
     // Top border
     rows.push(style('┌' + '─'.repeat(width - 2) + '┐', ANSI.cyan));
@@ -104,8 +105,8 @@ export class Input implements Component {
     for (let i = this.scrollOffset; i < visibleEnd; i++) {
       const lineText = this.lines[i];
       const prefix = i === this.scrollOffset && i === 0
-        ? style('│› ', ANSI.cyan)
-        : style('│  ', ANSI.cyan);
+        ? style(`│${this.prompt}`, ANSI.cyan)
+        : style(`│${' '.repeat(promptWidth)}`, ANSI.cyan);
       const suffix = style('│', ANSI.cyan);
 
       if (this._active && i === this.cursorRow) {
@@ -126,7 +127,7 @@ export class Input implements Component {
 
     // Pad any unused visible editor lines
     for (let i = visibleEnd - this.scrollOffset; i < visibleLineCount; i++) {
-      const prefix = style('│  ', ANSI.cyan);
+      const prefix = style(`│${' '.repeat(promptWidth)}`, ANSI.cyan);
       const suffix = style('│', ANSI.cyan);
       rows.push(prefix + ' '.repeat(contentWidth) + suffix);
     }

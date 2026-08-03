@@ -9,6 +9,32 @@
  */
 import { emitKeypressEvents } from 'readline';
 import { Renderer } from './renderer.js';
+const FUNCTION_KEY_SEQUENCES = {
+    '\x1bOP': 'f1',
+    '\x1bOQ': 'f2',
+    '\x1bOR': 'f3',
+    '\x1bOS': 'f4',
+    '\x1b[11~': 'f1',
+    '\x1b[12~': 'f2',
+    '\x1b[13~': 'f3',
+    '\x1b[14~': 'f4',
+    '\x1b[15~': 'f5',
+    '\x1b[17~': 'f6',
+};
+export function normalizeKeyEvent(ch, key) {
+    const sequence = key?.sequence ?? ch ?? '';
+    const functionKey = FUNCTION_KEY_SEQUENCES[sequence];
+    const modifiedEnter = sequence.match(/^\x1b\[13;([2-8])u$/)
+        ?? sequence.match(/^\x1b\[27;([2-8]);13~$/);
+    const modifier = modifiedEnter ? Number(modifiedEnter[1]) - 1 : 0;
+    return {
+        name: functionKey ?? (modifiedEnter ? 'return' : key?.name === 'enter' ? 'return' : key?.name ?? ''),
+        sequence,
+        ctrl: key?.ctrl ?? Boolean(modifier & 4),
+        meta: key?.meta ?? Boolean(modifier & 2),
+        shift: key?.shift ?? Boolean(modifier & 1),
+    };
+}
 /**
  * The event loop manages:
  * 1. Terminal input → keypress parsing → dispatch to root component
@@ -114,16 +140,10 @@ export class EventLoop {
         this.root.dirty = false;
     }
     /** Handle a keypress from stdin. */
-    handleKeypress = (_ch, key) => {
-        if (!key)
+    handleKeypress = (ch, key) => {
+        const event = normalizeKeyEvent(ch, key);
+        if (!event)
             return;
-        const event = {
-            name: key.name ?? '',
-            sequence: key.sequence ?? '',
-            ctrl: key.ctrl ?? false,
-            meta: key.meta ?? false,
-            shift: key.shift ?? false,
-        };
         // Ctrl+C fallback — if no component handles it, exit
         if (event.ctrl && event.name === 'c') {
             if (this.root.handleInput && this.root.handleInput(event)) {

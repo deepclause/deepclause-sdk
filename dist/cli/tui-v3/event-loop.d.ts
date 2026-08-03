@@ -8,7 +8,14 @@
  * - No interval timers — only renders when something changes
  */
 import { Renderer, type RendererOptions } from './renderer.js';
-import type { Component } from './types.js';
+import type { Component, KeyEvent } from './types.js';
+export declare function normalizeKeyEvent(ch: string | undefined, key: {
+    name?: string;
+    sequence?: string;
+    ctrl?: boolean;
+    meta?: boolean;
+    shift?: boolean;
+} | undefined): KeyEvent | null;
 export interface EventLoopOptions extends RendererOptions {
     /** The root component to render */
     root: Component;

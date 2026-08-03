@@ -2,7 +2,7 @@
  * Input component — multiline text editor with cursor navigation.
  * Supports Enter for newline, Ctrl+Enter / Ctrl+D to submit.
  */
-import { style, ANSI } from '../util/ansi.js';
+import { style, ANSI, visibleLength } from '../util/ansi.js';
 export class Input {
     dirty = true;
     minHeight = 3;
@@ -12,7 +12,7 @@ export class Input {
     cursorRow = 0;
     cursorCol = 0;
     _active = true;
-    prompt = '│ ';
+    prompt = '› ';
     maxVisibleLines = 5;
     scrollOffset = 0;
     onSubmit = null;
@@ -60,29 +60,35 @@ export class Input {
     get active() {
         return this._active;
     }
+    /** Current rendered height: borders plus the visible editor lines. */
+    get height() {
+        return Math.min(this.maxVisibleLines, Math.max(1, this.lines.length)) + 2;
+    }
     invalidate() {
         this.dirty = true;
         this.requestRenderFn();
     }
     render(width) {
         const rows = [];
-        const contentWidth = Math.max(10, width - this.prompt.length);
+        const promptWidth = visibleLength(this.prompt);
+        const contentWidth = Math.max(1, width - promptWidth - 2);
         // Top border
         rows.push(style('┌' + '─'.repeat(width - 2) + '┐', ANSI.cyan));
         // Ensure cursor is visible within scroll window
+        const visibleLineCount = this.height - 2;
         if (this.cursorRow < this.scrollOffset) {
             this.scrollOffset = this.cursorRow;
         }
-        else if (this.cursorRow >= this.scrollOffset + this.maxVisibleLines) {
-            this.scrollOffset = this.cursorRow - this.maxVisibleLines + 1;
+        else if (this.cursorRow >= this.scrollOffset + visibleLineCount) {
+            this.scrollOffset = this.cursorRow - visibleLineCount + 1;
         }
         // Render visible lines
-        const visibleEnd = Math.min(this.lines.length, this.scrollOffset + this.maxVisibleLines);
+        const visibleEnd = Math.min(this.lines.length, this.scrollOffset + visibleLineCount);
         for (let i = this.scrollOffset; i < visibleEnd; i++) {
             const lineText = this.lines[i];
             const prefix = i === this.scrollOffset && i === 0
-                ? style('│› ', ANSI.cyan)
-                : style('│  ', ANSI.cyan);
+                ? style(`│${this.prompt}`, ANSI.cyan)
+                : style(`│${' '.repeat(promptWidth)}`, ANSI.cyan);
             const suffix = style('│', ANSI.cyan);
             if (this._active && i === this.cursorRow) {
                 // Render with cursor
@@ -100,9 +106,9 @@ export class Input {
                 rows.push(prefix + textPart + ' '.repeat(pad) + suffix);
             }
         }
-        // Pad remaining visible lines if fewer than maxVisibleLines
-        for (let i = visibleEnd - this.scrollOffset; i < this.maxVisibleLines; i++) {
-            const prefix = style('│  ', ANSI.cyan);
+        // Pad any unused visible editor lines
+        for (let i = visibleEnd - this.scrollOffset; i < visibleLineCount; i++) {
+            const prefix = style(`│${' '.repeat(promptWidth)}`, ANSI.cyan);
             const suffix = style('│', ANSI.cyan);
             rows.push(prefix + ' '.repeat(contentWidth) + suffix);
         }

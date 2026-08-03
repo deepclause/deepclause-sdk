@@ -111,7 +111,7 @@ export async function startTuiV3(workspaceRoot = process.cwd(), options = {}) {
         invalidate() { this.dirty = true; requestRender(); },
         render(width) {
             const rows = [];
-            const totalHeight = appState.rows - 10; // Rough: header(1) + input(7) + status(1) + padding
+            const totalHeight = Math.max(3, appState.rows - 1 - input.height - 1);
             // Divide right column among visible panes
             const visiblePanes = [];
             if (appState.paneVisibility.process) {
@@ -126,8 +126,10 @@ export async function startTuiV3(workspaceRoot = process.cwd(), options = {}) {
             if (visiblePanes.length === 0) {
                 return Array(totalHeight).fill('');
             }
-            const paneHeight = Math.max(5, Math.floor(totalHeight / visiblePanes.length));
+            const basePaneHeight = Math.floor(totalHeight / visiblePanes.length);
+            let remainingHeight = totalHeight % visiblePanes.length;
             for (const pane of visiblePanes) {
+                const paneHeight = basePaneHeight + (remainingHeight-- > 0 ? 1 : 0);
                 const content = pane.scroll.renderWithHeight(width - 2, paneHeight - 2);
                 const bordered = renderPaneWithBorder(pane.title, content, width, paneHeight, appState.focusedPane === pane.key);
                 rows.push(...bordered);
@@ -150,15 +152,18 @@ export async function startTuiV3(workspaceRoot = process.cwd(), options = {}) {
             // === Header (1 row) ===
             rows.push(...header.render(width));
             // === Main content area ===
-            // Height = total - header(1) - input(~7) - status(1)
-            const inputHeight = 7; // border(1) + 5 lines + border(1)
+            // Height = total - header(1) - dynamic input - status(1)
+            const inputHeight = input.height;
             const contentHeight = Math.max(3, height - 1 - inputHeight - 1);
             // Layout columns: [sessions?] [messages] [right-sidebar?]
             const sessionVisible = appState.paneVisibility.sessions;
             const rightVisible = appState.paneVisibility.process || appState.paneVisibility.tasks || appState.paneVisibility.context;
-            const sessionWidth = sessionVisible ? (sessionsComp.isCollapsed ? 5 : 26) : 0;
-            const rightWidth = rightVisible ? Math.max(30, Math.min(50, Math.floor(width * 0.3))) : 0;
-            const messagesWidth = Math.max(20, width - sessionWidth - rightWidth);
+            const sessionWidth = sessionVisible ? Math.min(sessionsComp.isCollapsed ? 5 : 26, Math.max(0, width - 20)) : 0;
+            const availableAfterSessions = Math.max(0, width - sessionWidth);
+            const rightWidth = rightVisible
+                ? Math.min(50, Math.max(0, availableAfterSessions - 20), Math.max(24, Math.floor(width * 0.3)))
+                : 0;
+            const messagesWidth = Math.max(0, width - sessionWidth - rightWidth);
             // Render each column
             const sessionRows = [];
             const messageRows = [];
@@ -252,11 +257,6 @@ export async function startTuiV3(workspaceRoot = process.cwd(), options = {}) {
                 helpDialog.show();
                 return true;
             }
-            // Tab: cycle through visible panes
-            if (key.name === 'tab' && !key.ctrl && !key.meta) {
-                dispatchApp({ type: 'CYCLE_PANE' });
-                return true;
-            }
             // Shift+Tab: cycle backwards
             if (key.name === 'tab' && key.shift) {
                 // Reverse cycle
@@ -267,6 +267,11 @@ export async function startTuiV3(workspaceRoot = process.cwd(), options = {}) {
                     const prev = visiblePanes[(idx - 1 + visiblePanes.length) % visiblePanes.length];
                     dispatchApp({ type: 'SET_FOCUSED_PANE', pane: prev });
                 }
+                return true;
+            }
+            // Tab: cycle through visible panes
+            if (key.name === 'tab' && !key.ctrl && !key.meta) {
+                dispatchApp({ type: 'CYCLE_PANE' });
                 return true;
             }
             // Alt+1-5: direct pane focus

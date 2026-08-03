@@ -31,7 +31,8 @@ export function normalizeKeyEvent(
 ): KeyEvent | null {
   const sequence = key?.sequence ?? ch ?? '';
   const functionKey = FUNCTION_KEY_SEQUENCES[sequence];
-  const modifiedEnter = sequence.match(/^\x1b\[(?:27;)?([2-8]);(?:13~|13u)$/);
+  const modifiedEnter = sequence.match(/^\x1b\[13;([2-8])u$/)
+    ?? sequence.match(/^\x1b\[27;([2-8]);13~$/);
   const modifier = modifiedEnter ? Number(modifiedEnter[1]) - 1 : 0;
 
   return {

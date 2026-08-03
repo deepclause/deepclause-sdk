@@ -9,6 +9,11 @@ export declare function stripAnsi(text: string): string;
 /** Measure the visible display width of a string (ignoring ANSI codes). */
 export declare function visibleLength(text: string): number;
 /**
+ * Clip a string to a maximum visible width without splitting ANSI sequences.
+ * Unlike truncate(), this does not add an ellipsis.
+ */
+export declare function clipAnsi(text: string, maxWidth: number): string;
+/**
  * Truncate a string to a maximum visible width, preserving ANSI codes.
  * Appends '…' if truncated.
  */

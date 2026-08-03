@@ -33,6 +33,8 @@ export declare class Input implements Component {
     /** Clear the input. */
     clear(): void;
     get active(): boolean;
+    /** Current rendered height: borders plus the visible editor lines. */
+    get height(): number;
     invalidate(): void;
     render(width: number): string[];
     handleInput(key: KeyEvent): boolean;

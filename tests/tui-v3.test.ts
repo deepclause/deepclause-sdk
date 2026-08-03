@@ -26,7 +26,9 @@ describe('TUI v3', () => {
     })).toBe(true);
     expect(input.getValue()).toBe('first line\n');
     expect(input.height).toBe(4);
-    expect(input.render(40)).toHaveLength(4);
+    const rows = input.render(40);
+    expect(rows).toHaveLength(4);
+    expect(rows.map(visibleLength)).toEqual([40, 40, 40, 40]);
   });
 
   it('normalizes function keys and enhanced modified Enter sequences', () => {
