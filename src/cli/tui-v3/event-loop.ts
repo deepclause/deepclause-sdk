@@ -12,6 +12,37 @@ import { emitKeypressEvents } from 'readline';
 import { Renderer, type RendererOptions } from './renderer.js';
 import type { Component, KeyEvent, ScreenBuffer } from './types.js';
 
+const FUNCTION_KEY_SEQUENCES: Record<string, string> = {
+  '\x1bOP': 'f1',
+  '\x1bOQ': 'f2',
+  '\x1bOR': 'f3',
+  '\x1bOS': 'f4',
+  '\x1b[11~': 'f1',
+  '\x1b[12~': 'f2',
+  '\x1b[13~': 'f3',
+  '\x1b[14~': 'f4',
+  '\x1b[15~': 'f5',
+  '\x1b[17~': 'f6',
+};
+
+export function normalizeKeyEvent(
+  ch: string | undefined,
+  key: { name?: string; sequence?: string; ctrl?: boolean; meta?: boolean; shift?: boolean } | undefined,
+): KeyEvent | null {
+  const sequence = key?.sequence ?? ch ?? '';
+  const functionKey = FUNCTION_KEY_SEQUENCES[sequence];
+  const modifiedEnter = sequence.match(/^\x1b\[(?:27;)?([2-8]);(?:13~|13u)$/);
+  const modifier = modifiedEnter ? Number(modifiedEnter[1]) - 1 : 0;
+
+  return {
+    name: functionKey ?? (modifiedEnter ? 'return' : key?.name === 'enter' ? 'return' : key?.name ?? ''),
+    sequence,
+    ctrl: key?.ctrl ?? Boolean(modifier & 4),
+    meta: key?.meta ?? Boolean(modifier & 2),
+    shift: key?.shift ?? Boolean(modifier & 1),
+  };
+}
+
 export interface EventLoopOptions extends RendererOptions {
   /** The root component to render */
   root: Component;
@@ -144,16 +175,9 @@ export class EventLoop {
   }
 
   /** Handle a keypress from stdin. */
-  private handleKeypress = (_ch: string | undefined, key: { name?: string; sequence?: string; ctrl?: boolean; meta?: boolean; shift?: boolean } | undefined): void => {
-    if (!key) return;
-
-    const event: KeyEvent = {
-      name: key.name ?? '',
-      sequence: key.sequence ?? '',
-      ctrl: key.ctrl ?? false,
-      meta: key.meta ?? false,
-      shift: key.shift ?? false,
-    };
+  private handleKeypress = (ch: string | undefined, key: { name?: string; sequence?: string; ctrl?: boolean; meta?: boolean; shift?: boolean } | undefined): void => {
+    const event = normalizeKeyEvent(ch, key);
+    if (!event) return;
 
     // Ctrl+C fallback — if no component handles it, exit
     if (event.ctrl && event.name === 'c') {

@@ -74,6 +74,11 @@ export class Input implements Component {
     return this._active;
   }
 
+  /** Current rendered height: borders plus the visible editor lines. */
+  get height(): number {
+    return Math.min(this.maxVisibleLines, Math.max(1, this.lines.length)) + 2;
+  }
+
   invalidate(): void {
     this.dirty = true;
     this.requestRenderFn();
@@ -87,14 +92,15 @@ export class Input implements Component {
     rows.push(style('┌' + '─'.repeat(width - 2) + '┐', ANSI.cyan));
 
     // Ensure cursor is visible within scroll window
+    const visibleLineCount = this.height - 2;
     if (this.cursorRow < this.scrollOffset) {
       this.scrollOffset = this.cursorRow;
-    } else if (this.cursorRow >= this.scrollOffset + this.maxVisibleLines) {
-      this.scrollOffset = this.cursorRow - this.maxVisibleLines + 1;
+    } else if (this.cursorRow >= this.scrollOffset + visibleLineCount) {
+      this.scrollOffset = this.cursorRow - visibleLineCount + 1;
     }
 
     // Render visible lines
-    const visibleEnd = Math.min(this.lines.length, this.scrollOffset + this.maxVisibleLines);
+    const visibleEnd = Math.min(this.lines.length, this.scrollOffset + visibleLineCount);
     for (let i = this.scrollOffset; i < visibleEnd; i++) {
       const lineText = this.lines[i];
       const prefix = i === this.scrollOffset && i === 0
@@ -118,8 +124,8 @@ export class Input implements Component {
       }
     }
 
-    // Pad remaining visible lines if fewer than maxVisibleLines
-    for (let i = visibleEnd - this.scrollOffset; i < this.maxVisibleLines; i++) {
+    // Pad any unused visible editor lines
+    for (let i = visibleEnd - this.scrollOffset; i < visibleLineCount; i++) {
       const prefix = style('│  ', ANSI.cyan);
       const suffix = style('│', ANSI.cyan);
       rows.push(prefix + ' '.repeat(contentWidth) + suffix);

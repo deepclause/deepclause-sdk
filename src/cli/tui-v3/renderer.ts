@@ -9,6 +9,7 @@
  */
 
 import type { ScreenBuffer } from './types.js';
+import { clipAnsi } from './util/ansi.js';
 
 /** ANSI escape sequences for terminal control. */
 const ESC = '\x1b[';
@@ -19,6 +20,8 @@ const CURSOR_SHOW = `${ESC}?25h`;
 const CLEAR_LINE = `${ESC}2K`;
 const MOUSE_ON = '\x1b[?1003h\x1b[?1006h';
 const MOUSE_OFF = '\x1b[?1003l\x1b[?1006l';
+const ENHANCED_KEYS_ON = '\x1b[>4;2m\x1b[>1u';
+const ENHANCED_KEYS_OFF = '\x1b[<u\x1b[>4m';
 
 function moveCursor(row: number, col: number): string {
   return `${ESC}${row + 1};${col + 1}H`;
@@ -72,6 +75,7 @@ export class Renderer {
     let init = '';
     if (this.useAltScreen) init += ALT_SCREEN_ON;
     init += CURSOR_HIDE;
+    init += ENHANCED_KEYS_ON;
     if (this.useMouse) init += MOUSE_ON;
     this.stdout.write(init);
 
@@ -85,6 +89,7 @@ export class Renderer {
 
     let cleanup = '';
     if (this.useMouse) cleanup += MOUSE_OFF;
+    cleanup += ENHANCED_KEYS_OFF;
     cleanup += CURSOR_SHOW;
     if (this.useAltScreen) cleanup += ALT_SCREEN_OFF;
     this.stdout.write(cleanup);
@@ -102,13 +107,15 @@ export class Renderer {
     const rows = this.rows;
     const cols = this.cols;
     let output = '';
+    const nextScreen: ScreenBuffer = [];
 
     // Hide cursor during render
     output += CURSOR_HIDE;
 
     for (let i = 0; i < rows; i++) {
-      const newRow = (screen[i] ?? '').slice(0, cols);
+      const newRow = clipAnsi(screen[i] ?? '', cols);
       const prevRow = this.prevScreen[i] ?? '';
+      nextScreen.push(newRow);
 
       if (newRow !== prevRow) {
         output += moveCursor(i, 0);
@@ -122,7 +129,7 @@ export class Renderer {
       this.stdout.write(output);
     }
 
-    this.prevScreen = screen.slice(0, rows);
+    this.prevScreen = nextScreen;
   }
 
   /**
