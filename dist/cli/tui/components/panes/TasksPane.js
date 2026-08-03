@@ -1,9 +1,4 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
-/**
- * Tasks/Steps pane component.
- * Displays a tree of execution steps with status markers.
- */
-import React from 'react';
 import { Box, Text } from 'ink';
 const STATE_MARKERS = {
     started: { char: '▸', color: 'yellow' },

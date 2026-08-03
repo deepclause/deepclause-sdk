@@ -1,9 +1,4 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
-/**
- * Messages pane component.
- * Displays chat messages with streaming support using <Static> for completed messages.
- */
-import React from 'react';
 import { Box, Static, Text } from 'ink';
 import { MessageBubble } from '../shared/MessageBubble.js';
 export const MessagesPane = ({ messages, streamingContent, focused, }) => {

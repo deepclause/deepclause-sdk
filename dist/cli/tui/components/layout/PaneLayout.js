@@ -1,9 +1,4 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
-/**
- * Flexible pane layout component.
- * Arranges panes in a configurable grid that uses the full terminal width.
- */
-import React from 'react';
 import { Box } from 'ink';
 export const PaneLayout = ({ sessionPaneCollapsed, children, height, columns, }) => {
     const sessionWidth = sessionPaneCollapsed ? 3 : 24;

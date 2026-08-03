@@ -1,9 +1,4 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
-/**
- * Execution/Process pane component.
- * Shows tool calls, activity logs, and active tool status.
- */
-import React from 'react';
 import { Box, Text } from 'ink';
 import { Spinner } from '../shared/Spinner.js';
 export const ExecutionPane = ({ activityLines, activeTools, running, focused, height, }) => {

@@ -1,4 +1,4 @@
-import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+import { jsxs as _jsxs, jsx as _jsx } from "react/jsx-runtime";
 /**
  * MessageBubble component for rendering chat messages.
  * Memoized so only the active (streaming) message re-renders.

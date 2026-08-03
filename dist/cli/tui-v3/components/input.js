@@ -1,16 +1,20 @@
 /**
- * Input component — single-line text input with cursor.
+ * Input component — multiline text editor with cursor navigation.
+ * Supports Enter for newline, Ctrl+Enter / Ctrl+D to submit.
  */
-import { style, ANSI, padRight } from '../util/ansi.js';
+import { style, ANSI } from '../util/ansi.js';
 export class Input {
     dirty = true;
-    minHeight = 1;
+    minHeight = 3;
     flexGrow = 0;
     requestRenderFn;
-    value = '';
-    cursorPos = 0;
+    lines = [''];
+    cursorRow = 0;
+    cursorCol = 0;
     _active = true;
-    prompt = '> ';
+    prompt = '│ ';
+    maxVisibleLines = 5;
+    scrollOffset = 0;
     onSubmit = null;
     onEscape = null;
     constructor(requestRender) {
@@ -34,25 +38,24 @@ export class Input {
         this._active = active;
         this.invalidate();
     }
-    /** Get the current value. */
+    /** Get the current multiline value. */
     getValue() {
-        return this.value;
+        return this.lines.join('\n');
     }
     /** Set the value programmatically. */
     setValue(value) {
-        this.value = value;
-        this.cursorPos = value.length;
+        this.lines = value.split('\n');
+        this.cursorRow = this.lines.length - 1;
+        this.cursorCol = this.lines[this.cursorRow].length;
         this.invalidate();
     }
     /** Clear the input. */
     clear() {
-        this.value = '';
-        this.cursorPos = 0;
+        this.lines = [''];
+        this.cursorRow = 0;
+        this.cursorCol = 0;
+        this.scrollOffset = 0;
         this.invalidate();
-    }
-    /** Get cursor position for the renderer to show the cursor. */
-    getCursorCol() {
-        return this.prompt.length + this.cursorPos;
     }
     get active() {
         return this._active;
@@ -62,98 +65,187 @@ export class Input {
         this.requestRenderFn();
     }
     render(width) {
-        const prefix = style(this.prompt, ANSI.cyan);
-        const text = this.value;
-        // Show visible portion of text if it exceeds width
-        const maxTextWidth = width - this.prompt.length;
-        let visibleText;
-        let visibleCursor = this.cursorPos;
-        if (text.length > maxTextWidth) {
-            // Scroll text to keep cursor visible
-            const scrollOffset = Math.max(0, this.cursorPos - maxTextWidth + 1);
-            visibleText = text.slice(scrollOffset, scrollOffset + maxTextWidth);
-            visibleCursor = this.cursorPos - scrollOffset;
+        const rows = [];
+        const contentWidth = Math.max(10, width - this.prompt.length);
+        // Top border
+        rows.push(style('┌' + '─'.repeat(width - 2) + '┐', ANSI.cyan));
+        // Ensure cursor is visible within scroll window
+        if (this.cursorRow < this.scrollOffset) {
+            this.scrollOffset = this.cursorRow;
         }
-        else {
-            visibleText = text;
+        else if (this.cursorRow >= this.scrollOffset + this.maxVisibleLines) {
+            this.scrollOffset = this.cursorRow - this.maxVisibleLines + 1;
         }
-        // Insert a cursor character marker for rendering
-        const beforeCursor = visibleText.slice(0, visibleCursor);
-        const cursorChar = visibleText[visibleCursor] ?? ' ';
-        const afterCursor = visibleText.slice(visibleCursor + 1);
-        const line = this._active
-            ? prefix + beforeCursor + style(cursorChar, ANSI.inverse) + afterCursor
-            : prefix + style(visibleText, ANSI.dim);
+        // Render visible lines
+        const visibleEnd = Math.min(this.lines.length, this.scrollOffset + this.maxVisibleLines);
+        for (let i = this.scrollOffset; i < visibleEnd; i++) {
+            const lineText = this.lines[i];
+            const prefix = i === this.scrollOffset && i === 0
+                ? style('│› ', ANSI.cyan)
+                : style('│  ', ANSI.cyan);
+            const suffix = style('│', ANSI.cyan);
+            if (this._active && i === this.cursorRow) {
+                // Render with cursor
+                const col = Math.min(this.cursorCol, lineText.length);
+                const before = lineText.slice(0, col);
+                const cursorChar = lineText[col] ?? ' ';
+                const after = lineText.slice(col + 1);
+                const textPart = before + style(cursorChar, ANSI.inverse) + after;
+                const pad = Math.max(0, contentWidth - Math.max(lineText.length, col + 1));
+                rows.push(prefix + textPart + ' '.repeat(pad) + suffix);
+            }
+            else {
+                const pad = Math.max(0, contentWidth - lineText.length);
+                const textPart = this._active ? lineText : style(lineText, ANSI.dim);
+                rows.push(prefix + textPart + ' '.repeat(pad) + suffix);
+            }
+        }
+        // Pad remaining visible lines if fewer than maxVisibleLines
+        for (let i = visibleEnd - this.scrollOffset; i < this.maxVisibleLines; i++) {
+            const prefix = style('│  ', ANSI.cyan);
+            const suffix = style('│', ANSI.cyan);
+            rows.push(prefix + ' '.repeat(contentWidth) + suffix);
+        }
+        // Bottom border with hints
+        const hint = this.lines.length > 1
+            ? ' Ctrl+Enter:send  Esc:cancel '
+            : ' Enter:send  Shift+Enter:newline ';
+        const hintLen = hint.length;
+        const bottomBorder = '└' + '─'.repeat(Math.max(0, width - 2 - hintLen)) + style(hint, ANSI.dim) + '┘';
+        rows.push(style(bottomBorder, ANSI.cyan));
         this.dirty = false;
-        return [padRight(line, width)];
+        return rows;
     }
     handleInput(key) {
         if (!this._active)
             return false;
-        // Submit
-        if (key.name === 'return') {
-            const val = this.value;
-            this.clear();
-            if (this.onSubmit)
-                this.onSubmit(val);
+        // Submit: Ctrl+Enter or Ctrl+D (for multiline), or plain Enter on single line
+        if (key.name === 'return' && key.ctrl) {
+            this.submit();
+            return true;
+        }
+        if (key.ctrl && key.name === 'd') {
+            this.submit();
+            return true;
+        }
+        // Plain Enter: submit if single line, otherwise newline
+        if (key.name === 'return' && !key.shift && !key.ctrl && !key.meta) {
+            if (this.lines.length === 1) {
+                this.submit();
+            }
+            else {
+                this.insertNewline();
+            }
+            return true;
+        }
+        // Shift+Enter: always newline
+        if (key.name === 'return' && key.shift) {
+            this.insertNewline();
             return true;
         }
         // Escape
         if (key.name === 'escape') {
+            if (this.lines.length > 1 || this.lines[0].length > 0) {
+                this.clear();
+                return true;
+            }
             if (this.onEscape)
                 this.onEscape();
             return true;
         }
         // Backspace
         if (key.name === 'backspace') {
-            if (this.cursorPos > 0) {
-                this.value = this.value.slice(0, this.cursorPos - 1) + this.value.slice(this.cursorPos);
-                this.cursorPos--;
-                this.invalidate();
+            if (this.cursorCol > 0) {
+                const line = this.lines[this.cursorRow];
+                this.lines[this.cursorRow] = line.slice(0, this.cursorCol - 1) + line.slice(this.cursorCol);
+                this.cursorCol--;
             }
+            else if (this.cursorRow > 0) {
+                // Merge with previous line
+                const prevLine = this.lines[this.cursorRow - 1];
+                const curLine = this.lines[this.cursorRow];
+                this.lines.splice(this.cursorRow, 1);
+                this.cursorRow--;
+                this.cursorCol = prevLine.length;
+                this.lines[this.cursorRow] = prevLine + curLine;
+            }
+            this.invalidate();
             return true;
         }
         // Delete
         if (key.name === 'delete') {
-            if (this.cursorPos < this.value.length) {
-                this.value = this.value.slice(0, this.cursorPos) + this.value.slice(this.cursorPos + 1);
-                this.invalidate();
+            const line = this.lines[this.cursorRow];
+            if (this.cursorCol < line.length) {
+                this.lines[this.cursorRow] = line.slice(0, this.cursorCol) + line.slice(this.cursorCol + 1);
             }
+            else if (this.cursorRow < this.lines.length - 1) {
+                // Merge with next line
+                this.lines[this.cursorRow] = line + this.lines[this.cursorRow + 1];
+                this.lines.splice(this.cursorRow + 1, 1);
+            }
+            this.invalidate();
             return true;
         }
         // Cursor movement
         if (key.name === 'left') {
-            if (this.cursorPos > 0) {
-                this.cursorPos--;
+            if (this.cursorCol > 0) {
+                this.cursorCol--;
+            }
+            else if (this.cursorRow > 0) {
+                this.cursorRow--;
+                this.cursorCol = this.lines[this.cursorRow].length;
+            }
+            this.invalidate();
+            return true;
+        }
+        if (key.name === 'right') {
+            const line = this.lines[this.cursorRow];
+            if (this.cursorCol < line.length) {
+                this.cursorCol++;
+            }
+            else if (this.cursorRow < this.lines.length - 1) {
+                this.cursorRow++;
+                this.cursorCol = 0;
+            }
+            this.invalidate();
+            return true;
+        }
+        if (key.name === 'up') {
+            if (this.cursorRow > 0) {
+                this.cursorRow--;
+                this.cursorCol = Math.min(this.cursorCol, this.lines[this.cursorRow].length);
                 this.invalidate();
             }
             return true;
         }
-        if (key.name === 'right') {
-            if (this.cursorPos < this.value.length) {
-                this.cursorPos++;
+        if (key.name === 'down') {
+            if (this.cursorRow < this.lines.length - 1) {
+                this.cursorRow++;
+                this.cursorCol = Math.min(this.cursorCol, this.lines[this.cursorRow].length);
                 this.invalidate();
             }
             return true;
         }
         if (key.name === 'home' || (key.ctrl && key.name === 'a')) {
-            this.cursorPos = 0;
+            this.cursorCol = 0;
             this.invalidate();
             return true;
         }
         if (key.name === 'end' || (key.ctrl && key.name === 'e')) {
-            this.cursorPos = this.value.length;
+            this.cursorCol = this.lines[this.cursorRow].length;
             this.invalidate();
             return true;
         }
-        // Ctrl+U — clear line
+        // Ctrl+U — clear current line
         if (key.ctrl && key.name === 'u') {
-            this.clear();
+            this.lines[this.cursorRow] = '';
+            this.cursorCol = 0;
+            this.invalidate();
             return true;
         }
         // Ctrl+K — kill to end of line
         if (key.ctrl && key.name === 'k') {
-            this.value = this.value.slice(0, this.cursorPos);
+            this.lines[this.cursorRow] = this.lines[this.cursorRow].slice(0, this.cursorCol);
             this.invalidate();
             return true;
         }
@@ -161,13 +253,32 @@ export class Input {
         if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta) {
             const ch = key.sequence;
             if (ch.charCodeAt(0) >= 32) { // Printable
-                this.value = this.value.slice(0, this.cursorPos) + ch + this.value.slice(this.cursorPos);
-                this.cursorPos++;
+                const line = this.lines[this.cursorRow];
+                this.lines[this.cursorRow] = line.slice(0, this.cursorCol) + ch + line.slice(this.cursorCol);
+                this.cursorCol++;
                 this.invalidate();
                 return true;
             }
         }
         return false;
+    }
+    submit() {
+        const val = this.getValue().trim();
+        if (!val)
+            return;
+        this.clear();
+        if (this.onSubmit)
+            this.onSubmit(val);
+    }
+    insertNewline() {
+        const line = this.lines[this.cursorRow];
+        const before = line.slice(0, this.cursorCol);
+        const after = line.slice(this.cursorCol);
+        this.lines[this.cursorRow] = before;
+        this.lines.splice(this.cursorRow + 1, 0, after);
+        this.cursorRow++;
+        this.cursorCol = 0;
+        this.invalidate();
     }
 }
 //# sourceMappingURL=input.js.map

@@ -40,7 +40,7 @@ export declare class AgentVMManager {
     private readonly workspacePath;
     private readonly network;
     private vm;
-    readonly kind: 'sandbox';
+    readonly kind: "sandbox";
     constructor(workspacePath: string, network: boolean);
     exec(command: string, signal?: AbortSignal, observer?: ShellExecObserver): Promise<ShellExecResult>;
     dispose(): Promise<void>;

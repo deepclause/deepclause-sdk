@@ -1,5 +1,6 @@
 /**
- * Header component — top bar showing session title, status, and spinner.
+ * Header component — Borland-style logo bar (no menu).
+ * Shows DeepClause logo on the left, session title on the right.
  */
 import type { Component, RequestRender } from '../types.js';
 export declare class Header implements Component {

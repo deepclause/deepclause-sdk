@@ -1,7 +1,7 @@
 import { type ModelSlot } from './config.js';
 import { type RunResult as CliRunResult } from './run.js';
 import { type ConductorLogEvent } from '../system/runtime/conductor.js';
-declare const BUILTIN_SLASH_COMMANDS: readonly ['new', 'sessions', 'help', 'run', 'compile', 'skill-creator', 'set-model', 'cancel', 'exit', 'quit'];
+declare const BUILTIN_SLASH_COMMANDS: readonly ["new", "sessions", "help", "run", "compile", "skill-creator", "set-model", "cancel", "exit", "quit"];
 type BuiltinSlashCommand = (typeof BUILTIN_SLASH_COMMANDS)[number];
 type TuiInputStream = {
     isTTY?: boolean;
@@ -78,10 +78,10 @@ export declare class TaskTracker {
     private trim;
 }
 export declare function releaseTuiInputStream(stream: TuiInputStream): void;
-export declare function startTui(workspaceRoot?: any, options?: {
+export declare function startTui(workspaceRoot?: string, options?: {
     sandbox?: boolean;
 }): Promise<void>;
-export declare function runPromptHeadless(prompt: string, workspaceRoot?: any, options?: {
+export declare function runPromptHeadless(prompt: string, workspaceRoot?: string, options?: {
     sandbox?: boolean;
 }): Promise<void>;
 export declare function runSkillCommand(workspaceRoot: string, skillName: string, args: string[], options?: {

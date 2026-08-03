@@ -3,7 +3,7 @@ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
  * Command input bar with basic Emacs/Vi key bindings.
  * Always visible; activates on any character input when in normal mode.
  */
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 export const CommandInput = ({ onSubmit, onEscape, onActivate, placeholder = 'Type a message or /command…', prefix = '> ', active, busy, }) => {
     const [value, setValue] = useState('');

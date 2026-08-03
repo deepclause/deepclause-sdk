@@ -54,7 +54,7 @@ export class EventLoop {
         // Listen for resize
         this.stdout.on('resize', this.handleResize);
         // Initial render
-        this.scheduleRender();
+        this.requestRender();
         return this.exitPromise;
     }
     /** Stop the event loop and restore the terminal. */

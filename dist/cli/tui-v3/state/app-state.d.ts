@@ -7,10 +7,18 @@
 export type PaneKind = 'sessions' | 'messages' | 'process' | 'tasks' | 'context';
 export type UiMode = 'normal' | 'command' | 'picker' | 'help';
 export type OverlayKind = 'none' | 'picker' | 'help' | 'confirm';
+export interface PaneVisibility {
+    sessions: boolean;
+    messages: boolean;
+    process: boolean;
+    tasks: boolean;
+    context: boolean;
+}
 export interface AppState {
     focusedPane: PaneKind;
     mode: UiMode;
     sessionPaneCollapsed: boolean;
+    paneVisibility: PaneVisibility;
     overlay: OverlayKind;
     columns: number;
     rows: number;
@@ -27,6 +35,9 @@ export type AppAction = {
     mode: UiMode;
 } | {
     type: 'TOGGLE_SESSION_PANE';
+} | {
+    type: 'TOGGLE_PANE_VISIBILITY';
+    pane: PaneKind;
 } | {
     type: 'SET_OVERLAY';
     overlay: OverlayKind;

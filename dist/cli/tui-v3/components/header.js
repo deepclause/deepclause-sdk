@@ -1,5 +1,6 @@
 /**
- * Header component — top bar showing session title, status, and spinner.
+ * Header component — Borland-style logo bar (no menu).
+ * Shows DeepClause logo on the left, session title on the right.
  */
 import { style, ANSI, padRight } from '../util/ansi.js';
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -9,7 +10,7 @@ export class Header {
     minHeight = 1;
     flexGrow = 0;
     requestRenderFn;
-    title = 'DeepClause';
+    title = '';
     busy = false;
     spinnerFrame = 0;
     spinnerTimer = null;
@@ -43,16 +44,17 @@ export class Header {
         this.requestRenderFn();
     }
     render(width) {
-        const spinner = this.busy ? SPINNER_FRAMES[this.spinnerFrame] + ' ' : '';
-        const titleText = `${spinner}${this.title}`;
-        const right = 'DeepClause TUI';
-        const left = style(titleText, ANSI.bold);
-        const rightStyled = style(right, ANSI.dim);
-        // Compose: [left ... right]
-        const leftLen = spinner.length + this.title.length;
+        // Borland-style: bright white on blue background for logo bar
+        const logo = ' ≡ DeepClause ';
+        const spinner = this.busy ? ' ' + SPINNER_FRAMES[this.spinnerFrame] : '';
+        const sessionInfo = this.title ? ` ${this.title}` : '';
+        const right = sessionInfo + spinner + ' ';
+        const leftLen = logo.length;
         const rightLen = right.length;
-        const gap = Math.max(1, width - leftLen - rightLen);
-        const line = left + ' '.repeat(gap) + rightStyled;
+        const gap = Math.max(0, width - leftLen - rightLen);
+        const line = style(logo, ANSI.bold, ANSI.brightWhite, ANSI.bgBlue)
+            + style(' '.repeat(gap), ANSI.bgBlue)
+            + style(right, ANSI.brightWhite, ANSI.bgBlue);
         this.dirty = false;
         return [padRight(line, width)];
     }

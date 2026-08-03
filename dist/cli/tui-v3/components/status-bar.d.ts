@@ -1,7 +1,8 @@
 /**
- * StatusBar component — bottom bar showing mode, focused pane, and shortcuts.
+ * StatusBar component — Borland-style bottom bar with pane shortcuts and status.
  */
 import type { Component, RequestRender } from '../types.js';
+import type { PaneVisibility } from '../state/app-state.js';
 export declare class StatusBar implements Component {
     dirty: boolean;
     minHeight: number;
@@ -11,13 +12,14 @@ export declare class StatusBar implements Component {
     private focusedPane;
     private busy;
     private followMode;
-    private statusRight;
+    private paneVisibility;
     constructor(requestRender: RequestRender);
     setMode(mode: string): void;
     setFocusedPane(pane: string): void;
     setBusy(busy: boolean): void;
     setFollowMode(follow: boolean): void;
-    setStatusRight(text: string): void;
+    setPaneVisibility(vis: PaneVisibility): void;
+    setStatusRight(_text: string): void;
     invalidate(): void;
     render(width: number): string[];
 }

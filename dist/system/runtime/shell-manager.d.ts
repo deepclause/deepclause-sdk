@@ -31,7 +31,7 @@ export interface CreateShellManagerOptions {
 }
 export declare class HostShellManager implements ShellManager {
     private readonly workspacePath;
-    readonly kind: 'host';
+    readonly kind: "host";
     private readonly strategy;
     constructor(workspacePath: string, hostConfig?: HostShellConfig);
     exec(command: string, signal?: AbortSignal, observer?: ShellExecObserver): Promise<ShellExecResult>;

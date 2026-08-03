@@ -35,7 +35,6 @@ export class Container {
         const { padding = [0, 0, 0, 0], border, borderChars = DEFAULT_BORDER, title } = this.options;
         const [pt, pr, pb, pl] = padding;
         const borderWidth = border ? 2 : 0; // left + right
-        const borderHeight = border ? 2 : 0; // top + bottom
         const innerWidth = Math.max(0, width - pl - pr - borderWidth);
         // Render child
         const childRows = this.child.render(innerWidth);

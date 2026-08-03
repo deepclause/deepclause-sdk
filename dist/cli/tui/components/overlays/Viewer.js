@@ -3,7 +3,7 @@ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
  * File viewer overlay component.
  * Displays file content in a scrollable view.
  */
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 export const Viewer = ({ title, content, onClose }) => {
     const lines = content.split('\n');

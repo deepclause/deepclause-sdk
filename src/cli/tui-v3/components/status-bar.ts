@@ -1,9 +1,10 @@
 /**
- * StatusBar component — bottom bar showing mode, focused pane, and shortcuts.
+ * StatusBar component — Borland-style bottom bar with pane shortcuts and status.
  */
 
 import type { Component, RequestRender } from '../types.js';
 import { style, ANSI, padRight } from '../util/ansi.js';
+import type { PaneVisibility } from '../state/app-state.js';
 
 export class StatusBar implements Component {
   dirty = true;
@@ -15,7 +16,13 @@ export class StatusBar implements Component {
   private focusedPane = 'messages';
   private busy = false;
   private followMode = true;
-  private statusRight = '';
+  private paneVisibility: PaneVisibility = {
+    sessions: true,
+    messages: true,
+    process: true,
+    tasks: true,
+    context: true,
+  };
 
   constructor(requestRender: RequestRender) {
     this.requestRenderFn = requestRender;
@@ -45,9 +52,13 @@ export class StatusBar implements Component {
     this.invalidate();
   }
 
-  setStatusRight(text: string): void {
-    if (this.statusRight === text) return;
-    this.statusRight = text;
+  setPaneVisibility(vis: PaneVisibility): void {
+    this.paneVisibility = vis;
+    this.invalidate();
+  }
+
+  setStatusRight(_text: string): void {
+    // Kept for API compat
     this.invalidate();
   }
 
@@ -57,41 +68,50 @@ export class StatusBar implements Component {
   }
 
   render(width: number): string[] {
-    const parts: string[] = [];
+    // Borland-style: function key shortcuts on the bottom
+    const shortcuts: Array<{ key: string; label: string; pane?: keyof PaneVisibility }> = [
+      { key: 'F1', label: 'Help' },
+      { key: 'F2', label: 'Sess', pane: 'sessions' },
+      { key: 'F3', label: 'Msgs', pane: 'messages' },
+      { key: 'F4', label: 'Exec', pane: 'process' },
+      { key: 'F5', label: 'Task', pane: 'tasks' },
+      { key: 'F6', label: 'Ctx', pane: 'context' },
+      { key: 'Tab', label: 'Next' },
+      { key: '^C', label: 'Quit' },
+    ];
 
-    // Mode indicator
-    const modeLabel = this.mode.toUpperCase();
-    parts.push(style(` ${modeLabel} `, ANSI.bold, ANSI.inverse));
+    let line = '';
+    let visLen = 0;
 
-    // Focused pane
-    parts.push(style(` ${this.focusedPane} `, ANSI.dim));
-
-    // Follow indicator
-    if (this.followMode) {
-      parts.push(style(' ↓FOLLOW ', ANSI.cyan));
+    for (const sc of shortcuts) {
+      const hidden = sc.pane && !this.paneVisibility[sc.pane];
+      const keyPart = hidden
+        ? style(sc.key, ANSI.dim)
+        : style(sc.key, ANSI.brightWhite, ANSI.bgBlue);
+      const labelPart = hidden
+        ? style(sc.label, ANSI.dim)
+        : style(sc.label, ANSI.black, ANSI.bgCyan);
+      line += keyPart + labelPart + ' ';
+      visLen += sc.key.length + sc.label.length + 1;
     }
 
-    // Busy indicator
+    // Right side: focused pane + status
+    const rightParts: string[] = [];
     if (this.busy) {
-      parts.push(style(' RUNNING ', ANSI.yellow));
+      rightParts.push(style(' RUNNING ', ANSI.yellow, ANSI.bold));
     }
+    if (this.followMode) {
+      rightParts.push(style('↓', ANSI.cyan));
+    }
+    rightParts.push(style(` ${this.focusedPane} `, ANSI.inverse));
 
-    // Shortcuts hint
-    const shortcuts = 'Tab:pane  Ctrl+C:quit  ?:help';
-    const left = parts.join('');
+    const right = rightParts.join('');
+    const rightVisLen = (this.busy ? 9 : 0) + (this.followMode ? 1 : 0) + this.focusedPane.length + 2;
 
-    // Right side
-    const right = this.statusRight || shortcuts;
-    const rightStyled = style(right, ANSI.dim);
+    const gap = Math.max(0, width - visLen - rightVisLen);
+    const fullLine = line + ' '.repeat(gap) + right;
 
-    // Compose
-    const leftVisLen = modeLabel.length + 2 + this.focusedPane.length + 2
-      + (this.followMode ? 9 : 0) + (this.busy ? 9 : 0);
-    const rightLen = right.length;
-    const gap = Math.max(1, width - leftVisLen - rightLen);
-
-    const line = left + ' '.repeat(gap) + rightStyled;
     this.dirty = false;
-    return [padRight(line, width)];
+    return [padRight(fullLine, width)];
   }
 }
