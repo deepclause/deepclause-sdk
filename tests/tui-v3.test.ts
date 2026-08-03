@@ -127,6 +127,16 @@ describe('TUI v3', () => {
     expect(completed).toContain('Ctrl+E to inspect');
     expect(completed).not.toContain('Execution details');
     expect(completed).toContain('Final answer');
+
+    messages.setExecutionPreview({
+      label: 'unsafe\x1b]2;PWN\x07.dml',
+      content: `▶ main:web_search({"query":"${'x'.repeat(80)}"})`,
+      complete: false,
+      expanded: true,
+    });
+    const narrow = messages.render(30);
+    expect(narrow.join('\n')).not.toContain('PWN');
+    expect(narrow.map(stripAnsi).join('\n')).toContain('main:web_search');
   });
 
   it('closes help for the raw Escape sequence', () => {

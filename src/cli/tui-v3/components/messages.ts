@@ -114,7 +114,7 @@ export class Messages implements Component {
     const innerWidth = Math.max(8, boxWidth - 2);
     const state = preview.complete ? 'complete' : 'running';
     const marker = preview.complete && !preview.expanded ? '▸' : '▾';
-    const title = truncate(` ${marker} ${preview.label} · ${state} `, innerWidth);
+    const title = truncate(` ${marker} ${sanitizeTerminalText(preview.label)} · ${state} `, innerWidth);
     const rows = [
       style(`  ┌${title}${'─'.repeat(Math.max(0, innerWidth - title.length))}┐`, ANSI.cyan),
     ];
@@ -128,11 +128,11 @@ export class Messages implements Component {
       rows.push('');
       return rows;
     }
-    const wrapped = this.wrapText(
-      sanitizeTerminalText(preview.content || 'Waiting for model output…'),
-      Math.max(1, innerWidth - 2),
-    );
-    const lines = preview.complete ? wrapped : wrapped.slice(-3);
+    const content = sanitizeTerminalText(preview.content || 'Waiting for model output…');
+    const contentWidth = Math.max(1, innerWidth - 2);
+    const lines = preview.complete
+      ? this.wrapText(content, contentWidth)
+      : content.split('\n').filter(Boolean).slice(-3).map((line) => truncate(line, contentWidth));
     for (const line of lines) {
       rows.push(
         style('  │', ANSI.cyan)
