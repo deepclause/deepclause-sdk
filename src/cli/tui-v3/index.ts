@@ -415,6 +415,7 @@ export async function startTuiV3(
       if (parsed.kind === 'builtin' && parsed.name === 'cancel') {
         cancelExecution();
       } else if (parsed.kind === 'builtin' && (parsed.name === 'exit' || parsed.name === 'quit')) {
+        cancelExecution();
         eventLoop.stop();
       } else {
         appendCommandError(new Error('An execution is already running. Use /cancel or Ctrl+C first.'));
@@ -768,6 +769,14 @@ export async function startTuiV3(
   // --- Wire callbacks ---
   input.setOnSubmit((text) => {
     if (pendingInputResolve) {
+      const parsed = parseCommandBarInput(text);
+      if (
+        parsed.kind === 'builtin'
+        && (parsed.name === 'cancel' || parsed.name === 'exit' || parsed.name === 'quit')
+      ) {
+        void handleSubmit(text);
+        return;
+      }
       const resolve = pendingInputResolve;
       pendingInputResolve = null;
       input.setPrompt('› ');
