@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Input } from '../src/cli/tui-v3/components/input.js';
+import { Context } from '../src/cli/tui-v3/components/context.js';
+import { Messages } from '../src/cli/tui-v3/components/messages.js';
 import { Sessions } from '../src/cli/tui-v3/components/sessions.js';
+import { createInitialAppState } from '../src/cli/tui-v3/state/app-state.js';
 import { normalizeKeyEvent } from '../src/cli/tui-v3/event-loop.js';
 import { composeOverlay } from '../src/cli/tui-v3/layout/overlay.js';
 import { clipAnsi, stripAnsi, style, ANSI, visibleLength } from '../src/cli/tui-v3/util/ansi.js';
@@ -94,5 +97,40 @@ describe('TUI v3', () => {
 
     expect(stripAnsi(composed[0])).toBe('abc[ok]hij');
     expect(visibleLength(composed[0])).toBe(10);
+  });
+
+  it('renders streamed reasoning and tool calls in a thinking box', () => {
+    const messages = new Messages(vi.fn());
+    messages.setStreaming('Planning the request\n▶ main:web_search\n');
+
+    const rendered = messages.render(48).map(stripAnsi).join('\n');
+    expect(rendered).toContain('Thinking');
+    expect(rendered).toContain('Planning the request');
+    expect(rendered).toContain('main:web_search');
+
+    messages.setStreaming(null);
+    messages.setMessages([{ role: 'assistant', content: 'Final answer' }]);
+    const completed = messages.render(48).map(stripAnsi).join('\n');
+    expect(completed).not.toContain('Thinking');
+    expect(completed).toContain('Final answer');
+  });
+
+  it('shows context size and per-model input/output usage', () => {
+    const context = new Context(vi.fn());
+    context.setContextTokens(12_400);
+    context.setTokenUsage({ 'openai:gpt-test': { input: 8_000, output: 1_200 } });
+
+    const rendered = context.render(40).map(stripAnsi).join('\n');
+    expect(rendered).toContain('~12.4k tokens');
+    expect(rendered).toContain('openai:gpt-test');
+    expect(rendered).toContain('in: 8.0k | out: 1.2k');
+  });
+
+  it('only includes sessions, messages, and context panes', () => {
+    expect(createInitialAppState().paneVisibility).toEqual({
+      sessions: true,
+      messages: true,
+      context: true,
+    });
   });
 });

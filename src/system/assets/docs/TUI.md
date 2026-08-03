@@ -8,8 +8,8 @@ The TUI is the operator interface around a single built-in agent: the conductor.
 
 - The left pane shows sessions.
 - The center pane shows the conversation transcript.
-- The upper-right pane shows live execution activity.
-- The lower-right pane shows context, token usage, system asset sources, and shell execution details.
+- In-progress model output and tool calls appear in a temporary thinking box in the conversation.
+- The hideable right pane shows approximate context size and token usage by model.
 
 The local `.deepclause/docs/` folder contains editable workspace docs such as `TUI.md` and `DML_REFERENCE.md`. The system `plan` skill reads `DML_REFERENCE.md` and `.deepclause/system/DML_COMPILER_PROMPT.md` before generating new plan files.
 
@@ -75,11 +75,9 @@ If the TUI is running with sandbox mode enabled, shell commands use the AgentVM 
 
 The TUI includes a Borland-style menu bar and an action palette.
 
-- `F10` or `Ctrl+G` opens the menu bar.
-- `Ctrl+P` opens the action palette.
-- The Run menu includes prompt execution, shell command entry, repeat last command, cancellation, and skill catalog refresh.
-- The View menu can move focus between panes.
-- The Files and Skills menus open searchable pickers.
+- `F1` opens help.
+- `F2` focuses or hides the sessions pane.
+- `F3` focuses or hides the context pane.
 
 ## Navigation and Keys
 
@@ -92,27 +90,24 @@ Important keys:
 - `Tab` autocompletes slash commands and skill names.
 - `Ctrl+W` cycles focus across panes.
 
-## Execution Pane
+## Thinking Box
 
-The execution pane is the main observability surface.
+While a conductor or child DML request is running, the messages pane shows a thinking box containing:
 
 It can show:
 
-- conductor streaming output
-- child-skill activity
-- tool lifecycle events
-- live shell stdout and stderr
-- active tool status, including PID when available
+- streamed model output
+- child-DML streamed output
+- tool call names, without tool output
 
-This is where to look when a task seems stuck, is waiting for clarification, or is running shell or tool-heavy work.
+When DML emits `answer/1`, the thinking box collapses and the final answer is shown as the assistant message.
 
 ## Context Pane
 
 The context pane shows session and runtime state, including:
 
-- approximate context and token usage
-- resolved source paths for conductor and skill-creator DML/prompt assets
-- the active shell backend and shell working directory
+- approximate tokens currently in the session context
+- cumulative input and output tokens for each model
 
 Changes to `.deepclause/system/` overrides are picked up on the next conductor turn or skill-creator run. A dedicated reload action is not required.
 
@@ -144,7 +139,6 @@ If a user asks how to automate something repeatedly, the right TUI workflow is u
 
 ## Troubleshooting
 
-- If a command appears to be stuck, check the execution pane for active tool status or a clarification request.
-- If shell commands do not behave as expected, check the context pane for the current shell backend and working directory.
+- If a command appears to be stuck, check the thinking box for current model output or tool calls.
 - If a newly created skill does not appear, refresh the skill catalog or run a new turn after the command completes.
 - If a system prompt or system DML change does not seem active, verify the source paths shown in the context pane.

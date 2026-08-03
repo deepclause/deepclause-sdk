@@ -19,8 +19,6 @@ export class StatusBar implements Component {
   private paneVisibility: PaneVisibility = {
     sessions: true,
     messages: true,
-    process: true,
-    tasks: true,
     context: true,
   };
 
@@ -72,10 +70,7 @@ export class StatusBar implements Component {
     const shortcuts: Array<{ key: string; label: string; pane?: keyof PaneVisibility }> = [
       { key: 'F1', label: 'Help' },
       { key: 'F2', label: 'Sess', pane: 'sessions' },
-      { key: 'F3', label: 'Msgs', pane: 'messages' },
-      { key: 'F4', label: 'Exec', pane: 'process' },
-      { key: 'F5', label: 'Task', pane: 'tasks' },
-      { key: 'F6', label: 'Ctx', pane: 'context' },
+      { key: 'F3', label: 'Ctx', pane: 'context' },
       { key: 'Tab', label: 'Next' },
       { key: '^C', label: 'Quit' },
     ];

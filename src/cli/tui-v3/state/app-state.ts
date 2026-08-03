@@ -5,15 +5,13 @@
  * State changes trigger invalidation of relevant components.
  */
 
-export type PaneKind = 'sessions' | 'messages' | 'process' | 'tasks' | 'context';
+export type PaneKind = 'sessions' | 'messages' | 'context';
 export type UiMode = 'normal' | 'command' | 'picker' | 'help';
 export type OverlayKind = 'none' | 'picker' | 'help' | 'confirm';
 
 export interface PaneVisibility {
   sessions: boolean;
   messages: boolean;
-  process: boolean;
-  tasks: boolean;
   context: boolean;
 }
 
@@ -40,7 +38,7 @@ export type AppAction =
   | { type: 'SET_BUSY'; busy: boolean }
   | { type: 'TOGGLE_AUTO_SCROLL' };
 
-const PANE_ORDER: PaneKind[] = ['sessions', 'messages', 'process', 'tasks', 'context'];
+const PANE_ORDER: PaneKind[] = ['sessions', 'messages', 'context'];
 
 export function createInitialAppState(): AppState {
   return {
@@ -50,8 +48,6 @@ export function createInitialAppState(): AppState {
     paneVisibility: {
       sessions: true,
       messages: true,
-      process: true,
-      tasks: true,
       context: true,
     },
     overlay: 'none',

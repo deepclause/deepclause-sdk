@@ -8,17 +8,17 @@
  * ┌─────────────────────────────────────────────────────────┐
  * │ ≡ DeepClause                              session title │  <- Logo bar
  * ├───┬──────────────────────────┬──────────────────────────┤
- * │ S │                          │  Activity (Execution)    │
- * │ e │      Messages            ├──────────────────────────┤
- * │ s │      (main content)      │  Steps (Tasks)           │
- * │ s │                          ├──────────────────────────┤
- * │   │                          │  Context (Tokens)        │
+ * │ S │                          │                          │
+ * │ e │      Messages            │  Context (Tokens)        │
+ * │ s │      (main content)      │                          │
+ * │ s │                          │                          │
+ * │   │                          │                          │
  * ├───┴──────────────────────────┴──────────────────────────┤
  * │┌─────────────────────────────────────────────────────┐  │
  * ││› multiline input                                    │  │  <- Editor
  * │└─────────────────────────────────────────────────────┘  │
  * ├─────────────────────────────────────────────────────────┤
- * │ F1 Help F2 Sess F3 Msgs F4 Exec F5 Task F6 Ctx Tab▸  │  <- Status bar
+ * │ F1 Help F2 Sess F3 Ctx Tab Next ^C Quit               │  <- Status bar
  * └─────────────────────────────────────────────────────────┘
  */
 
@@ -28,9 +28,7 @@ import { Header } from './components/header.js';
 import { Input } from './components/input.js';
 import { StatusBar } from './components/status-bar.js';
 import { Messages } from './components/messages.js';
-import { Activity } from './components/activity.js';
 import { Sessions } from './components/sessions.js';
-import { Tasks } from './components/tasks.js';
 import { Context } from './components/context.js';
 import { HelpDialog } from './dialogs/help.js';
 import { composeOverlay } from './layout/overlay.js';
@@ -101,17 +99,13 @@ export async function startTuiV3(
 
   const header = new Header(requestRender);
   const messagesComp = new Messages(requestRender);
-  const activityComp = new Activity(requestRender);
   const sessionsComp = new Sessions(requestRender);
-  const tasksComp = new Tasks(requestRender);
   const contextComp = new Context(requestRender);
   const input = new Input(requestRender);
   const statusBar = new StatusBar(requestRender);
   const helpDialog = new HelpDialog(requestRender);
 
   const messageScroll = new ScrollView(messagesComp, requestRender);
-  const activityScroll = new ScrollView(activityComp, requestRender);
-  const tasksScroll = new ScrollView(tasksComp, requestRender);
   const contextScroll = new ScrollView(contextComp, requestRender);
 
   // --- Pane border wrappers ---
@@ -123,8 +117,8 @@ export async function startTuiV3(
     height: number,
     focused: boolean,
   ): string[] {
-    const borderColor = focused ? ANSI.brightCyan : ANSI.cyan;
-    const titleColor = focused ? ANSI.brightWhite : ANSI.white;
+    const borderColor = focused ? ANSI.brightWhite : ANSI.cyan;
+    const titleColor = focused ? ANSI.brightYellow : ANSI.white;
     const innerWidth = Math.max(0, width - 2);
     const innerHeight = Math.max(0, height - 2);
 
@@ -133,9 +127,9 @@ export async function startTuiV3(
     // Top border with title
     const titleStr = ` ${title} `;
     const titleLen = titleStr.length;
-    const topLeft = '┌';
-    const topRight = '┐';
-    const topFill = '─'.repeat(Math.max(0, innerWidth - titleLen));
+    const topLeft = '╔';
+    const topRight = '╗';
+    const topFill = '═'.repeat(Math.max(0, innerWidth - titleLen));
     rows.push(
       style(topLeft, borderColor)
       + style(titleStr, titleColor, ANSI.bold)
@@ -146,58 +140,34 @@ export async function startTuiV3(
     for (let i = 0; i < innerHeight; i++) {
       const line = content[i] ?? '';
       const paddedLine = padRight(truncate(line, innerWidth), innerWidth);
-      rows.push(style('│', borderColor) + paddedLine + style('│', borderColor));
+      rows.push(style('║', borderColor) + paddedLine + style('║', borderColor));
     }
 
     // Bottom border
-    rows.push(style('└' + '─'.repeat(innerWidth) + '┘', borderColor));
+    rows.push(style('╚' + '═'.repeat(innerWidth) + '╝', borderColor));
 
     return rows;
   }
 
-  // --- Right column component that stacks Activity, Tasks, Context ---
+  // --- Hideable right-side context column ---
   const rightColumn: Component = {
     dirty: true,
     minHeight: 1,
     flexGrow: 1,
     invalidate() { this.dirty = true; requestRender(); },
     render(width: number): string[] {
-      const rows: string[] = [];
       const totalHeight = Math.max(3, appState.rows - 1 - input.height - 1);
-
-      // Divide right column among visible panes
-      const visiblePanes: Array<{ key: PaneKind; title: string; scroll: ScrollView }> = [];
-      if (appState.paneVisibility.process) {
-        visiblePanes.push({ key: 'process', title: 'Activity', scroll: activityScroll });
-      }
-      if (appState.paneVisibility.tasks) {
-        visiblePanes.push({ key: 'tasks', title: 'Steps', scroll: tasksScroll });
-      }
-      if (appState.paneVisibility.context) {
-        visiblePanes.push({ key: 'context', title: 'Context', scroll: contextScroll });
-      }
-
-      if (visiblePanes.length === 0) {
+      if (!appState.paneVisibility.context) {
         return Array(totalHeight).fill('');
       }
-
-      const basePaneHeight = Math.floor(totalHeight / visiblePanes.length);
-      let remainingHeight = totalHeight % visiblePanes.length;
-
-      for (const pane of visiblePanes) {
-        const paneHeight = basePaneHeight + (remainingHeight-- > 0 ? 1 : 0);
-        const content = pane.scroll.renderWithHeight(width - 2, paneHeight - 2);
-        const bordered = renderPaneWithBorder(
-          pane.title,
-          content,
-          width,
-          paneHeight,
-          appState.focusedPane === pane.key,
-        );
-        rows.push(...bordered);
-      }
-
-      return rows;
+      const content = contextScroll.renderWithHeight(width - 2, totalHeight - 2);
+      return renderPaneWithBorder(
+        'Context',
+        content,
+        width,
+        totalHeight,
+        appState.focusedPane === 'context',
+      );
     },
   };
 
@@ -226,7 +196,7 @@ export async function startTuiV3(
 
       // Layout columns: [sessions?] [messages] [right-sidebar?]
       const sessionVisible = appState.paneVisibility.sessions;
-      const rightVisible = appState.paneVisibility.process || appState.paneVisibility.tasks || appState.paneVisibility.context;
+      const rightVisible = appState.paneVisibility.context;
 
       const sessionWidth = sessionVisible ? Math.min(sessionsComp.isCollapsed ? 5 : 32, Math.max(0, width - 20)) : 0;
       const availableAfterSessions = Math.max(0, width - sessionWidth);
@@ -327,23 +297,8 @@ export async function startTuiV3(
         handlePaneShortcut('sessions');
         return true;
       }
-      // F3 = Focus Messages
+      // F3 = Focus/Toggle Context
       if (key.name === 'f3') {
-        dispatchApp({ type: 'SET_FOCUSED_PANE', pane: 'messages' });
-        return true;
-      }
-      // F4 = Focus/Toggle Activity (Execution)
-      if (key.name === 'f4') {
-        handlePaneShortcut('process');
-        return true;
-      }
-      // F5 = Focus/Toggle Tasks
-      if (key.name === 'f5') {
-        handlePaneShortcut('tasks');
-        return true;
-      }
-      // F6 = Focus/Toggle Context
-      if (key.name === 'f6') {
         handlePaneShortcut('context');
         return true;
       }
@@ -357,7 +312,7 @@ export async function startTuiV3(
       // Shift+Tab: cycle backwards
       if (key.name === 'tab' && key.shift) {
         // Reverse cycle
-        const visiblePanes = (['sessions', 'messages', 'process', 'tasks', 'context'] as PaneKind[])
+        const visiblePanes = (['sessions', 'messages', 'context'] as PaneKind[])
           .filter((p) => appState.paneVisibility[p]);
         if (visiblePanes.length > 0) {
           const idx = visiblePanes.indexOf(appState.focusedPane);
@@ -373,9 +328,9 @@ export async function startTuiV3(
         return true;
       }
 
-      // Alt+1-5: direct pane focus
-      if (key.meta && key.sequence >= '1' && key.sequence <= '5') {
-        const panes: PaneKind[] = ['sessions', 'messages', 'process', 'tasks', 'context'];
+      // Alt+1-3: direct pane focus
+      if (key.meta && key.sequence >= '1' && key.sequence <= '3') {
+        const panes: PaneKind[] = ['sessions', 'messages', 'context'];
         const idx = parseInt(key.sequence) - 1;
         if (idx < panes.length && appState.paneVisibility[panes[idx]]) {
           dispatchApp({ type: 'SET_FOCUSED_PANE', pane: panes[idx] });
@@ -386,12 +341,6 @@ export async function startTuiV3(
       // Scroll (Shift+Up/Down or PgUp/PgDn) based on focused pane
       if (appState.focusedPane === 'messages') {
         if (messageScroll.handleInput(key)) return true;
-      }
-      if (appState.focusedPane === 'process') {
-        if (activityScroll.handleInput(key)) return true;
-      }
-      if (appState.focusedPane === 'tasks') {
-        if (tasksScroll.handleInput(key)) return true;
       }
       if (appState.focusedPane === 'context') {
         if (contextScroll.handleInput(key)) return true;
@@ -420,14 +369,6 @@ export async function startTuiV3(
     })));
     messagesComp.setStreaming(sessionState.streamingContent);
 
-    activityComp.setRunning(executionState.running);
-    activityComp.setLines(executionState.activityLines);
-    activityComp.setActiveTools(executionState.activeTools.map((t) => ({
-      name: t.toolName,
-      scope: t.scopeLabel,
-      state: t.toolState,
-    })));
-
     // Sync sessions pane
     sessionsComp.setSessions(sessionState.sessions.map((s) => ({
       id: s.id,
@@ -436,16 +377,9 @@ export async function startTuiV3(
     })));
     sessionsComp.setActiveSession(sessionState.activeSessionId);
 
-    // Sync tasks pane
-    tasksComp.setTasks(executionState.tasks.map((t) => ({
-      id: t.id,
-      description: t.description,
-      state: t.state,
-      depth: t.depth,
-    })));
-
     // Sync context pane
     contextComp.setTokenUsage(executionState.tokenUsage);
+    contextComp.setContextTokens(executionState.contextTokens);
 
     // Sync status bar
     statusBar.setMode(appState.mode);
@@ -508,6 +442,7 @@ export async function startTuiV3(
 
   // --- Session management ---
   let abortController: AbortController | null = null;
+  let memoryContextTokens = 0;
 
   async function createNewSession(title?: string): Promise<void> {
     dispatchSession({ type: 'SET_LOADING', loading: true });
@@ -519,6 +454,8 @@ export async function startTuiV3(
       dispatchSession({ type: 'SET_MESSAGES', messages: [] });
       dispatchExecution({ type: 'CLEAR_ACTIVITY' });
       dispatchExecution({ type: 'SET_TOKEN_USAGE', usage: {} });
+      dispatchExecution({ type: 'SET_CONTEXT_TOKENS', tokens: 0 });
+      memoryContextTokens = 0;
     } finally {
       dispatchSession({ type: 'SET_LOADING', loading: false });
     }
@@ -534,6 +471,8 @@ export async function startTuiV3(
         content: m.content,
       }));
       dispatchSession({ type: 'SET_MESSAGES', messages });
+      memoryContextTokens = estimateTextTokens(detail.taskMemory ?? '')
+        + estimateTextTokens(detail.assistantMemory ?? '');
       dispatchExecution({ type: 'CLEAR_ACTIVITY' });
       dispatchExecution({
         type: 'SET_TOKEN_USAGE',
@@ -542,6 +481,7 @@ export async function startTuiV3(
           { input: usage.inputTokens, output: usage.outputTokens },
         ])),
       });
+      dispatchExecution({ type: 'SET_CONTEXT_TOKENS', tokens: estimateContextTokens(detail) });
     } finally {
       dispatchSession({ type: 'SET_LOADING', loading: false });
     }
@@ -558,10 +498,15 @@ export async function startTuiV3(
     dispatchSession({ type: 'APPEND_MESSAGE', message: { role: 'user', content: text } });
     dispatchSession({ type: 'SET_STREAMING', content: '' });
     dispatchExecution({ type: 'CLEAR_ACTIVITY' });
-    dispatchExecution({ type: 'PUSH_ACTIVITY', line: 'Turn started' });
     dispatchExecution({ type: 'SET_RUNNING', running: true });
+    dispatchExecution({
+      type: 'SET_CONTEXT_TOKENS',
+      tokens: estimateMessageTokens(sessionState.messages) + memoryContextTokens,
+    });
 
     let streamBuffer = '';
+    let answerReceived = false;
+    const displayedTools = new Set<string>();
     abortController = new AbortController();
 
     try {
@@ -581,50 +526,30 @@ export async function startTuiV3(
             dispatchSession({ type: 'SET_STREAMING', content: streamBuffer });
           }
 
-          // Track tool activity
-          if (event.type === 'tool_call' && event.toolName && event.toolState) {
+          // Show tool invocations in the thinking box, never their output.
+          if (event.type === 'tool_call' && event.toolName) {
             const scopeKey = logEvent.scope === 'child'
               ? `child:${logEvent.childSlug ?? '?'}:${event.toolName}`
               : `main:${event.toolName}`;
             const scopeLabel = logEvent.scope === 'child' ? (logEvent.childSlug ?? '?') : 'main';
-
-            if (event.toolState === 'starting' || event.toolState === 'running') {
-              dispatchExecution({
-                type: 'ADD_ACTIVE_TOOL',
-                tool: { scopeKey, scopeLabel, toolName: event.toolName, toolState: event.toolState },
-              });
-            } else {
-              dispatchExecution({ type: 'REMOVE_ACTIVE_TOOL', scopeKey });
-              dispatchExecution({ type: 'PUSH_ACTIVITY', line: `${scopeLabel}:${event.toolName} ${event.toolState}` });
+            if (
+              !displayedTools.has(scopeKey)
+              && (event.toolState === undefined || event.toolState === 'starting' || event.toolState === 'running')
+            ) {
+              displayedTools.add(scopeKey);
+              streamBuffer += `${streamBuffer && !streamBuffer.endsWith('\n') ? '\n' : ''}▶ ${scopeLabel}:${event.toolName}\n`;
+              dispatchSession({ type: 'SET_STREAMING', content: streamBuffer });
             }
           }
 
-          // Track task activity
-          if (event.type === 'task_activity' && event.taskId) {
-            if (event.taskState === 'started') {
+          if (event.type === 'answer') {
+            answerReceived = true;
+            dispatchSession({ type: 'SET_STREAMING', content: null });
+            if (event.content) {
+              dispatchSession({ type: 'APPEND_MESSAGE', message: { role: 'assistant', content: event.content } });
               dispatchExecution({
-                type: 'PUSH_ACTIVITY',
-                line: `Started: ${event.taskDescription || event.taskId}`,
-              });
-              dispatchExecution({
-                type: 'ADD_TASK',
-                task: {
-                  id: event.taskId,
-                  description: event.taskDescription ?? '',
-                  state: 'started',
-                  depth: executionState.tasks.filter((t) => t.state === 'started').length,
-                  startedAt: Date.now(),
-                },
-              });
-            } else if (event.taskState === 'completed' || event.taskState === 'failed') {
-              dispatchExecution({
-                type: 'PUSH_ACTIVITY',
-                line: `${event.taskState === 'completed' ? 'Completed' : 'Failed'}: ${event.taskId}`,
-              });
-              dispatchExecution({
-                type: 'UPDATE_TASK',
-                id: event.taskId,
-                state: event.taskState as 'completed' | 'failed',
+                type: 'SET_CONTEXT_TOKENS',
+                tokens: estimateMessageTokens(sessionState.messages) + memoryContextTokens,
               });
             }
           }
@@ -645,13 +570,12 @@ export async function startTuiV3(
 
       // Finalize
       const finalContent = result.answer || streamBuffer || '';
-      if (finalContent) {
+      if (finalContent && !answerReceived) {
         dispatchSession({ type: 'APPEND_MESSAGE', message: { role: 'assistant', content: finalContent } });
       }
       if (result.error) {
         dispatchSession({ type: 'APPEND_MESSAGE', message: { role: 'system', content: result.error, error: true } });
       }
-      dispatchExecution({ type: 'PUSH_ACTIVITY', line: result.error ? 'Turn failed' : 'Turn completed' });
 
       // Refresh sessions list
       const sessions = await listConductorSessions(workspaceRoot);
@@ -663,7 +587,6 @@ export async function startTuiV3(
     } catch (error) {
       const message = (error as Error).message;
       dispatchSession({ type: 'APPEND_MESSAGE', message: { role: 'system', content: message, error: true } });
-      dispatchExecution({ type: 'PUSH_ACTIVITY', line: `Turn failed: ${message}` });
     } finally {
       dispatchSession({ type: 'SET_STREAMING', content: null });
       dispatchExecution({ type: 'SET_RUNNING', running: false });
@@ -700,16 +623,12 @@ export async function startTuiV3(
   // Update all component requestRender references
   header['requestRenderFn'] = requestRender;
   messagesComp['requestRenderFn'] = requestRender;
-  activityComp['requestRenderFn'] = requestRender;
   sessionsComp['requestRenderFn'] = requestRender;
-  tasksComp['requestRenderFn'] = requestRender;
   contextComp['requestRenderFn'] = requestRender;
   input['requestRenderFn'] = requestRender;
   statusBar['requestRenderFn'] = requestRender;
   helpDialog['requestRenderFn'] = requestRender;
   messageScroll['requestRenderFn'] = requestRender;
-  activityScroll['requestRenderFn'] = requestRender;
-  tasksScroll['requestRenderFn'] = requestRender;
   contextScroll['requestRenderFn'] = requestRender;
 
   // --- Initialize ---
@@ -735,4 +654,23 @@ export async function startTuiV3(
 
 function toSessionSummary(session: { id: string; title: string; updatedAt: string }): SessionSummary {
   return { id: session.id, title: session.title, updatedAt: session.updatedAt };
+}
+
+function estimateContextTokens(detail: {
+  messages?: ConductorSessionMessage[];
+  taskMemory?: string;
+  assistantMemory?: string;
+}): number {
+  return estimateMessageTokens(detail.messages ?? [])
+    + estimateTextTokens(detail.taskMemory ?? '')
+    + estimateTextTokens(detail.assistantMemory ?? '');
+}
+
+function estimateMessageTokens(messages: Array<{ role: string; content: string }>): number {
+  return estimateTextTokens(messages.map((message) => `${message.role}: ${message.content}`).join('\n'));
+}
+
+function estimateTextTokens(text: string): number {
+  const normalized = text.trim();
+  return normalized ? Math.max(1, Math.ceil(normalized.length / 4)) : 0;
 }

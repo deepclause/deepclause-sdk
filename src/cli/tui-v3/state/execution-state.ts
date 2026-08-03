@@ -24,6 +24,7 @@ export interface ExecutionState {
   tasks: TaskEntry[];
   activeTools: ActiveToolStatus[];
   tokenUsage: Record<string, { input: number; output: number }>;
+  contextTokens: number;
   running: boolean;
 }
 
@@ -37,6 +38,7 @@ export type ExecutionAction =
   | { type: 'ADD_ACTIVE_TOOL'; tool: ActiveToolStatus }
   | { type: 'REMOVE_ACTIVE_TOOL'; scopeKey: string }
   | { type: 'SET_TOKEN_USAGE'; usage: Record<string, { input: number; output: number }> }
+  | { type: 'SET_CONTEXT_TOKENS'; tokens: number }
   | { type: 'SET_RUNNING'; running: boolean };
 
 const MAX_ACTIVITY_LINES = 400;
@@ -47,6 +49,7 @@ export function createInitialExecutionState(): ExecutionState {
     tasks: [],
     activeTools: [],
     tokenUsage: {},
+    contextTokens: 0,
     running: false,
   };
 }
@@ -82,6 +85,8 @@ export function executionReducer(state: ExecutionState, action: ExecutionAction)
       return { ...state, activeTools: state.activeTools.filter((t) => t.scopeKey !== action.scopeKey) };
     case 'SET_TOKEN_USAGE':
       return { ...state, tokenUsage: action.usage };
+    case 'SET_CONTEXT_TOKENS':
+      return { ...state, contextTokens: action.tokens };
     case 'SET_RUNNING':
       return { ...state, running: action.running };
     default:
