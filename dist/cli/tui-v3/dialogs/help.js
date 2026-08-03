@@ -43,7 +43,7 @@ export class HelpDialog {
         rows.push(`│${padLine(style(' Keyboard Shortcuts:', ANSI.bold), maxWidth - 2)}│`);
         rows.push(`│${padLine('', maxWidth - 2)}│`);
         rows.push(`│${padLine('  Tab          Cycle panes', maxWidth - 2)}│`);
-        rows.push(`│${padLine('  F2/F4-F6    Focus; press again to hide', maxWidth - 2)}│`);
+        rows.push(`│${padLine('  F2/F3       Focus; press again to hide', maxWidth - 2)}│`);
         rows.push(`│${padLine('  ↑/↓ + Enter Select focused session', maxWidth - 2)}│`);
         rows.push(`│${padLine('  Ctrl+C       Quit / Cancel', maxWidth - 2)}│`);
         rows.push(`│${padLine('  Ctrl+U       Clear input', maxWidth - 2)}│`);

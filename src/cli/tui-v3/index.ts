@@ -521,7 +521,7 @@ export async function startTuiV3(
           const { event } = logEvent;
 
           // Handle streaming text
-          if (event.type === 'stream' && event.content) {
+          if (!answerReceived && event.type === 'stream' && event.content) {
             streamBuffer += event.content;
             dispatchSession({ type: 'SET_STREAMING', content: streamBuffer });
           }
@@ -533,16 +533,20 @@ export async function startTuiV3(
               : `main:${event.toolName}`;
             const scopeLabel = logEvent.scope === 'child' ? (logEvent.childSlug ?? '?') : 'main';
             if (
+              !answerReceived
+              &&
               !displayedTools.has(scopeKey)
               && (event.toolState === undefined || event.toolState === 'starting' || event.toolState === 'running')
             ) {
               displayedTools.add(scopeKey);
               streamBuffer += `${streamBuffer && !streamBuffer.endsWith('\n') ? '\n' : ''}▶ ${scopeLabel}:${event.toolName}\n`;
               dispatchSession({ type: 'SET_STREAMING', content: streamBuffer });
+            } else if (event.toolState === 'completed' || event.toolState === 'failed') {
+              displayedTools.delete(scopeKey);
             }
           }
 
-          if (event.type === 'answer') {
+          if (logEvent.scope === 'main' && event.type === 'answer') {
             answerReceived = true;
             dispatchSession({ type: 'SET_STREAMING', content: null });
             if (event.content) {

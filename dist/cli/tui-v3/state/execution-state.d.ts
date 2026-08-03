@@ -24,6 +24,7 @@ export interface ExecutionState {
         input: number;
         output: number;
     }>;
+    contextTokens: number;
     running: boolean;
 }
 export type ExecutionAction = {
@@ -56,6 +57,9 @@ export type ExecutionAction = {
         input: number;
         output: number;
     }>;
+} | {
+    type: 'SET_CONTEXT_TOKENS';
+    tokens: number;
 } | {
     type: 'SET_RUNNING';
     running: boolean;

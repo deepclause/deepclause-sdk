@@ -28,6 +28,7 @@ export declare class Messages implements Component {
     setStreaming(content: string | null): void;
     invalidate(): void;
     render(width: number): string[];
+    private renderThinking;
     private renderMessage;
     private getRoleLabel;
     private wrapText;

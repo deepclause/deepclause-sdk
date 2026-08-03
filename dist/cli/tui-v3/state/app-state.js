@@ -4,7 +4,7 @@
  * Simple reducer-based state management, decoupled from React.
  * State changes trigger invalidation of relevant components.
  */
-const PANE_ORDER = ['sessions', 'messages', 'process', 'tasks', 'context'];
+const PANE_ORDER = ['sessions', 'messages', 'context'];
 export function createInitialAppState() {
     return {
         focusedPane: 'messages',
@@ -13,8 +13,6 @@ export function createInitialAppState() {
         paneVisibility: {
             sessions: true,
             messages: true,
-            process: true,
-            tasks: true,
             context: true,
         },
         overlay: 'none',

@@ -4,14 +4,12 @@
  * Simple reducer-based state management, decoupled from React.
  * State changes trigger invalidation of relevant components.
  */
-export type PaneKind = 'sessions' | 'messages' | 'process' | 'tasks' | 'context';
+export type PaneKind = 'sessions' | 'messages' | 'context';
 export type UiMode = 'normal' | 'command' | 'picker' | 'help';
 export type OverlayKind = 'none' | 'picker' | 'help' | 'confirm';
 export interface PaneVisibility {
     sessions: boolean;
     messages: boolean;
-    process: boolean;
-    tasks: boolean;
     context: boolean;
 }
 export interface AppState {

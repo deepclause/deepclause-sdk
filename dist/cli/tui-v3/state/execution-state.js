@@ -9,6 +9,7 @@ export function createInitialExecutionState() {
         tasks: [],
         activeTools: [],
         tokenUsage: {},
+        contextTokens: 0,
         running: false,
     };
 }
@@ -41,6 +42,8 @@ export function executionReducer(state, action) {
             return { ...state, activeTools: state.activeTools.filter((t) => t.scopeKey !== action.scopeKey) };
         case 'SET_TOKEN_USAGE':
             return { ...state, tokenUsage: action.usage };
+        case 'SET_CONTEXT_TOKENS':
+            return { ...state, contextTokens: action.tokens };
         case 'SET_RUNNING':
             return { ...state, running: action.running };
         default:

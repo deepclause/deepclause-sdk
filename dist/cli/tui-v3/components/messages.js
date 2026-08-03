@@ -4,7 +4,7 @@
  * Key optimization: historical messages are cached and never re-rendered
  * during streaming. Only the streaming (latest) message re-renders.
  */
-import { style, ANSI } from '../util/ansi.js';
+import { style, ANSI, padRight } from '../util/ansi.js';
 export class Messages {
     dirty = true;
     minHeight = 1;
@@ -54,11 +54,9 @@ export class Messages {
                 allRows.push(...rows);
             }
         }
-        // Render streaming message (never cached)
+        // Render the in-progress reasoning/tool stream in a temporary box.
         if (this.streamingContent !== null) {
-            const streamMsg = { role: 'assistant', content: this.streamingContent, pending: true };
-            const rows = this.renderMessage(streamMsg, width);
-            allRows.push(...rows);
+            allRows.push(...this.renderThinking(this.streamingContent, width));
         }
         // If no messages, show a placeholder
         if (allRows.length === 0) {
@@ -68,6 +66,23 @@ export class Messages {
         }
         this.dirty = false;
         return allRows;
+    }
+    renderThinking(content, width) {
+        const boxWidth = Math.max(12, width - 2);
+        const innerWidth = Math.max(8, boxWidth - 2);
+        const title = ' Thinking ';
+        const rows = [
+            style(`  ┌${title}${'─'.repeat(Math.max(0, innerWidth - title.length))}┐`, ANSI.cyan),
+        ];
+        const lines = this.wrapText(content || 'Waiting for model output…', Math.max(1, innerWidth - 2));
+        for (const line of lines) {
+            rows.push(style('  │', ANSI.cyan)
+                + style(padRight(` ${line}`, innerWidth), ANSI.dim)
+                + style('│', ANSI.cyan));
+        }
+        rows.push(style(`  └${'─'.repeat(innerWidth)}┘`, ANSI.cyan));
+        rows.push('');
+        return rows;
     }
     renderMessage(msg, width) {
         const rows = [];

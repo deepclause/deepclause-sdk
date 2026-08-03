@@ -84,26 +84,6 @@ export class Messages implements Component {
       allRows.push(...this.renderThinking(this.streamingContent, width));
     }
 
-    private renderThinking(content: string, width: number): string[] {
-      const boxWidth = Math.max(12, width - 2);
-      const innerWidth = Math.max(8, boxWidth - 2);
-      const title = ' Thinking ';
-      const rows = [
-        style(`  ┌${title}${'─'.repeat(Math.max(0, innerWidth - title.length))}┐`, ANSI.cyan),
-      ];
-      const lines = this.wrapText(content || 'Waiting for model output…', Math.max(1, innerWidth - 2));
-      for (const line of lines) {
-        rows.push(
-          style('  │', ANSI.cyan)
-          + style(padRight(` ${line}`, innerWidth), ANSI.dim)
-          + style('│', ANSI.cyan),
-        );
-      }
-      rows.push(style(`  └${'─'.repeat(innerWidth)}┘`, ANSI.cyan));
-      rows.push('');
-      return rows;
-    }
-
     // If no messages, show a placeholder
     if (allRows.length === 0) {
       allRows.push('');
@@ -113,6 +93,26 @@ export class Messages implements Component {
 
     this.dirty = false;
     return allRows;
+  }
+
+  private renderThinking(content: string, width: number): string[] {
+    const boxWidth = Math.max(12, width - 2);
+    const innerWidth = Math.max(8, boxWidth - 2);
+    const title = ' Thinking ';
+    const rows = [
+      style(`  ┌${title}${'─'.repeat(Math.max(0, innerWidth - title.length))}┐`, ANSI.cyan),
+    ];
+    const lines = this.wrapText(content || 'Waiting for model output…', Math.max(1, innerWidth - 2));
+    for (const line of lines) {
+      rows.push(
+        style('  │', ANSI.cyan)
+        + style(padRight(` ${line}`, innerWidth), ANSI.dim)
+        + style('│', ANSI.cyan),
+      );
+    }
+    rows.push(style(`  └${'─'.repeat(innerWidth)}┘`, ANSI.cyan));
+    rows.push('');
+    return rows;
   }
 
   private renderMessage(msg: ChatMessage, width: number): string[] {

@@ -12,9 +12,12 @@ export declare class Context implements Component {
     flexGrow: number;
     private requestRenderFn;
     private tokenUsage;
+    private contextTokens;
     constructor(requestRender: RequestRender);
     /** Set token usage data. */
     setTokenUsage(usage: Record<string, TokenUsage>): void;
+    /** Set the approximate number of tokens currently held in session context. */
+    setContextTokens(tokens: number): void;
     invalidate(): void;
     render(width: number): string[];
 }
