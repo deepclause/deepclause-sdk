@@ -286,6 +286,7 @@ export async function startTuiV3(workspaceRoot = process.cwd(), options = {}) {
         // Sync context pane
         contextComp.setTokenUsage(executionState.tokenUsage);
         contextComp.setContextTokens(executionState.contextTokens);
+        input.setActive(!appState.busy);
         // Sync status bar
         statusBar.setMode(appState.mode);
         statusBar.setFocusedPane(appState.focusedPane);
@@ -297,7 +298,7 @@ export async function startTuiV3(workspaceRoot = process.cwd(), options = {}) {
     // --- Command handling ---
     async function handleSubmit(text) {
         const trimmed = text.trim();
-        if (!trimmed)
+        if (!trimmed || appState.busy)
             return;
         // Slash commands
         if (trimmed.startsWith('/')) {
@@ -464,7 +465,7 @@ export async function startTuiV3(workspaceRoot = process.cwd(), options = {}) {
                 },
             });
             // Finalize
-            const finalContent = result.answer || streamBuffer || '';
+            const finalContent = result.answer || '';
             if (finalContent && !answerReceived) {
                 dispatchSession({ type: 'APPEND_MESSAGE', message: { role: 'assistant', content: finalContent } });
             }
@@ -478,6 +479,10 @@ export async function startTuiV3(workspaceRoot = process.cwd(), options = {}) {
             if (activeSession) {
                 dispatchSession({ type: 'SET_ACTIVE_SESSION', id: activeSession.id, title: activeSession.title });
             }
+            const detail = await getConductorSessionDetail(workspaceRoot, sessionId);
+            memoryContextTokens = estimateTextTokens(detail.taskMemory ?? '')
+                + estimateTextTokens(detail.assistantMemory ?? '');
+            dispatchExecution({ type: 'SET_CONTEXT_TOKENS', tokens: estimateContextTokens(detail) });
         }
         catch (error) {
             const message = error.message;
