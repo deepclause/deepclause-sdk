@@ -97,7 +97,8 @@ export class Messages {
             return rows;
         }
         if (preview.task) {
-            const task = truncate(` Task: ${sanitizeTerminalText(preview.task)}`, innerWidth);
+            const taskText = sanitizeTerminalText(preview.task).replace(/\s+/g, ' ').trim();
+            const task = truncate(` Task: ${taskText}`, innerWidth);
             rows.push(style('  │', ANSI.cyan)
                 + style(padRight(task, innerWidth), ANSI.bold)
                 + style('│', ANSI.cyan));

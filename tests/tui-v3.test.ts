@@ -63,6 +63,9 @@ describe('TUI v3', () => {
       sequence: '\x1b[101;5u',
     })).toMatchObject({ name: 'e', sequence: 'e', ctrl: true });
     expect(normalizeKeyEvent(undefined, {
+      sequence: '\x1b[97:65;2u',
+    })).toMatchObject({ name: 'a', sequence: 'A', shift: true });
+    expect(normalizeKeyEvent(undefined, {
       sequence: '\x1b[27;5;117~',
     })).toMatchObject({ name: 'u', sequence: 'u', ctrl: true });
     expect(normalizeKeyEvent('\x1b', {
@@ -136,7 +139,7 @@ describe('TUI v3', () => {
     messages.setExecutionPreview({
       label: 'conductor.dml',
       content: 'Planning the request\n▶ main:web_search({"query":"test"})\n',
-      task: 'Plan the request',
+      task: 'Plan\nthe request',
       complete: false,
       expanded: true,
     });
@@ -144,6 +147,7 @@ describe('TUI v3', () => {
     const rendered = messages.render(48).map(stripAnsi).join('\n');
     expect(rendered).toContain('conductor.dml · running');
     expect(rendered).toContain('Task: Plan the request');
+    expect(rendered).not.toContain('Task: Plan\nthe request');
     expect(rendered).toContain('Planning the request');
     expect(rendered).toContain('main:web_search({');
 

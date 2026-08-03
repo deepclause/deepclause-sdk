@@ -31,18 +31,18 @@ export function normalizeKeyEvent(
 ): KeyEvent | null {
   const sequence = key?.sequence ?? ch ?? '';
   const functionKey = FUNCTION_KEY_SEQUENCES[sequence];
-  const csiUnicodeKey = sequence.match(/^\x1b\[(\d+)(?::\d+)?(?:;(\d+)(?::\d+)?)?u$/);
+  const csiUnicodeKey = sequence.match(/^\x1b\[(\d+)(?::(\d+))?(?:;(\d+)(?::\d+)?)?u$/);
   const modifyOtherKey = sequence.match(/^\x1b\[27;(\d+);(\d+)~$/);
-  const enhancedCodepoint = csiUnicodeKey
-    ? Number(csiUnicodeKey[1])
-    : modifyOtherKey
-      ? Number(modifyOtherKey[2])
-      : undefined;
   const modifier = csiUnicodeKey
-    ? Number(csiUnicodeKey[2] ?? 1) - 1
+    ? Number(csiUnicodeKey[3] ?? 1) - 1
     : modifyOtherKey
       ? Number(modifyOtherKey[1]) - 1
       : 0;
+  const enhancedCodepoint = csiUnicodeKey
+    ? Number((modifier & 1) && csiUnicodeKey[2] ? csiUnicodeKey[2] : csiUnicodeKey[1])
+    : modifyOtherKey
+      ? Number(modifyOtherKey[2])
+      : undefined;
   const controlCode = sequence.length === 1 ? sequence.charCodeAt(0) : 0;
   const controlName = controlCode >= 1 && controlCode <= 26
     && controlCode !== 9 && controlCode !== 10 && controlCode !== 13
