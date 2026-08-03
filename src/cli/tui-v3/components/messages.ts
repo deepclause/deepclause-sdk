@@ -128,6 +128,14 @@ export class Messages implements Component {
       rows.push('');
       return rows;
     }
+    if (preview.task) {
+      const task = truncate(` Task: ${sanitizeTerminalText(preview.task)}`, innerWidth);
+      rows.push(
+        style('  │', ANSI.cyan)
+        + style(padRight(task, innerWidth), ANSI.bold)
+        + style('│', ANSI.cyan),
+      );
+    }
     const content = sanitizeTerminalText(preview.content || 'Waiting for model output…');
     const contentWidth = Math.max(1, innerWidth - 2);
     const lines = preview.complete

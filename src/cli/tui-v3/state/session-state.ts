@@ -19,6 +19,7 @@ export interface SessionSummary {
 export interface ExecutionPreview {
   label: string;
   content: string;
+  task?: string;
   complete: boolean;
   expanded: boolean;
 }
@@ -39,6 +40,7 @@ export type SessionAction =
   | { type: 'APPEND_MESSAGE'; message: DisplayMessage }
   | { type: 'START_EXECUTION_PREVIEW'; label: string }
   | { type: 'UPDATE_EXECUTION_PREVIEW'; content: string; label?: string }
+  | { type: 'SET_EXECUTION_TASK'; task?: string }
   | { type: 'COMPLETE_EXECUTION_PREVIEW' }
   | { type: 'TOGGLE_EXECUTION_PREVIEW' }
   | { type: 'CLEAR_EXECUTION_PREVIEW' }
@@ -80,6 +82,10 @@ export function sessionReducer(state: SessionState, action: SessionAction): Sess
               label: action.label ?? state.executionPreview.label,
             },
           }
+        : state;
+    case 'SET_EXECUTION_TASK':
+      return state.executionPreview
+        ? { ...state, executionPreview: { ...state.executionPreview, task: action.task } }
         : state;
     case 'COMPLETE_EXECUTION_PREVIEW':
       return state.executionPreview

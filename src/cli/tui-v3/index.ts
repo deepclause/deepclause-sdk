@@ -567,6 +567,7 @@ export async function startTuiV3(
     abortController = new AbortController();
     cancelRequested = false;
     let preview = '';
+    const activeTasks = new Map<string, string>();
     try {
       const result = await execute(abortController.signal, (logEvent) => {
         const content = logEvent.event.content;
@@ -574,6 +575,7 @@ export async function startTuiV3(
           preview += content;
           dispatchSession({ type: 'UPDATE_EXECUTION_PREVIEW', content: preview, label });
         }
+        updateExecutionTask(logEvent, activeTasks);
       });
       const message = result.answer || result.error;
       if (message) {
@@ -589,6 +591,22 @@ export async function startTuiV3(
       abortController = null;
       dispatchApp({ type: 'SET_BUSY', busy: false });
     }
+  }
+
+  function updateExecutionTask(logEvent: ConductorLogEvent, activeTasks: Map<string, string>): void {
+    const { event } = logEvent;
+    if (event.type !== 'task_activity' || !event.taskId) return;
+
+    const key = `${logEvent.scope}:${logEvent.childSlug ?? ''}:${event.taskId}`;
+    if (event.taskState === 'started') {
+      activeTasks.set(key, event.taskDescription || 'Task');
+    } else {
+      activeTasks.delete(key);
+    }
+    dispatchSession({
+      type: 'SET_EXECUTION_TASK',
+      task: Array.from(activeTasks.values()).at(-1),
+    });
   }
 
   async function createNewSession(title?: string): Promise<void> {
@@ -656,6 +674,7 @@ export async function startTuiV3(
     let streamBuffer = '';
     let answerReceived = false;
     const displayedTools = new Set<string>();
+    const activeTasks = new Map<string, string>();
     abortController = new AbortController();
     cancelRequested = false;
 
@@ -669,6 +688,7 @@ export async function startTuiV3(
         signal: abortController.signal,
         onEvent: (logEvent: ConductorLogEvent) => {
           const { event } = logEvent;
+          updateExecutionTask(logEvent, activeTasks);
 
           // Handle streaming text
           if (!answerReceived && event.type === 'stream' && event.content) {
