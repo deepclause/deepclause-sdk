@@ -57,7 +57,7 @@ export class HelpDialog implements Component {
     rows.push(`│${padLine('  Tab          Cycle panes', maxWidth - 2)}│`);
     rows.push(`│${padLine('  F2/F3       Focus; press again to hide', maxWidth - 2)}│`);
     rows.push(`│${padLine('  ↑/↓ + Enter Select focused session', maxWidth - 2)}│`);
-    rows.push(`│${padLine('  Ctrl+C       Quit / Cancel', maxWidth - 2)}│`);
+    rows.push(`│${padLine('  Ctrl+C       Cancel; press again to quit', maxWidth - 2)}│`);
     rows.push(`│${padLine('  Ctrl+U       Clear input', maxWidth - 2)}│`);
     rows.push(`│${padLine('  Ctrl+E       Inspect last DML execution', maxWidth - 2)}│`);
     rows.push(`│${padLine('  Shift+↑/↓    Scroll messages', maxWidth - 2)}│`);
@@ -70,6 +70,11 @@ export class HelpDialog implements Component {
     rows.push(`│${padLine('  /new [title] Create new session', maxWidth - 2)}│`);
     rows.push(`│${padLine('  /sessions    Toggle session pane', maxWidth - 2)}│`);
     rows.push(`│${padLine('  /help        Show this help', maxWidth - 2)}│`);
+    rows.push(`│${padLine('  /run FILE …  Run a DML file', maxWidth - 2)}│`);
+    rows.push(`│${padLine('  /compile SPEC Create a skill', maxWidth - 2)}│`);
+    rows.push(`│${padLine('  /set-model … Change model settings', maxWidth - 2)}│`);
+    rows.push(`│${padLine('  /SKILL …     Run a skill or plan', maxWidth - 2)}│`);
+    rows.push(`│${padLine('  /cancel      Cancel current execution', maxWidth - 2)}│`);
     rows.push(`│${padLine('  /exit        Quit the TUI', maxWidth - 2)}│`);
     rows.push(`│${padLine('', maxWidth - 2)}│`);
     rows.push(`│${center(style('Press Esc or ? to close', ANSI.dim), maxWidth - 2)}│`);

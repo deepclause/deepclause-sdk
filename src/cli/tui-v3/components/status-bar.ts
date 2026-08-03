@@ -73,7 +73,7 @@ export class StatusBar implements Component {
       { key: 'F3', label: 'Ctx', pane: 'context' },
       { key: '^E', label: 'Inspect' },
       { key: 'Tab', label: 'Next' },
-      { key: '^C', label: 'Quit' },
+      { key: '^C', label: this.busy ? 'Cancel' : 'Quit' },
     ];
 
     let line = '';

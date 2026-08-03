@@ -59,6 +59,15 @@ import {
   type ConductorLogEvent,
   type ConductorSessionMessage,
 } from '../../system/runtime/conductor.js';
+import {
+  formatSkillCreatorSummary,
+  parseCommandBarInput,
+  parseSetModelCommandArgs,
+  runFileCommand,
+  runSkillCreatorCommand,
+  runSlashCommand,
+} from '../tui.js';
+import { setModel } from '../config.js';
 
 export interface TuiV3Options {
   sandbox?: boolean;
@@ -401,13 +410,9 @@ export async function startTuiV3(
     const trimmed = text.trim();
     if (!trimmed || appState.busy) return;
 
-    // Slash commands
-    if (trimmed.startsWith('/')) {
-      const parts = trimmed.slice(1).split(/\s+/);
-      const command = parts[0];
-      const rawArgs = trimmed.slice(1 + command.length).trim();
-
-      switch (command) {
+    const parsed = parseCommandBarInput(trimmed);
+    if (parsed.kind === 'builtin') {
+      switch (parsed.name) {
         case 'exit':
         case 'quit':
           eventLoop.stop();
@@ -415,7 +420,7 @@ export async function startTuiV3(
         case 'new':
           dispatchApp({ type: 'SET_BUSY', busy: true });
           try {
-            await createNewSession(rawArgs || undefined);
+            await createNewSession(parsed.rawArgs || undefined);
           } finally {
             dispatchApp({ type: 'SET_BUSY', busy: false });
           }
@@ -431,15 +436,76 @@ export async function startTuiV3(
             abortController.abort();
           }
           return;
-        default:
-          break;
+        case 'set-model': {
+          try {
+            const { model, slot } = parseSetModelCommandArgs(parsed.rawArgs);
+            const result = await setModel(workspaceRoot, model, slot);
+            dispatchSession({
+              type: 'APPEND_MESSAGE',
+              message: {
+                role: 'system',
+                content: `Model set to ${result.modelId} (${result.updatedSlots.join(', ')}).`,
+              },
+            });
+          } catch (error) {
+            appendCommandError(error);
+          }
+          return;
+        }
+        case 'run':
+          if (parsed.args.length === 0) {
+            appendCommandError(new Error('Provide a DML file after /run.'));
+            return;
+          }
+          await runDirectCommand(
+            `/${parsed.name} ${parsed.rawArgs}`,
+            (signal, onEvent) => runFileCommand(workspaceRoot, parsed.args[0], parsed.args.slice(1), {
+              sessionId: sessionState.activeSessionId ?? undefined,
+              sandbox: options.sandbox,
+              signal,
+              onEvent,
+            }),
+          );
+          return;
+        case 'compile':
+        case 'skill-creator':
+          if (!parsed.rawArgs) {
+            appendCommandError(new Error(`Provide a skill specification after /${parsed.name}.`));
+            return;
+          }
+          await runDirectCommand(
+            `/${parsed.name} ${parsed.rawArgs}`,
+            async (signal, onEvent) => {
+              if (!sessionState.activeSessionId) await createNewSession();
+              const result = await runSkillCreatorCommand(
+                workspaceRoot,
+                sessionState.activeSessionId!,
+                parsed.rawArgs,
+                { sandbox: options.sandbox, signal, onEvent },
+              );
+              return { answer: formatSkillCreatorSummary(workspaceRoot, result) };
+            },
+          );
+          return;
       }
     }
 
-    // Send message
+    if (parsed.kind === 'skill') {
+      await runDirectCommand(
+        `/${parsed.name}${parsed.rawArgs ? ` ${parsed.rawArgs}` : ''}`,
+        (signal, onEvent) => runSlashCommand(workspaceRoot, parsed.name, parsed.args, {
+          sessionId: sessionState.activeSessionId ?? undefined,
+          sandbox: options.sandbox,
+          signal,
+          onEvent,
+        }),
+      );
+      return;
+    }
+
     dispatchApp({ type: 'SET_BUSY', busy: true });
     try {
-      await sendMessage(trimmed);
+      await sendMessage(parsed.kind === 'text' ? parsed.prompt : trimmed);
     } finally {
       dispatchApp({ type: 'SET_BUSY', busy: false });
     }
@@ -447,7 +513,53 @@ export async function startTuiV3(
 
   // --- Session management ---
   let abortController: AbortController | null = null;
+  let cancelRequested = false;
   let memoryContextTokens = 0;
+
+  function appendCommandError(error: unknown): void {
+    dispatchSession({
+      type: 'APPEND_MESSAGE',
+      message: { role: 'system', content: (error as Error).message, error: true },
+    });
+  }
+
+  async function runDirectCommand(
+    label: string,
+    execute: (
+      signal: AbortSignal,
+      onEvent: (event: ConductorLogEvent) => void,
+    ) => Promise<{ answer?: string; error?: string }>,
+  ): Promise<void> {
+    if (!sessionState.activeSessionId) await createNewSession();
+    dispatchApp({ type: 'SET_BUSY', busy: true });
+    dispatchSession({ type: 'APPEND_MESSAGE', message: { role: 'user', content: label } });
+    dispatchSession({ type: 'START_EXECUTION_PREVIEW', label });
+    abortController = new AbortController();
+    cancelRequested = false;
+    let preview = '';
+    try {
+      const result = await execute(abortController.signal, (logEvent) => {
+        const content = logEvent.event.content;
+        if (content && (logEvent.event.type === 'stream' || logEvent.event.type === 'log')) {
+          preview += content;
+          dispatchSession({ type: 'UPDATE_EXECUTION_PREVIEW', content: preview, label });
+        }
+      });
+      const message = result.answer || result.error;
+      if (message) {
+        dispatchSession({
+          type: 'APPEND_MESSAGE',
+          message: { role: result.error ? 'system' : 'assistant', content: message, error: Boolean(result.error) },
+        });
+      }
+    } catch (error) {
+      appendCommandError(error);
+    } finally {
+      dispatchSession({ type: 'COMPLETE_EXECUTION_PREVIEW' });
+      abortController = null;
+      dispatchApp({ type: 'SET_BUSY', busy: false });
+    }
+  }
 
   async function createNewSession(title?: string): Promise<void> {
     dispatchSession({ type: 'SET_LOADING', loading: true });
@@ -515,6 +627,7 @@ export async function startTuiV3(
     let answerReceived = false;
     const displayedTools = new Set<string>();
     abortController = new AbortController();
+    cancelRequested = false;
 
     try {
       const result = await runConductorTurn(text, {
@@ -646,7 +759,8 @@ export async function startTuiV3(
   const eventLoop = new EventLoop({
     root: rootComponent,
     onExit: () => {
-      if (appState.busy && abortController) {
+      if (appState.busy && abortController && !cancelRequested) {
+        cancelRequested = true;
         abortController.abort();
       } else {
         eventLoop.stop();
