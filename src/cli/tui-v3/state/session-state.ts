@@ -16,12 +16,19 @@ export interface SessionSummary {
   updatedAt?: string;
 }
 
+export interface ExecutionPreview {
+  label: string;
+  content: string;
+  complete: boolean;
+  expanded: boolean;
+}
+
 export interface SessionState {
   sessions: SessionSummary[];
   activeSessionId: string | null;
   activeTitle: string;
   messages: DisplayMessage[];
-  streamingContent: string | null;
+  executionPreview: ExecutionPreview | null;
   loading: boolean;
 }
 
@@ -30,7 +37,11 @@ export type SessionAction =
   | { type: 'SET_ACTIVE_SESSION'; id: string; title: string }
   | { type: 'SET_MESSAGES'; messages: DisplayMessage[] }
   | { type: 'APPEND_MESSAGE'; message: DisplayMessage }
-  | { type: 'SET_STREAMING'; content: string | null }
+  | { type: 'START_EXECUTION_PREVIEW'; label: string }
+  | { type: 'UPDATE_EXECUTION_PREVIEW'; content: string; label?: string }
+  | { type: 'COMPLETE_EXECUTION_PREVIEW' }
+  | { type: 'TOGGLE_EXECUTION_PREVIEW' }
+  | { type: 'CLEAR_EXECUTION_PREVIEW' }
   | { type: 'SET_LOADING'; loading: boolean };
 
 export function createInitialSessionState(): SessionState {
@@ -39,7 +50,7 @@ export function createInitialSessionState(): SessionState {
     activeSessionId: null,
     activeTitle: 'No session',
     messages: [],
-    streamingContent: null,
+    executionPreview: null,
     loading: false,
   };
 }
@@ -54,8 +65,32 @@ export function sessionReducer(state: SessionState, action: SessionAction): Sess
       return { ...state, messages: action.messages };
     case 'APPEND_MESSAGE':
       return { ...state, messages: [...state.messages, action.message] };
-    case 'SET_STREAMING':
-      return { ...state, streamingContent: action.content };
+    case 'START_EXECUTION_PREVIEW':
+      return {
+        ...state,
+        executionPreview: { label: action.label, content: '', complete: false, expanded: true },
+      };
+    case 'UPDATE_EXECUTION_PREVIEW':
+      return state.executionPreview
+        ? {
+            ...state,
+            executionPreview: {
+              ...state.executionPreview,
+              content: action.content,
+              label: action.label ?? state.executionPreview.label,
+            },
+          }
+        : state;
+    case 'COMPLETE_EXECUTION_PREVIEW':
+      return state.executionPreview
+        ? { ...state, executionPreview: { ...state.executionPreview, complete: true, expanded: false } }
+        : state;
+    case 'TOGGLE_EXECUTION_PREVIEW':
+      return state.executionPreview?.complete
+        ? { ...state, executionPreview: { ...state.executionPreview, expanded: !state.executionPreview.expanded } }
+        : state;
+    case 'CLEAR_EXECUTION_PREVIEW':
+      return { ...state, executionPreview: null };
     case 'SET_LOADING':
       return { ...state, loading: action.loading };
     default:

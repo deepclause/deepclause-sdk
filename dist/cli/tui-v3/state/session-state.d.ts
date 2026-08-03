@@ -13,12 +13,18 @@ export interface SessionSummary {
     title: string;
     updatedAt?: string;
 }
+export interface ExecutionPreview {
+    label: string;
+    content: string;
+    complete: boolean;
+    expanded: boolean;
+}
 export interface SessionState {
     sessions: SessionSummary[];
     activeSessionId: string | null;
     activeTitle: string;
     messages: DisplayMessage[];
-    streamingContent: string | null;
+    executionPreview: ExecutionPreview | null;
     loading: boolean;
 }
 export type SessionAction = {
@@ -35,8 +41,18 @@ export type SessionAction = {
     type: 'APPEND_MESSAGE';
     message: DisplayMessage;
 } | {
-    type: 'SET_STREAMING';
-    content: string | null;
+    type: 'START_EXECUTION_PREVIEW';
+    label: string;
+} | {
+    type: 'UPDATE_EXECUTION_PREVIEW';
+    content: string;
+    label?: string;
+} | {
+    type: 'COMPLETE_EXECUTION_PREVIEW';
+} | {
+    type: 'TOGGLE_EXECUTION_PREVIEW';
+} | {
+    type: 'CLEAR_EXECUTION_PREVIEW';
 } | {
     type: 'SET_LOADING';
     loading: boolean;

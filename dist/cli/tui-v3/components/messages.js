@@ -4,14 +4,20 @@
  * Key optimization: historical messages are cached and never re-rendered
  * during streaming. Only the streaming (latest) message re-renders.
  */
-import { style, ANSI, padRight } from '../util/ansi.js';
+import { style, ANSI, padRight, truncate } from '../util/ansi.js';
+function sanitizeTerminalText(text) {
+    return text
+        .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
+        .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+        .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
+}
 export class Messages {
     dirty = true;
     minHeight = 1;
     flexGrow = 1;
     requestRenderFn;
     messages = [];
-    streamingContent = null;
+    executionPreview = null;
     cache = [];
     constructor(requestRender) {
         this.requestRenderFn = requestRender;
@@ -28,9 +34,9 @@ export class Messages {
         this.messages.push(message);
         this.invalidate();
     }
-    /** Set streaming content (the in-progress assistant message). */
-    setStreaming(content) {
-        this.streamingContent = content;
+    /** Set the current or most recently completed DML execution preview. */
+    setExecutionPreview(preview) {
+        this.executionPreview = preview;
         this.invalidate();
     }
     invalidate() {
@@ -40,7 +46,14 @@ export class Messages {
     render(width) {
         const allRows = [];
         // Render each message (with caching)
+        const previewBefore = this.executionPreview?.complete
+            && this.messages.at(-1)?.role === 'assistant'
+            ? this.messages.length - 1
+            : this.messages.length;
         for (let i = 0; i < this.messages.length; i++) {
+            if (i === previewBefore && this.executionPreview) {
+                allRows.push(...this.renderExecution(this.executionPreview, width));
+            }
             const msg = this.messages[i];
             const cached = this.cache[i];
             if (cached && cached.message === msg && cached.width === width) {
@@ -54,9 +67,8 @@ export class Messages {
                 allRows.push(...rows);
             }
         }
-        // Render the in-progress reasoning/tool stream in a temporary box.
-        if (this.streamingContent !== null) {
-            allRows.push(...this.renderThinking(this.streamingContent, width));
+        if (previewBefore === this.messages.length && this.executionPreview) {
+            allRows.push(...this.renderExecution(this.executionPreview, width));
         }
         // If no messages, show a placeholder
         if (allRows.length === 0) {
@@ -67,14 +79,25 @@ export class Messages {
         this.dirty = false;
         return allRows;
     }
-    renderThinking(content, width) {
+    renderExecution(preview, width) {
         const boxWidth = Math.max(12, width - 2);
         const innerWidth = Math.max(8, boxWidth - 2);
-        const title = ' Thinking ';
+        const state = preview.complete ? 'complete' : 'running';
+        const marker = preview.complete && !preview.expanded ? '▸' : '▾';
+        const title = truncate(` ${marker} ${preview.label} · ${state} `, innerWidth);
         const rows = [
             style(`  ┌${title}${'─'.repeat(Math.max(0, innerWidth - title.length))}┐`, ANSI.cyan),
         ];
-        const lines = this.wrapText(content || 'Waiting for model output…', Math.max(1, innerWidth - 2));
+        if (preview.complete && !preview.expanded) {
+            rows.push(style('  │', ANSI.cyan)
+                + style(padRight(' Ctrl+E to inspect', innerWidth), ANSI.dim)
+                + style('│', ANSI.cyan));
+            rows.push(style(`  └${'─'.repeat(innerWidth)}┘`, ANSI.cyan));
+            rows.push('');
+            return rows;
+        }
+        const wrapped = this.wrapText(sanitizeTerminalText(preview.content || 'Waiting for model output…'), Math.max(1, innerWidth - 2));
+        const lines = preview.complete ? wrapped : wrapped.slice(-3);
         for (const line of lines) {
             rows.push(style('  │', ANSI.cyan)
                 + style(padRight(` ${line}`, innerWidth), ANSI.dim)
@@ -91,7 +114,7 @@ export class Messages {
         const roleLabel = this.getRoleLabel(msg);
         rows.push(roleLabel);
         // Wrap content into lines
-        const lines = this.wrapText(msg.content, contentWidth);
+        const lines = this.wrapText(sanitizeTerminalText(msg.content), contentWidth);
         for (const line of lines) {
             const styled = msg.error
                 ? style(`  ${line}`, ANSI.red)

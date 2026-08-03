@@ -8,7 +8,7 @@ The TUI is the operator interface around a single built-in agent: the conductor.
 
 - The left pane shows sessions.
 - The center pane shows the conversation transcript.
-- In-progress model output and tool calls appear in a temporary thinking box in the conversation.
+- In-progress model output and tool calls appear in a compact box named for the active DML file.
 - The hideable right pane shows approximate context size and token usage by model.
 
 The local `.deepclause/docs/` folder contains editable workspace docs such as `TUI.md` and `DML_REFERENCE.md`. The system `plan` skill reads `DML_REFERENCE.md` and `.deepclause/system/DML_COMPILER_PROMPT.md` before generating new plan files.
@@ -90,17 +90,17 @@ Important keys:
 - `Tab` autocompletes slash commands and skill names.
 - `Ctrl+W` cycles focus across panes.
 
-## Thinking Box
+## DML Execution Box
 
-While a conductor or child DML request is running, the messages pane shows a thinking box containing:
+While a conductor, child DML, or directly run DML request is running, the messages pane shows a compact box named for that DML file containing:
 
 It can show:
 
 - streamed model output
 - child-DML streamed output
-- tool call names, without tool output
+- tool call names and shortened arguments, without tool output
 
-When DML emits `answer/1`, the thinking box collapses and the final answer is shown as the assistant message.
+When DML emits `answer/1`, the box collapses and the final answer is shown as the assistant message. Press `Ctrl+E` to inspect or collapse the completed execution details.
 
 ## Context Pane
 
@@ -139,6 +139,6 @@ If a user asks how to automate something repeatedly, the right TUI workflow is u
 
 ## Troubleshooting
 
-- If a command appears to be stuck, check the thinking box for current model output or tool calls.
+- If a command appears to be stuck, check the DML execution box for current model output or tool calls.
 - If a newly created skill does not appear, refresh the skill catalog or run a new turn after the command completes.
 - If a system prompt or system DML change does not seem active, verify the source paths shown in the context pane.

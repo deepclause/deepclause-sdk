@@ -3,6 +3,8 @@ import { Input } from '../src/cli/tui-v3/components/input.js';
 import { Context } from '../src/cli/tui-v3/components/context.js';
 import { Messages } from '../src/cli/tui-v3/components/messages.js';
 import { Sessions } from '../src/cli/tui-v3/components/sessions.js';
+import { HelpDialog } from '../src/cli/tui-v3/dialogs/help.js';
+import { formatToolArgs } from '../src/cli/tui-v3/index.js';
 import { createInitialAppState } from '../src/cli/tui-v3/state/app-state.js';
 import { normalizeKeyEvent } from '../src/cli/tui-v3/event-loop.js';
 import { composeOverlay } from '../src/cli/tui-v3/layout/overlay.js';
@@ -99,20 +101,53 @@ describe('TUI v3', () => {
     expect(visibleLength(composed[0])).toBe(10);
   });
 
-  it('renders streamed reasoning and tool calls in a thinking box', () => {
+  it('renders a compact, inspectable DML execution box', () => {
     const messages = new Messages(vi.fn());
-    messages.setStreaming('Planning the request\n▶ main:web_search\n');
+    messages.setExecutionPreview({
+      label: 'conductor.dml',
+      content: 'Planning the request\n▶ main:web_search({"query":"test"})\n',
+      complete: false,
+      expanded: true,
+    });
 
     const rendered = messages.render(48).map(stripAnsi).join('\n');
-    expect(rendered).toContain('Thinking');
+    expect(rendered).toContain('conductor.dml · running');
     expect(rendered).toContain('Planning the request');
-    expect(rendered).toContain('main:web_search');
+    expect(rendered).toContain('main:web_search({');
 
-    messages.setStreaming(null);
+    messages.setExecutionPreview({
+      label: 'plans/report.dml',
+      content: 'Execution details',
+      complete: true,
+      expanded: false,
+    });
     messages.setMessages([{ role: 'assistant', content: 'Final answer' }]);
     const completed = messages.render(48).map(stripAnsi).join('\n');
-    expect(completed).not.toContain('Thinking');
+    expect(completed).toContain('plans/report.dml · complete');
+    expect(completed).toContain('Ctrl+E to inspect');
+    expect(completed).not.toContain('Execution details');
     expect(completed).toContain('Final answer');
+  });
+
+  it('closes help for the raw Escape sequence', () => {
+    const help = new HelpDialog(vi.fn());
+    help.show();
+    expect(help.handleInput({
+      name: '',
+      sequence: '\x1b',
+      ctrl: false,
+      meta: false,
+      shift: false,
+    })).toBe(true);
+    expect(help.isVisible).toBe(false);
+  });
+
+  it('shows tool arguments and shortens oversized values', () => {
+    expect(formatToolArgs({ query: 'test' })).toBe('({"query":"test"})');
+    const shortened = formatToolArgs({ content: 'x'.repeat(200) }, 40);
+    expect(shortened).toHaveLength(42);
+    expect(shortened).toContain('"content"');
+    expect(shortened.endsWith('…)')).toBe(true);
   });
 
   it('shows context size and per-model input/output usage', () => {

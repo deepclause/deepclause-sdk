@@ -339,6 +339,10 @@ export async function startTuiV3(
       }
 
       // Scroll (Shift+Up/Down or PgUp/PgDn) based on focused pane
+      if (key.ctrl && key.name === 'e') {
+        dispatchSession({ type: 'TOGGLE_EXECUTION_PREVIEW' });
+        return true;
+      }
       if (appState.focusedPane === 'messages') {
         if (messageScroll.handleInput(key)) return true;
       }
@@ -367,7 +371,7 @@ export async function startTuiV3(
       pending: m.pending,
       error: m.error,
     })));
-    messagesComp.setStreaming(sessionState.streamingContent);
+    messagesComp.setExecutionPreview(sessionState.executionPreview);
 
     // Sync sessions pane
     sessionsComp.setSessions(sessionState.sessions.map((s) => ({
@@ -453,6 +457,7 @@ export async function startTuiV3(
       dispatchSession({ type: 'SET_SESSIONS', sessions: sessions.map(toSessionSummary) });
       dispatchSession({ type: 'SET_ACTIVE_SESSION', id: session.id, title: session.title });
       dispatchSession({ type: 'SET_MESSAGES', messages: [] });
+      dispatchSession({ type: 'CLEAR_EXECUTION_PREVIEW' });
       dispatchExecution({ type: 'CLEAR_ACTIVITY' });
       dispatchExecution({ type: 'SET_TOKEN_USAGE', usage: {} });
       dispatchExecution({ type: 'SET_CONTEXT_TOKENS', tokens: 0 });
@@ -472,6 +477,7 @@ export async function startTuiV3(
         content: m.content,
       }));
       dispatchSession({ type: 'SET_MESSAGES', messages });
+      dispatchSession({ type: 'CLEAR_EXECUTION_PREVIEW' });
       memoryContextTokens = estimateTextTokens(detail.taskMemory ?? '')
         + estimateTextTokens(detail.assistantMemory ?? '');
       dispatchExecution({ type: 'CLEAR_ACTIVITY' });
@@ -497,7 +503,7 @@ export async function startTuiV3(
     const sessionId = sessionState.activeSessionId!;
 
     dispatchSession({ type: 'APPEND_MESSAGE', message: { role: 'user', content: text } });
-    dispatchSession({ type: 'SET_STREAMING', content: '' });
+    dispatchSession({ type: 'START_EXECUTION_PREVIEW', label: 'conductor.dml' });
     dispatchExecution({ type: 'CLEAR_ACTIVITY' });
     dispatchExecution({ type: 'SET_RUNNING', running: true });
     dispatchExecution({
@@ -524,10 +530,14 @@ export async function startTuiV3(
           // Handle streaming text
           if (!answerReceived && event.type === 'stream' && event.content) {
             streamBuffer += event.content;
-            dispatchSession({ type: 'SET_STREAMING', content: streamBuffer });
+            dispatchSession({
+              type: 'UPDATE_EXECUTION_PREVIEW',
+              content: streamBuffer,
+              label: executionDmlLabel(logEvent),
+            });
           }
 
-          // Show tool invocations in the thinking box, never their output.
+          // Show tool invocations in the DML execution box, never their output.
           if (event.type === 'tool_call' && event.toolName) {
             const scopeKey = logEvent.scope === 'child'
               ? `child:${logEvent.childSlug ?? '?'}:${event.toolName}`
@@ -540,8 +550,13 @@ export async function startTuiV3(
               && (event.toolState === undefined || event.toolState === 'starting' || event.toolState === 'running')
             ) {
               displayedTools.add(scopeKey);
-              streamBuffer += `${streamBuffer && !streamBuffer.endsWith('\n') ? '\n' : ''}▶ ${scopeLabel}:${event.toolName}\n`;
-              dispatchSession({ type: 'SET_STREAMING', content: streamBuffer });
+              const args = formatToolArgs(event.toolArgs);
+              streamBuffer += `${streamBuffer && !streamBuffer.endsWith('\n') ? '\n' : ''}▶ ${scopeLabel}:${event.toolName}${args}\n`;
+              dispatchSession({
+                type: 'UPDATE_EXECUTION_PREVIEW',
+                content: streamBuffer,
+                label: executionDmlLabel(logEvent),
+              });
             } else if (event.toolState === 'completed' || event.toolState === 'failed') {
               displayedTools.delete(scopeKey);
             }
@@ -549,7 +564,12 @@ export async function startTuiV3(
 
           if (logEvent.scope === 'main' && event.type === 'answer') {
             answerReceived = true;
-            dispatchSession({ type: 'SET_STREAMING', content: null });
+            dispatchSession({
+              type: 'UPDATE_EXECUTION_PREVIEW',
+              content: streamBuffer,
+              label: executionDmlLabel(logEvent),
+            });
+            dispatchSession({ type: 'COMPLETE_EXECUTION_PREVIEW' });
             if (event.content) {
               dispatchSession({ type: 'APPEND_MESSAGE', message: { role: 'assistant', content: event.content } });
               dispatchExecution({
@@ -597,7 +617,7 @@ export async function startTuiV3(
       const message = (error as Error).message;
       dispatchSession({ type: 'APPEND_MESSAGE', message: { role: 'system', content: message, error: true } });
     } finally {
-      dispatchSession({ type: 'SET_STREAMING', content: null });
+      dispatchSession({ type: 'COMPLETE_EXECUTION_PREVIEW' });
       dispatchExecution({ type: 'SET_RUNNING', running: false });
       abortController = null;
     }
@@ -693,4 +713,24 @@ function estimateMessageTokens(messages: Array<{ role: string; content: string }
 function estimateTextTokens(text: string): number {
   const normalized = text.trim();
   return normalized ? Math.max(1, Math.ceil(normalized.length / 4)) : 0;
+}
+
+function executionDmlLabel(logEvent: ConductorLogEvent): string {
+  if (logEvent.scope === 'main') return 'conductor.dml';
+  const slug = logEvent.childSlug ?? 'child';
+  return slug.endsWith('.dml') ? slug : `${slug}.dml`;
+}
+
+export function formatToolArgs(args: Record<string, unknown> | undefined, maxLength = 100): string {
+  if (!args || Object.keys(args).length === 0) return '()';
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(args);
+  } catch {
+    serialized = '[unserializable arguments]';
+  }
+  const shortened = serialized.length > maxLength
+    ? `${serialized.slice(0, maxLength - 1)}…`
+    : serialized;
+  return `(${shortened})`;
 }

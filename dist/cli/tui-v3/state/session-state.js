@@ -8,7 +8,7 @@ export function createInitialSessionState() {
         activeSessionId: null,
         activeTitle: 'No session',
         messages: [],
-        streamingContent: null,
+        executionPreview: null,
         loading: false,
     };
 }
@@ -22,8 +22,32 @@ export function sessionReducer(state, action) {
             return { ...state, messages: action.messages };
         case 'APPEND_MESSAGE':
             return { ...state, messages: [...state.messages, action.message] };
-        case 'SET_STREAMING':
-            return { ...state, streamingContent: action.content };
+        case 'START_EXECUTION_PREVIEW':
+            return {
+                ...state,
+                executionPreview: { label: action.label, content: '', complete: false, expanded: true },
+            };
+        case 'UPDATE_EXECUTION_PREVIEW':
+            return state.executionPreview
+                ? {
+                    ...state,
+                    executionPreview: {
+                        ...state.executionPreview,
+                        content: action.content,
+                        label: action.label ?? state.executionPreview.label,
+                    },
+                }
+                : state;
+        case 'COMPLETE_EXECUTION_PREVIEW':
+            return state.executionPreview
+                ? { ...state, executionPreview: { ...state.executionPreview, complete: true, expanded: false } }
+                : state;
+        case 'TOGGLE_EXECUTION_PREVIEW':
+            return state.executionPreview?.complete
+                ? { ...state, executionPreview: { ...state.executionPreview, expanded: !state.executionPreview.expanded } }
+                : state;
+        case 'CLEAR_EXECUTION_PREVIEW':
+            return { ...state, executionPreview: null };
         case 'SET_LOADING':
             return { ...state, loading: action.loading };
         default:

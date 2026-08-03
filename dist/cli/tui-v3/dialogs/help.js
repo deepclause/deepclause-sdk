@@ -47,6 +47,7 @@ export class HelpDialog {
         rows.push(`│${padLine('  ↑/↓ + Enter Select focused session', maxWidth - 2)}│`);
         rows.push(`│${padLine('  Ctrl+C       Quit / Cancel', maxWidth - 2)}│`);
         rows.push(`│${padLine('  Ctrl+U       Clear input', maxWidth - 2)}│`);
+        rows.push(`│${padLine('  Ctrl+E       Inspect last DML execution', maxWidth - 2)}│`);
         rows.push(`│${padLine('  Shift+↑/↓    Scroll messages', maxWidth - 2)}│`);
         rows.push(`│${padLine('  PgUp/PgDn    Page scroll', maxWidth - 2)}│`);
         rows.push(`│${padLine('  Home/End     Top/Bottom of messages', maxWidth - 2)}│`);
@@ -67,7 +68,7 @@ export class HelpDialog {
     handleInput(key) {
         if (!this.visible)
             return false;
-        if (key.name === 'escape' || key.sequence === '?') {
+        if (key.name === 'escape' || key.name === 'esc' || key.sequence === '\x1b' || key.sequence === '?') {
             this.hide();
             if (this.onClose)
                 this.onClose();

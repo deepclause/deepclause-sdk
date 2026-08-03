@@ -29,4 +29,5 @@ export interface TuiV3Options {
  * Returns when the user exits.
  */
 export declare function startTuiV3(workspaceRoot?: string, options?: TuiV3Options): Promise<void>;
+export declare function formatToolArgs(args: Record<string, unknown> | undefined, maxLength?: number): string;
 //# sourceMappingURL=index.d.ts.map

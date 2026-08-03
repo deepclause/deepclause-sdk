@@ -61,6 +61,7 @@ export class StatusBar {
             { key: 'F1', label: 'Help' },
             { key: 'F2', label: 'Sess', pane: 'sessions' },
             { key: 'F3', label: 'Ctx', pane: 'context' },
+            { key: '^E', label: 'Inspect' },
             { key: 'Tab', label: 'Next' },
             { key: '^C', label: 'Quit' },
         ];
