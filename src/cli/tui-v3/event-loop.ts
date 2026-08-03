@@ -51,6 +51,8 @@ export interface EventLoopOptions extends RendererOptions {
   stdin?: NodeJS.ReadStream & { setRawMode?(mode: boolean): NodeJS.ReadStream };
   /** Called when the user presses Ctrl+C and no component handles it */
   onExit?: () => void;
+  /** Called after the terminal dimensions change. */
+  onResize?: (columns: number, rows: number) => void;
 }
 
 /**
@@ -66,6 +68,7 @@ export class EventLoop {
   private stdin: NodeJS.ReadStream & { setRawMode?(mode: boolean): NodeJS.ReadStream };
   private stdout: NodeJS.WriteStream;
   private onExit: () => void;
+  private onResize: ((columns: number, rows: number) => void) | undefined;
   private running = false;
   private renderScheduled = false;
   private exitPromise: Promise<void> | null = null;
@@ -76,6 +79,7 @@ export class EventLoop {
     this.stdin = (options.stdin ?? process.stdin) as NodeJS.ReadStream & { setRawMode?(mode: boolean): NodeJS.ReadStream };
     this.stdout = options.stdout ?? process.stdout;
     this.onExit = options.onExit ?? (() => this.stop());
+    this.onResize = options.onResize;
     this.renderer = new Renderer(options);
   }
 
@@ -204,6 +208,7 @@ export class EventLoop {
     const rows = this.stdout.rows || 24;
     const cols = this.stdout.columns || 80;
     this.renderer.resize(rows, cols);
+    this.onResize?.(cols, rows);
     this.requestRender();
   };
 }

@@ -48,6 +48,7 @@ export class EventLoop {
     stdin;
     stdout;
     onExit;
+    onResize;
     running = false;
     renderScheduled = false;
     exitPromise = null;
@@ -57,6 +58,7 @@ export class EventLoop {
         this.stdin = (options.stdin ?? process.stdin);
         this.stdout = options.stdout ?? process.stdout;
         this.onExit = options.onExit ?? (() => this.stop());
+        this.onResize = options.onResize;
         this.renderer = new Renderer(options);
     }
     /** Start the event loop. Returns a promise that resolves when the loop stops. */
@@ -166,6 +168,7 @@ export class EventLoop {
         const rows = this.stdout.rows || 24;
         const cols = this.stdout.columns || 80;
         this.renderer.resize(rows, cols);
+        this.onResize?.(cols, rows);
         this.requestRender();
     };
 }

@@ -1,7 +1,7 @@
 /**
  * Help overlay dialog — shows keyboard shortcuts and commands.
  */
-import { style, ANSI, center } from '../util/ansi.js';
+import { style, ANSI, center, clipAnsi, padRight } from '../util/ansi.js';
 export class HelpDialog {
     dirty = true;
     minHeight = 0;
@@ -33,7 +33,7 @@ export class HelpDialog {
     render(width) {
         if (!this.visible)
             return [];
-        const maxWidth = Math.min(60, width - 4);
+        const maxWidth = Math.max(4, Math.min(64, width - 4));
         const rows = [];
         const border = '─'.repeat(maxWidth - 2);
         rows.push(`┌${border}┐`);
@@ -43,6 +43,8 @@ export class HelpDialog {
         rows.push(`│${padLine(style(' Keyboard Shortcuts:', ANSI.bold), maxWidth - 2)}│`);
         rows.push(`│${padLine('', maxWidth - 2)}│`);
         rows.push(`│${padLine('  Tab          Cycle panes', maxWidth - 2)}│`);
+        rows.push(`│${padLine('  F2/F4-F6    Focus; press again to hide', maxWidth - 2)}│`);
+        rows.push(`│${padLine('  ↑/↓ + Enter Select focused session', maxWidth - 2)}│`);
         rows.push(`│${padLine('  Ctrl+C       Quit / Cancel', maxWidth - 2)}│`);
         rows.push(`│${padLine('  Ctrl+U       Clear input', maxWidth - 2)}│`);
         rows.push(`│${padLine('  Shift+↑/↓    Scroll messages', maxWidth - 2)}│`);
@@ -76,8 +78,6 @@ export class HelpDialog {
     }
 }
 function padLine(text, width) {
-    const stripped = text.replace(/\u001b\[[0-9;]*[A-Za-z]/g, '');
-    const padding = Math.max(0, width - stripped.length);
-    return text + ' '.repeat(padding);
+    return padRight(clipAnsi(text, width), width);
 }
 //# sourceMappingURL=help.js.map

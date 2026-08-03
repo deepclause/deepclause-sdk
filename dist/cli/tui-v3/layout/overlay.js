@@ -5,7 +5,7 @@
  * centering it (or placing at specified coordinates) without clearing
  * the entire screen.
  */
-import { stripAnsi } from '../util/ansi.js';
+import { clipAnsi, padRight, stripAnsi } from '../util/ansi.js';
 /**
  * Compose an overlay on top of a background screen buffer.
  * The overlay replaces characters at the specified position.
@@ -54,17 +54,11 @@ export function composeOverlay(background, overlayRows, overlayWidth, screenWidt
  * Simple approach: pads background to start position, inserts overlay.
  */
 function spliceRow(bgRow, overlayLine, startX, overlayWidth) {
-    const bgStripped = stripAnsi(bgRow);
-    const bgLen = bgStripped.length;
-    // Build: [bg left] [overlay] [bg right]
-    const left = bgLen > startX ? bgRow.slice(0, startX) : bgRow + ' '.repeat(startX - bgLen);
+    const bgPlain = stripAnsi(bgRow);
+    const left = bgPlain.padEnd(startX).slice(0, startX);
     const rightStart = startX + overlayWidth;
-    const right = bgLen > rightStart ? ' '.repeat(Math.max(0, rightStart - bgLen)) + bgStripped.slice(rightStart) : '';
-    // Pad overlay to its width
-    const overlayStrippedLen = stripAnsi(overlayLine).length;
-    const paddedOverlay = overlayStrippedLen < overlayWidth
-        ? overlayLine + ' '.repeat(overlayWidth - overlayStrippedLen)
-        : overlayLine;
+    const right = bgPlain.length > rightStart ? bgPlain.slice(rightStart) : '';
+    const paddedOverlay = padRight(clipAnsi(overlayLine, overlayWidth), overlayWidth);
     return left + paddedOverlay + right;
 }
 //# sourceMappingURL=overlay.js.map

@@ -18,6 +18,8 @@ export declare class Activity implements Component {
     constructor(requestRender: RequestRender);
     /** Push a new activity line. */
     pushLine(line: string): void;
+    /** Replace the activity log with state-managed lines. */
+    setLines(lines: string[]): void;
     /** Clear all activity. */
     clear(): void;
     /** Update the list of active tools. */

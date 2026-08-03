@@ -44,6 +44,7 @@ import {
   createInitialSessionState,
   sessionReducer,
   type SessionAction,
+  type SessionSummary,
 } from './state/session-state.js';
 import {
   createInitialExecutionState,
@@ -227,7 +228,7 @@ export async function startTuiV3(
       const sessionVisible = appState.paneVisibility.sessions;
       const rightVisible = appState.paneVisibility.process || appState.paneVisibility.tasks || appState.paneVisibility.context;
 
-      const sessionWidth = sessionVisible ? Math.min(sessionsComp.isCollapsed ? 5 : 26, Math.max(0, width - 20)) : 0;
+      const sessionWidth = sessionVisible ? Math.min(sessionsComp.isCollapsed ? 5 : 32, Math.max(0, width - 20)) : 0;
       const availableAfterSessions = Math.max(0, width - sessionWidth);
       const rightWidth = rightVisible
         ? Math.min(50, Math.max(0, availableAfterSessions - 20), Math.max(24, Math.floor(width * 0.3)))
@@ -241,7 +242,7 @@ export async function startTuiV3(
 
       // Sessions pane
       if (sessionVisible) {
-        const sessContent = sessionsComp.render(sessionWidth - 2);
+        const sessContent = sessionsComp.renderWithHeight(sessionWidth - 2, contentHeight - 2);
         const bordered = renderPaneWithBorder(
           'Sess',
           sessContent,
@@ -305,6 +306,17 @@ export async function startTuiV3(
       }
 
       // === Function key shortcuts (Borland-style pane navigation) ===
+      const handlePaneShortcut = (pane: PaneKind): void => {
+        if (!appState.paneVisibility[pane]) {
+          dispatchApp({ type: 'TOGGLE_PANE_VISIBILITY', pane });
+          dispatchApp({ type: 'SET_FOCUSED_PANE', pane });
+        } else if (appState.focusedPane === pane) {
+          dispatchApp({ type: 'TOGGLE_PANE_VISIBILITY', pane });
+        } else {
+          dispatchApp({ type: 'SET_FOCUSED_PANE', pane });
+        }
+      };
+
       // F1 = Help
       if (key.name === 'f1') {
         helpDialog.show();
@@ -312,7 +324,7 @@ export async function startTuiV3(
       }
       // F2 = Toggle Sessions pane
       if (key.name === 'f2') {
-        dispatchApp({ type: 'TOGGLE_PANE_VISIBILITY', pane: 'sessions' });
+        handlePaneShortcut('sessions');
         return true;
       }
       // F3 = Focus Messages
@@ -322,26 +334,17 @@ export async function startTuiV3(
       }
       // F4 = Focus/Toggle Activity (Execution)
       if (key.name === 'f4') {
-        if (!appState.paneVisibility.process) {
-          dispatchApp({ type: 'TOGGLE_PANE_VISIBILITY', pane: 'process' });
-        }
-        dispatchApp({ type: 'SET_FOCUSED_PANE', pane: 'process' });
+        handlePaneShortcut('process');
         return true;
       }
       // F5 = Focus/Toggle Tasks
       if (key.name === 'f5') {
-        if (!appState.paneVisibility.tasks) {
-          dispatchApp({ type: 'TOGGLE_PANE_VISIBILITY', pane: 'tasks' });
-        }
-        dispatchApp({ type: 'SET_FOCUSED_PANE', pane: 'tasks' });
+        handlePaneShortcut('tasks');
         return true;
       }
       // F6 = Focus/Toggle Context
       if (key.name === 'f6') {
-        if (!appState.paneVisibility.context) {
-          dispatchApp({ type: 'TOGGLE_PANE_VISIBILITY', pane: 'context' });
-        }
-        dispatchApp({ type: 'SET_FOCUSED_PANE', pane: 'context' });
+        handlePaneShortcut('context');
         return true;
       }
 
@@ -393,6 +396,9 @@ export async function startTuiV3(
       if (appState.focusedPane === 'context') {
         if (contextScroll.handleInput(key)) return true;
       }
+      if (appState.focusedPane === 'sessions') {
+        if (sessionsComp.handleInput(key)) return true;
+      }
 
       // Input component always gets remaining keys
       if (input.handleInput(key)) return true;
@@ -415,6 +421,7 @@ export async function startTuiV3(
     messagesComp.setStreaming(sessionState.streamingContent);
 
     activityComp.setRunning(executionState.running);
+    activityComp.setLines(executionState.activityLines);
     activityComp.setActiveTools(executionState.activeTools.map((t) => ({
       name: t.toolName,
       scope: t.scopeLabel,
@@ -422,7 +429,11 @@ export async function startTuiV3(
     })));
 
     // Sync sessions pane
-    sessionsComp.setSessions(sessionState.sessions.map((s) => ({ id: s.id, title: s.title })));
+    sessionsComp.setSessions(sessionState.sessions.map((s) => ({
+      id: s.id,
+      title: s.title,
+      updatedAt: s.updatedAt,
+    })));
     sessionsComp.setActiveSession(sessionState.activeSessionId);
 
     // Sync tasks pane
@@ -503,9 +514,11 @@ export async function startTuiV3(
     try {
       const session = await createConductorSession(workspaceRoot, title ?? 'New Session');
       const sessions = await listConductorSessions(workspaceRoot);
-      dispatchSession({ type: 'SET_SESSIONS', sessions: sessions.map((s) => ({ id: s.id, title: s.title })) });
+      dispatchSession({ type: 'SET_SESSIONS', sessions: sessions.map(toSessionSummary) });
       dispatchSession({ type: 'SET_ACTIVE_SESSION', id: session.id, title: session.title });
       dispatchSession({ type: 'SET_MESSAGES', messages: [] });
+      dispatchExecution({ type: 'CLEAR_ACTIVITY' });
+      dispatchExecution({ type: 'SET_TOKEN_USAGE', usage: {} });
     } finally {
       dispatchSession({ type: 'SET_LOADING', loading: false });
     }
@@ -521,6 +534,14 @@ export async function startTuiV3(
         content: m.content,
       }));
       dispatchSession({ type: 'SET_MESSAGES', messages });
+      dispatchExecution({ type: 'CLEAR_ACTIVITY' });
+      dispatchExecution({
+        type: 'SET_TOKEN_USAGE',
+        usage: Object.fromEntries(Object.entries(detail.usageByModel ?? {}).map(([model, usage]) => [
+          model,
+          { input: usage.inputTokens, output: usage.outputTokens },
+        ])),
+      });
     } finally {
       dispatchSession({ type: 'SET_LOADING', loading: false });
     }
@@ -536,6 +557,8 @@ export async function startTuiV3(
 
     dispatchSession({ type: 'APPEND_MESSAGE', message: { role: 'user', content: text } });
     dispatchSession({ type: 'SET_STREAMING', content: '' });
+    dispatchExecution({ type: 'CLEAR_ACTIVITY' });
+    dispatchExecution({ type: 'PUSH_ACTIVITY', line: 'Turn started' });
     dispatchExecution({ type: 'SET_RUNNING', running: true });
 
     let streamBuffer = '';
@@ -580,6 +603,10 @@ export async function startTuiV3(
           if (event.type === 'task_activity' && event.taskId) {
             if (event.taskState === 'started') {
               dispatchExecution({
+                type: 'PUSH_ACTIVITY',
+                line: `Started: ${event.taskDescription || event.taskId}`,
+              });
+              dispatchExecution({
                 type: 'ADD_TASK',
                 task: {
                   id: event.taskId,
@@ -590,6 +617,10 @@ export async function startTuiV3(
                 },
               });
             } else if (event.taskState === 'completed' || event.taskState === 'failed') {
+              dispatchExecution({
+                type: 'PUSH_ACTIVITY',
+                line: `${event.taskState === 'completed' ? 'Completed' : 'Failed'}: ${event.taskId}`,
+              });
               dispatchExecution({
                 type: 'UPDATE_TASK',
                 id: event.taskId,
@@ -620,13 +651,19 @@ export async function startTuiV3(
       if (result.error) {
         dispatchSession({ type: 'APPEND_MESSAGE', message: { role: 'system', content: result.error, error: true } });
       }
+      dispatchExecution({ type: 'PUSH_ACTIVITY', line: result.error ? 'Turn failed' : 'Turn completed' });
 
       // Refresh sessions list
       const sessions = await listConductorSessions(workspaceRoot);
-      dispatchSession({ type: 'SET_SESSIONS', sessions: sessions.map((s) => ({ id: s.id, title: s.title })) });
+      dispatchSession({ type: 'SET_SESSIONS', sessions: sessions.map(toSessionSummary) });
+      const activeSession = sessions.find((session) => session.id === sessionId);
+      if (activeSession) {
+        dispatchSession({ type: 'SET_ACTIVE_SESSION', id: activeSession.id, title: activeSession.title });
+      }
     } catch (error) {
       const message = (error as Error).message;
       dispatchSession({ type: 'APPEND_MESSAGE', message: { role: 'system', content: message, error: true } });
+      dispatchExecution({ type: 'PUSH_ACTIVITY', line: `Turn failed: ${message}` });
     } finally {
       dispatchSession({ type: 'SET_STREAMING', content: null });
       dispatchExecution({ type: 'SET_RUNNING', running: false });
@@ -636,6 +673,9 @@ export async function startTuiV3(
 
   // --- Wire callbacks ---
   input.setOnSubmit((text) => { void handleSubmit(text); });
+  sessionsComp.setOnSelect((id) => {
+    if (!appState.busy) void selectSession(id);
+  });
   helpDialog.setOnClose(() => { dispatchApp({ type: 'SET_OVERLAY', overlay: 'none' }); });
 
   // --- Event Loop ---
@@ -648,6 +688,9 @@ export async function startTuiV3(
       } else {
         eventLoop.stop();
       }
+    },
+    onResize: (columns, rows) => {
+      dispatchApp({ type: 'RESIZE', columns, rows });
     },
   });
 
@@ -673,7 +716,7 @@ export async function startTuiV3(
   // Load sessions and auto-select or create
   try {
     const sessions = await listConductorSessions(workspaceRoot);
-    dispatchSession({ type: 'SET_SESSIONS', sessions: sessions.map((s) => ({ id: s.id, title: s.title })) });
+    dispatchSession({ type: 'SET_SESSIONS', sessions: sessions.map(toSessionSummary) });
     if (sessions.length > 0) {
       await selectSession(sessions[0].id);
     } else {
@@ -688,4 +731,8 @@ export async function startTuiV3(
 
   // Cleanup
   header.dispose();
+}
+
+function toSessionSummary(session: { id: string; title: string; updatedAt: string }): SessionSummary {
+  return { id: session.id, title: session.title, updatedAt: session.updatedAt };
 }

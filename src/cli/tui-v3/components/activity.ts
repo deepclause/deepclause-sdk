@@ -36,6 +36,12 @@ export class Activity implements Component {
     this.invalidate();
   }
 
+  /** Replace the activity log with state-managed lines. */
+  setLines(lines: string[]): void {
+    this.lines = lines.slice(-MAX_LINES);
+    this.invalidate();
+  }
+
   /** Clear all activity. */
   clear(): void {
     this.lines = [];
@@ -79,9 +85,9 @@ export class Activity implements Component {
       rows.push(truncate(style(line, ANSI.dim), width));
     }
 
-    // If empty and not running, show placeholder
+    // If empty, distinguish an idle session from a run awaiting its first event.
     if (rows.length === 0) {
-      rows.push(style('  No activity yet.', ANSI.dim));
+      rows.push(style(this.running ? '  Waiting for activity…' : '  No activity yet.', ANSI.dim));
     }
 
     this.dirty = false;

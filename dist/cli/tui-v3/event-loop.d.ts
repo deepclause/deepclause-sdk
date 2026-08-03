@@ -25,6 +25,8 @@ export interface EventLoopOptions extends RendererOptions {
     };
     /** Called when the user presses Ctrl+C and no component handles it */
     onExit?: () => void;
+    /** Called after the terminal dimensions change. */
+    onResize?: (columns: number, rows: number) => void;
 }
 /**
  * The event loop manages:
@@ -39,6 +41,7 @@ export declare class EventLoop {
     private stdin;
     private stdout;
     private onExit;
+    private onResize;
     private running;
     private renderScheduled;
     private exitPromise;
