@@ -27,12 +27,23 @@ export function normalizeKeyEvent(ch, key) {
     const modifiedEnter = sequence.match(/^\x1b\[13;([2-8])u$/)
         ?? sequence.match(/^\x1b\[27;([2-8]);13~$/);
     const modifier = modifiedEnter ? Number(modifiedEnter[1]) - 1 : 0;
+    const controlCode = sequence.length === 1 ? sequence.charCodeAt(0) : 0;
+    const controlName = controlCode >= 1 && controlCode <= 26
+        ? String.fromCharCode(controlCode + 96)
+        : '';
     return {
-        name: functionKey ?? (modifiedEnter ? 'return' : key?.name === 'enter' ? 'return' : key?.name ?? ''),
+        name: functionKey
+            ?? (modifiedEnter
+                ? 'return'
+                : sequence === '\x1b'
+                    ? 'escape'
+                    : key?.name === 'enter'
+                        ? 'return'
+                        : key?.name || controlName),
         sequence,
-        ctrl: key?.ctrl ?? Boolean(modifier & 4),
-        meta: key?.meta ?? Boolean(modifier & 2),
-        shift: key?.shift ?? Boolean(modifier & 1),
+        ctrl: Boolean(key?.ctrl || controlName || (modifier & 4)),
+        meta: Boolean(key?.meta || (modifier & 2)),
+        shift: Boolean(key?.shift || (modifier & 1)),
     };
 }
 /**

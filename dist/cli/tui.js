@@ -3998,7 +3998,7 @@ async function fileExists(filePath) {
         return false;
     }
 }
-async function runSkillCreatorCommand(workspaceRoot, sessionId, spec, options = {}) {
+export async function runSkillCreatorCommand(workspaceRoot, sessionId, spec, options = {}) {
     const trimmedSpec = spec.trim();
     if (!trimmedSpec) {
         throw new Error('spec is required');
@@ -4077,7 +4077,7 @@ async function runShellCommand(workspaceRoot, command, options = {}) {
         await shellManager?.dispose();
     }
 }
-function formatSkillCreatorSummary(workspaceRoot, result) {
+export function formatSkillCreatorSummary(workspaceRoot, result) {
     const slug = typeof result.slug === 'string' ? result.slug : 'unknown-skill';
     const outputPath = typeof result.output_path === 'string' ? result.output_path : '';
     if (!outputPath) {

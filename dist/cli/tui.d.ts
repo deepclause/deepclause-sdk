@@ -111,6 +111,13 @@ export declare function runFileCommand(workspaceRoot: string, fileSpec: string, 
     onUserInput?: (prompt: string) => Promise<string>;
     onEvent?: (event: ConductorLogEvent) => void;
 }): Promise<CliRunResult>;
+export declare function runSkillCreatorCommand(workspaceRoot: string, sessionId: string, spec: string, options?: {
+    sandbox?: boolean;
+    signal?: AbortSignal;
+    onUserInput?: (prompt: string) => Promise<string>;
+    onEvent?: (event: ConductorLogEvent) => void;
+}): Promise<Record<string, unknown>>;
+export declare function formatSkillCreatorSummary(workspaceRoot: string, result: Record<string, unknown>): string;
 export declare function previewMessageFromEvent(logEvent: ConductorLogEvent): DisplayMessage | null;
 export declare function previewChildSkillActivityMessage(childSlug: string): DisplayMessage;
 export declare function previewQuestionMessage(promptText: string, explicitTag?: string): DisplayMessage;
