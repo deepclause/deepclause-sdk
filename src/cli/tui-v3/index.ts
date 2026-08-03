@@ -393,7 +393,7 @@ export async function startTuiV3(
     // Sync context pane
     contextComp.setTokenUsage(executionState.tokenUsage);
     contextComp.setContextTokens(executionState.contextTokens);
-    input.setActive(!appState.busy);
+    input.setActive(true);
 
     // Sync status bar
     statusBar.setMode(appState.mode);
@@ -408,9 +408,19 @@ export async function startTuiV3(
   // --- Command handling ---
   async function handleSubmit(text: string): Promise<void> {
     const trimmed = text.trim();
-    if (!trimmed || appState.busy) return;
+    if (!trimmed) return;
 
     const parsed = parseCommandBarInput(trimmed);
+    if (appState.busy) {
+      if (parsed.kind === 'builtin' && parsed.name === 'cancel') {
+        cancelExecution();
+      } else if (parsed.kind === 'builtin' && (parsed.name === 'exit' || parsed.name === 'quit')) {
+        eventLoop.stop();
+      } else {
+        appendCommandError(new Error('An execution is already running. Use /cancel or Ctrl+C first.'));
+      }
+      return;
+    }
     if (parsed.kind === 'builtin') {
       switch (parsed.name) {
         case 'exit':
@@ -432,9 +442,7 @@ export async function startTuiV3(
           helpDialog.show();
           return;
         case 'cancel':
-          if (abortController) {
-            abortController.abort();
-          }
+          cancelExecution();
           return;
         case 'set-model': {
           try {
@@ -464,6 +472,7 @@ export async function startTuiV3(
               sandbox: options.sandbox,
               signal,
               onEvent,
+              onUserInput: requestUserInput,
             }),
           );
           return;
@@ -481,7 +490,7 @@ export async function startTuiV3(
                 workspaceRoot,
                 sessionState.activeSessionId!,
                 parsed.rawArgs,
-                { sandbox: options.sandbox, signal, onEvent },
+                { sandbox: options.sandbox, signal, onEvent, onUserInput: requestUserInput },
               );
               return { answer: formatSkillCreatorSummary(workspaceRoot, result) };
             },
@@ -498,6 +507,7 @@ export async function startTuiV3(
           sandbox: options.sandbox,
           signal,
           onEvent,
+          onUserInput: requestUserInput,
         }),
       );
       return;
@@ -514,6 +524,7 @@ export async function startTuiV3(
   // --- Session management ---
   let abortController: AbortController | null = null;
   let cancelRequested = false;
+  let pendingInputResolve: ((value: string) => void) | null = null;
   let memoryContextTokens = 0;
 
   function appendCommandError(error: unknown): void {
@@ -521,6 +532,24 @@ export async function startTuiV3(
       type: 'APPEND_MESSAGE',
       message: { role: 'system', content: (error as Error).message, error: true },
     });
+  }
+
+  function requestUserInput(question: string): Promise<string> {
+    dispatchSession({ type: 'APPEND_MESSAGE', message: { role: 'system', content: question } });
+    input.setPrompt('? ');
+    return new Promise<string>((resolve) => {
+      pendingInputResolve = resolve;
+    });
+  }
+
+  function cancelExecution(): void {
+    cancelRequested = true;
+    abortController?.abort();
+    if (pendingInputResolve) {
+      pendingInputResolve('');
+      pendingInputResolve = null;
+      input.setPrompt('› ');
+    }
   }
 
   async function runDirectCommand(
@@ -737,7 +766,17 @@ export async function startTuiV3(
   }
 
   // --- Wire callbacks ---
-  input.setOnSubmit((text) => { void handleSubmit(text); });
+  input.setOnSubmit((text) => {
+    if (pendingInputResolve) {
+      const resolve = pendingInputResolve;
+      pendingInputResolve = null;
+      input.setPrompt('› ');
+      dispatchSession({ type: 'APPEND_MESSAGE', message: { role: 'user', content: text } });
+      resolve(text);
+      return;
+    }
+    void handleSubmit(text);
+  });
   sessionsComp.setOnSelect((id) => {
     if (!appState.busy) {
       dispatchApp({ type: 'SET_BUSY', busy: true });
@@ -760,8 +799,7 @@ export async function startTuiV3(
     root: rootComponent,
     onExit: () => {
       if (appState.busy && abortController && !cancelRequested) {
-        cancelRequested = true;
-        abortController.abort();
+        cancelExecution();
       } else {
         eventLoop.stop();
       }

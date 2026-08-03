@@ -36,6 +36,7 @@ export function normalizeKeyEvent(
   const modifier = modifiedEnter ? Number(modifiedEnter[1]) - 1 : 0;
   const controlCode = sequence.length === 1 ? sequence.charCodeAt(0) : 0;
   const controlName = controlCode >= 1 && controlCode <= 26
+    && controlCode !== 9 && controlCode !== 10 && controlCode !== 13
     ? String.fromCharCode(controlCode + 96)
     : '';
 

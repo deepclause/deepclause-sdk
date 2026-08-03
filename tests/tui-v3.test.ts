@@ -62,6 +62,16 @@ describe('TUI v3', () => {
     expect(normalizeKeyEvent('\x1b', {
       sequence: '\x1b',
     })).toMatchObject({ name: 'escape' });
+    expect(normalizeKeyEvent('\r', {
+      name: 'return',
+      sequence: '\r',
+      ctrl: false,
+    })).toMatchObject({ name: 'return', ctrl: false });
+    expect(normalizeKeyEvent('\t', {
+      name: 'tab',
+      sequence: '\t',
+      ctrl: false,
+    })).toMatchObject({ name: 'tab', ctrl: false });
   });
 
   it('renders session titles and dates and selects them with the keyboard', () => {
