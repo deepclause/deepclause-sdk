@@ -606,7 +606,19 @@ export async function startTuiV3(
   // --- Wire callbacks ---
   input.setOnSubmit((text) => { void handleSubmit(text); });
   sessionsComp.setOnSelect((id) => {
-    if (!appState.busy) void selectSession(id);
+    if (!appState.busy) {
+      dispatchApp({ type: 'SET_BUSY', busy: true });
+      void selectSession(id)
+        .catch((error: unknown) => {
+          dispatchSession({
+            type: 'APPEND_MESSAGE',
+            message: { role: 'system', content: (error as Error).message, error: true },
+          });
+        })
+        .finally(() => {
+          dispatchApp({ type: 'SET_BUSY', busy: false });
+        });
+    }
   });
   helpDialog.setOnClose(() => { dispatchApp({ type: 'SET_OVERLAY', overlay: 'none' }); });
 
@@ -616,7 +628,6 @@ export async function startTuiV3(
     onExit: () => {
       if (appState.busy && abortController) {
         abortController.abort();
-        dispatchApp({ type: 'SET_BUSY', busy: false });
       } else {
         eventLoop.stop();
       }
