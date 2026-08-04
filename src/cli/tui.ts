@@ -4920,7 +4920,7 @@ async function fileExists(filePath: string): Promise<boolean> {
   }
 }
 
-async function runSkillCreatorCommand(
+export async function runSkillCreatorCommand(
   workspaceRoot: string,
   sessionId: string,
   spec: string,
@@ -5023,7 +5023,7 @@ async function runShellCommand(
   }
 }
 
-function formatSkillCreatorSummary(workspaceRoot: string, result: Record<string, unknown>): string {
+export function formatSkillCreatorSummary(workspaceRoot: string, result: Record<string, unknown>): string {
   const slug = typeof result.slug === 'string' ? result.slug : 'unknown-skill';
   const outputPath = typeof result.output_path === 'string' ? result.output_path : '';
   if (!outputPath) {

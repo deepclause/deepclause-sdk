@@ -25,15 +25,15 @@ tool(search(Query, Results), "Search the web for information") :-
     exec(web_search(query: Query), Results).
 \`\`\`
 
-### 2. External Tools (MCP/AgentVM)
-These are provided by the runtime (via MCP servers or built-in AgentVM) and are invoked 
+### 2. External Tools (MCP/Built-ins)
+These are provided by the runtime (via MCP servers or built-in runtime tools) and are invoked 
 directly with \`exec/2\`. Only these are registered as dependencies in the meta file.
 
 ## Available External Tools
 
 {TOOLS_TABLE}
 
-**Note:** Only tools invoked via \`exec/2\` that correspond to external MCP or AgentVM 
+**Note:** Only tools invoked via \`exec/2\` that correspond to external MCP or built-in runtime 
 tools are registered as dependencies. DML tool wrappers are not registered unless they 
 call external tools.
 
@@ -127,8 +127,7 @@ get_dict(stdout, Result, Output),
 output(Output).
 \`\`\`
 
-**VM Working Directory:** The VM starts with the working directory set to \`/workspace\`, which is 
-mounted to your actual workspace. Files are directly accessible:
+**Working Directory:** Shell tools run in the active workspace directory. When AgentVM sandboxing is enabled, that workspace is mounted at \`/workspace\` inside the sandbox. Files are directly accessible:
 \`\`\`prolog
 exec(vm_exec(command: "cat README.md"), Result),  % Reads workspace/README.md
 get_dict(stdout, Result, Content).
@@ -322,9 +321,11 @@ catch(Goal, Error, Recovery)
 throw(some_error)
 \`\`\`
 
-### Logic & Optimization (CLP)
+### Module Directives & Logic (CLP)
 
-DML supports Prolog's Constraint Logic Programming (CLP) libraries. Use these instead of Python for mathematical optimization, scheduling, or strict logic puzzles:
+DML supports top-level \`:- use_module(...)\` directives for standard SWI-Prolog libraries, such as \`library(clpfd)\`.
+Use them when the skill needs built-in library predicates. For workspace-local shared DML code, prefer \`:- consult('relative/path.dml').\`.
+Local \`:- use_module('relative/path.dml').\` is accepted as a convenience alias, but it currently loads the file with consult-style semantics rather than full SWI module export filtering.
 
 - **CLP(FD)**: Finite domains (integers). Use \`:- use_module(library(clpfd)).\`
 - **CLP(Q)**: Rational numbers (exact fractions). Use \`:- use_module(library(clpq)).\`
@@ -611,8 +612,7 @@ close(S)
 
 ## File Access Patterns with vm_exec
 
-AgentVM runs a sandboxed Alpine Linux VM using **BusyBox** (not GNU coreutils). 
-Some GNU-specific options may not be available. The workspace is mounted at \`/workspace\`.
+When \`vm_exec\` is backed by AgentVM, it runs in a sandboxed Alpine Linux environment using **BusyBox** (not GNU coreutils), and the workspace is mounted at \`/workspace\`. When the runtime uses the local workspace shell instead, standard local tooling and paths apply. Prefer relative paths when possible.
 
 **Important:** \`vm_exec\` returns a dict - always extract stdout:
 \`\`\`prolog
@@ -720,9 +720,9 @@ line_count(Path, Count) :-
     atom_number(CountAtom, Count).
 \`\`\`
 
-### BusyBox Limitations
+### BusyBox Limitations (AgentVM Sandbox)
 
-BusyBox in Alpine Linux has limited options compared to GNU coreutils:
+When AgentVM sandboxing is enabled, BusyBox in Alpine Linux has limited options compared to GNU coreutils:
 - \`grep --include\` is NOT supported - use \`find ... -exec grep\` instead
 - Some \`find\` options may differ
 - Use \`|| true\` with grep to prevent failures when no matches found
@@ -826,7 +826,7 @@ export function buildToolsTable(tools) {
     }
     for (const [provider, providerTools] of byProvider) {
         const isBuiltIn = provider === 'agentvm';
-        lines.push(`### ${isBuiltIn ? 'Built-in Tools (AgentVM)' : `${provider} (MCP)`}`);
+        lines.push(`### ${isBuiltIn ? 'Built-in Runtime Tools' : `${provider} (MCP)`}`);
         lines.push('');
         lines.push('| Tool | Description |');
         lines.push('|------|-------------|');

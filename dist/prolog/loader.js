@@ -2,7 +2,7 @@
  * SWI-Prolog WASM Loader
  */
 import { readFileSync, existsSync, mkdirSync } from 'fs';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { dirname, join, resolve } from 'path';
 let swiplInstance = null;
 let initPromise = null;
@@ -10,7 +10,20 @@ let currentWorkspacePath = null;
 // Get the directory of this module for resolving Prolog source files
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const PROLOG_SRC_DIR = join(__dirname, '..', 'prolog-src');
+// Allow env override for bundled deployments where prolog-src is co-located with the bundle.
+// Falls back to the standard SDK layout: ../prolog-src relative to this module.
+const PROLOG_SRC_DIR = (() => {
+    if (process.env.PROLOG_SRC_DIR && existsSync(process.env.PROLOG_SRC_DIR))
+        return process.env.PROLOG_SRC_DIR;
+    const sibling = join(__dirname, 'prolog-src');
+    if (existsSync(sibling))
+        return sibling;
+    return join(__dirname, '..', 'prolog-src');
+})();
+const SWIPL_WASM_ENTRY_URL = (() => {
+    const entryPath = join(__dirname, '..', '..', 'vendor', 'swipl-wasm', 'dist', 'index.js');
+    return pathToFileURL(entryPath).href;
+})();
 /**
  * Load and initialize SWI-Prolog WASM
  */
@@ -81,8 +94,9 @@ export function getWorkspacePath() {
  * Initialize SWI-Prolog WASM
  */
 async function initializeProlog() {
-    // Dynamic import of swipl-wasm (CommonJS module)
-    const SWIPL = await import('swipl-wasm');
+    // Load the vendored CommonJS entry directly so published installs do not depend
+    // on npm resolving a local file: dependency at consumer install time.
+    const SWIPL = await import(SWIPL_WASM_ENTRY_URL);
     const initSWIPL = SWIPL.default || SWIPL;
     // Create WASM instance
     const swipl = await initSWIPL({
@@ -107,6 +121,14 @@ async function initializeProlog() {
     }
     // Load the DeepClause Prolog modules
     loadPrologModules(swipl);
+    // Pre-load commonly needed libraries so DML skills don't need explicit :- use_module
+    // Note: use_module/1 is called as a goal, NOT as a :- directive (directives can't be called from JS)
+    try {
+        swipl.prolog.call('use_module(library(http/json)).');
+    }
+    catch {
+        // library(http/json) may not be available in all WASM builds — skip silently
+    }
     return swipl;
 }
 /**

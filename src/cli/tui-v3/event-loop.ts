@@ -1,0 +1,251 @@
+/**
+ * Event loop for TUI v3.
+ *
+ * Single event loop architecture:
+ * - Input events (keypresses) are parsed and dispatched
+ * - State mutations happen synchronously in response to events
+ * - Render is debounced: multiple invalidations in the same tick produce one render
+ * - No interval timers — only renders when something changes
+ */
+
+import { emitKeypressEvents } from 'readline';
+import { Renderer, type RendererOptions } from './renderer.js';
+import type { Component, KeyEvent, ScreenBuffer } from './types.js';
+
+const FUNCTION_KEY_SEQUENCES: Record<string, string> = {
+  '\x1bOP': 'f1',
+  '\x1bOQ': 'f2',
+  '\x1bOR': 'f3',
+  '\x1bOS': 'f4',
+  '\x1b[11~': 'f1',
+  '\x1b[12~': 'f2',
+  '\x1b[13~': 'f3',
+  '\x1b[14~': 'f4',
+  '\x1b[15~': 'f5',
+  '\x1b[17~': 'f6',
+};
+
+export function normalizeKeyEvent(
+  ch: string | undefined,
+  key: { name?: string; sequence?: string; ctrl?: boolean; meta?: boolean; shift?: boolean } | undefined,
+): KeyEvent | null {
+  const sequence = key?.sequence ?? ch ?? '';
+  const functionKey = FUNCTION_KEY_SEQUENCES[sequence];
+  const csiUnicodeKey = sequence.match(/^\x1b\[(\d+)(?::(\d+))?(?:;(\d+)(?::\d+)?)?u$/);
+  const modifyOtherKey = sequence.match(/^\x1b\[27;(\d+);(\d+)~$/);
+  const modifier = csiUnicodeKey
+    ? Number(csiUnicodeKey[3] ?? 1) - 1
+    : modifyOtherKey
+      ? Number(modifyOtherKey[1]) - 1
+      : 0;
+  const enhancedCodepoint = csiUnicodeKey
+    ? Number((modifier & 1) && csiUnicodeKey[2] ? csiUnicodeKey[2] : csiUnicodeKey[1])
+    : modifyOtherKey
+      ? Number(modifyOtherKey[2])
+      : undefined;
+  const controlCode = sequence.length === 1 ? sequence.charCodeAt(0) : 0;
+  const controlName = controlCode >= 1 && controlCode <= 26
+    && controlCode !== 9 && controlCode !== 10 && controlCode !== 13
+    ? String.fromCharCode(controlCode + 96)
+    : '';
+  const enhancedName = enhancedCodepoint === 27
+    ? 'escape'
+    : enhancedCodepoint === 13
+      ? 'return'
+      : enhancedCodepoint === 9
+        ? 'tab'
+        : enhancedCodepoint === 127
+          ? 'backspace'
+          : enhancedCodepoint !== undefined
+            ? String.fromCodePoint(enhancedCodepoint).toLowerCase()
+            : '';
+  const normalizedSequence = enhancedCodepoint === 27
+    ? '\x1b'
+    : enhancedCodepoint !== undefined && enhancedCodepoint >= 32
+      ? String.fromCodePoint(enhancedCodepoint)
+      : sequence;
+
+  return {
+    name: functionKey
+      ?? (enhancedName
+        ? enhancedName
+        : sequence === '\x1b'
+          ? 'escape'
+          : key?.name === 'enter'
+            ? 'return'
+            : key?.name || controlName),
+    sequence: normalizedSequence,
+    ctrl: Boolean(key?.ctrl || controlName || (modifier & 4)),
+    meta: Boolean(key?.meta || (modifier & 2)),
+    shift: Boolean(key?.shift || (modifier & 1)),
+  };
+}
+
+export interface EventLoopOptions extends RendererOptions {
+  /** The root component to render */
+  root: Component;
+  /** stdin stream (defaults to process.stdin) */
+  stdin?: NodeJS.ReadStream & { setRawMode?(mode: boolean): NodeJS.ReadStream };
+  /** Called when the user presses Ctrl+C and no component handles it */
+  onExit?: () => void;
+  /** Called after the terminal dimensions change. */
+  onResize?: (columns: number, rows: number) => void;
+}
+
+/**
+ * The event loop manages:
+ * 1. Terminal input → keypress parsing → dispatch to root component
+ * 2. Debounced rendering: requestRender() coalesces multiple invalidations
+ * 3. Resize handling
+ * 4. Clean shutdown
+ */
+export class EventLoop {
+  private renderer: Renderer;
+  private root: Component;
+  private stdin: NodeJS.ReadStream & { setRawMode?(mode: boolean): NodeJS.ReadStream };
+  private stdout: NodeJS.WriteStream;
+  private onExit: () => void;
+  private onResize: ((columns: number, rows: number) => void) | undefined;
+  private running = false;
+  private renderScheduled = false;
+  private exitPromise: Promise<void> | null = null;
+  private exitResolve: (() => void) | null = null;
+
+  constructor(options: EventLoopOptions) {
+    this.root = options.root;
+    this.stdin = (options.stdin ?? process.stdin) as NodeJS.ReadStream & { setRawMode?(mode: boolean): NodeJS.ReadStream };
+    this.stdout = options.stdout ?? process.stdout;
+    this.onExit = options.onExit ?? (() => this.stop());
+    this.onResize = options.onResize;
+    this.renderer = new Renderer(options);
+  }
+
+  /** Start the event loop. Returns a promise that resolves when the loop stops. */
+  start(): Promise<void> {
+    if (this.running) return this.exitPromise!;
+
+    this.running = true;
+    this.exitPromise = new Promise<void>((resolve) => {
+      this.exitResolve = resolve;
+    });
+
+    // Enter alternate screen
+    this.renderer.enter();
+
+    // Setup raw mode for keypress events
+    if (this.stdin.isTTY && this.stdin.setRawMode) {
+      this.stdin.setRawMode(true);
+    }
+    this.stdin.resume();
+    emitKeypressEvents(this.stdin);
+
+    // Listen for keypresses
+    this.stdin.on('keypress', this.handleKeypress);
+
+    // Listen for resize
+    this.stdout.on('resize', this.handleResize);
+
+    // Initial render
+    this.requestRender();
+
+    return this.exitPromise;
+  }
+
+  /** Stop the event loop and restore the terminal. */
+  stop(): void {
+    if (!this.running) return;
+    this.running = false;
+
+    // Remove listeners
+    this.stdin.off('keypress', this.handleKeypress);
+    this.stdout.off('resize', this.handleResize);
+
+    // Restore terminal
+    if (this.stdin.isTTY && this.stdin.setRawMode) {
+      this.stdin.setRawMode(false);
+    }
+    this.stdin.pause();
+
+    this.renderer.exit();
+
+    if (this.exitResolve) {
+      this.exitResolve();
+      this.exitResolve = null;
+    }
+  }
+
+  /**
+   * Schedule a render on the next microtask.
+   * Multiple calls in the same tick are coalesced into a single render.
+   * This is the "requestAnimationFrame" equivalent for the terminal.
+   */
+  requestRender = (): void => {
+    if (!this.running) return;
+    if (this.renderScheduled) return;
+    this.renderScheduled = true;
+
+    // Use setImmediate for minimal latency while still coalescing
+    setImmediate(() => {
+      this.renderScheduled = false;
+      if (this.running) {
+        this.doRender();
+      }
+    });
+  };
+
+  /** Get the renderer instance (for cursor control). */
+  getRenderer(): Renderer {
+    return this.renderer;
+  }
+
+  /** Perform a synchronous render. */
+  private doRender(): void {
+    const width = this.renderer.cols;
+    const height = this.renderer.rows;
+
+    // Get rows from root component
+    const rows = this.root.render(width);
+
+    // Pad or truncate to fill the terminal height
+    const screen: ScreenBuffer = [];
+    for (let i = 0; i < height; i++) {
+      screen.push(rows[i] ?? '');
+    }
+
+    this.renderer.render(screen);
+    this.root.dirty = false;
+  }
+
+  /** Handle a keypress from stdin. */
+  private handleKeypress = (ch: string | undefined, key: { name?: string; sequence?: string; ctrl?: boolean; meta?: boolean; shift?: boolean } | undefined): void => {
+    const event = normalizeKeyEvent(ch, key);
+    if (!event) return;
+
+    // Ctrl+C fallback — if no component handles it, exit
+    if (event.ctrl && event.name === 'c') {
+      if (this.root.handleInput && this.root.handleInput(event)) {
+        this.requestRender();
+        return;
+      }
+      this.onExit();
+      return;
+    }
+
+    // Dispatch to root component
+    if (this.root.handleInput) {
+      const consumed = this.root.handleInput(event);
+      if (consumed) {
+        this.requestRender();
+      }
+    }
+  };
+
+  /** Handle terminal resize. */
+  private handleResize = (): void => {
+    const rows = this.stdout.rows || 24;
+    const cols = this.stdout.columns || 80;
+    this.renderer.resize(rows, cols);
+    this.onResize?.(cols, rows);
+    this.requestRender();
+  };
+}

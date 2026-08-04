@@ -1,0 +1,67 @@
+/**
+ * Application state machine for TUI v3.
+ *
+ * Simple reducer-based state management, decoupled from React.
+ * State changes trigger invalidation of relevant components.
+ */
+const PANE_ORDER = ['sessions', 'messages', 'context'];
+export function createInitialAppState() {
+    return {
+        focusedPane: 'messages',
+        mode: 'command',
+        sessionPaneCollapsed: true,
+        paneVisibility: {
+            sessions: true,
+            messages: true,
+            context: true,
+        },
+        overlay: 'none',
+        columns: process.stdout.columns || 80,
+        rows: process.stdout.rows || 24,
+        busy: false,
+        autoScroll: true,
+    };
+}
+export function appReducer(state, action) {
+    switch (action.type) {
+        case 'SET_FOCUSED_PANE':
+            return { ...state, focusedPane: action.pane };
+        case 'CYCLE_PANE': {
+            // Only cycle through visible panes
+            const visiblePanes = PANE_ORDER.filter((p) => state.paneVisibility[p]);
+            if (visiblePanes.length === 0)
+                return state;
+            const idx = visiblePanes.indexOf(state.focusedPane);
+            const next = visiblePanes[(idx + 1) % visiblePanes.length];
+            return { ...state, focusedPane: next };
+        }
+        case 'SET_MODE':
+            return { ...state, mode: action.mode };
+        case 'TOGGLE_SESSION_PANE':
+            return { ...state, sessionPaneCollapsed: !state.sessionPaneCollapsed };
+        case 'TOGGLE_PANE_VISIBILITY': {
+            const newVis = { ...state.paneVisibility, [action.pane]: !state.paneVisibility[action.pane] };
+            // Don't allow hiding all panes — messages must stay visible
+            if (!newVis.messages && action.pane === 'messages')
+                return state;
+            // If focused pane is now hidden, move focus to messages
+            let newFocused = state.focusedPane;
+            if (!newVis[newFocused]) {
+                const visiblePanes = PANE_ORDER.filter((p) => newVis[p]);
+                newFocused = visiblePanes[0] ?? 'messages';
+            }
+            return { ...state, paneVisibility: newVis, focusedPane: newFocused };
+        }
+        case 'SET_OVERLAY':
+            return { ...state, overlay: action.overlay };
+        case 'RESIZE':
+            return { ...state, columns: action.columns, rows: action.rows };
+        case 'SET_BUSY':
+            return { ...state, busy: action.busy };
+        case 'TOGGLE_AUTO_SCROLL':
+            return { ...state, autoScroll: !state.autoScroll };
+        default:
+            return state;
+    }
+}
+//# sourceMappingURL=app-state.js.map

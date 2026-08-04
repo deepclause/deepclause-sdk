@@ -1,12 +1,20 @@
 /**
- * DeepClause CLI - Terminal UI Module (Stub)
+ * DeepClause CLI - Terminal UI Module (Ink-based v2)
  *
- * TODO: Full implementation in Phase 5
+ * This is the Ink (React for CLIs) rewrite of the TUI.
+ * Activated via the `--tui=v2` flag; the original monolithic TUI
+ * remains the default in `../tui.ts`.
  */
 export interface TUIOptions {
     headless?: boolean;
     verbose?: boolean;
 }
+/**
+ * Start the Ink-based TUI (v2).
+ */
+export declare function startTuiV2(workspaceRoot?: string, options?: {
+    sandbox?: boolean;
+}): Promise<void>;
 /**
  * Render execution progress in TUI
  */

@@ -5,9 +5,13 @@
  * with LLM generation and Prolog validation.
  */
 import { type Provider } from './config.js';
+import type { DMLEvent } from '../types.js';
+import { extractDescription as extractDescriptionFromCompiler, extractParameters as extractParametersFromCompiler, extractToolDependencies as extractToolDependenciesFromCompiler } from '../compiler.js';
+import type { AnalysisResult } from '../types.js';
 export interface CompileOptions {
     force?: boolean;
     validateOnly?: boolean;
+    sandbox?: boolean;
     model?: string;
     provider?: Provider;
     temperature?: number;
@@ -15,6 +19,10 @@ export interface CompileOptions {
     verbose?: boolean;
     stream?: boolean;
     audit?: boolean;
+    headless?: boolean;
+    trace?: string;
+    signal?: AbortSignal;
+    onEvent?: (event: DMLEvent) => void;
 }
 export interface CompileResult {
     output: string;
@@ -25,6 +33,10 @@ export interface CompileResult {
     meta?: MetaFile;
     explanation?: string;
     attempts?: number;
+    analysis?: AnalysisResult;
+    runtimeOutput?: string[];
+    trace?: object;
+    events?: DMLEvent[];
 }
 export interface CompileAllResult {
     compiled: number;
@@ -42,6 +54,9 @@ export interface MetaFile {
     compiledAt: string;
     model: string;
     provider: string;
+    name?: string;
+    triggerPhrases?: string[];
+    capabilities?: string[];
     description: string;
     parameters: Array<{
         name: string;
@@ -74,4 +89,11 @@ export declare function compilePrompt(prompt: string, options?: CompileOptions):
     dml: string;
     tools: string[];
 }>;
+export declare const extractToolDependencies: typeof extractToolDependenciesFromCompiler;
+export declare const extractParameters: typeof extractParametersFromCompiler;
+export declare const extractDescription: typeof extractDescriptionFromCompiler;
+export declare function validateDMLSyntax(dml: string): {
+    valid: boolean;
+    errors: string[];
+};
 //# sourceMappingURL=compile.d.ts.map

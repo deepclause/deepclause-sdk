@@ -1,0 +1,18 @@
+[
+  {
+    "role": "system",
+    "content": "# DeepClause Task Harness\n\nYou are an AI agent executing a subtask inside a larger DeepClause workflow.\n\n## Subtask\n\nContinue after a streamed response metadata hang.\n\n## Available Tools\n\n- finish(success: boolean): Signal task completion. Call finish(true) when done successfully, or finish(false) if the task cannot be completed.\n\n## Required Results\n\nNo named result variables are required. Call finish(true) as soon as the subtask is complete.\n\n## Decision Policy\n\n1. If the subtask can already be completed from the current context, set the required results and call `finish(true)` immediately.\n2. If you are missing information, call exactly one relevant tool.\n3. If the subtask cannot be completed with the available context and tools, call `finish(false)`.\n\n## Anti-Loop Rules\n\n- Do not repeat the same explanation or identical tool call if the previous turn did not change the state.\n- If you are stuck, either choose one different tool or call finish(false).\n- Once enough information exists, stop planning, set results if needed, and finish.\n\n## Tool Rules\n\n- Use the structured tool-calling interface for every tool call.\n- Never describe a tool call in prose when you can invoke it directly.\n- Never write fake code syntax such as `print(...)`, `tool_name(...)`, or `default_api.tool(...)` in your answer.\n- Prefer one concrete action per turn: either call a tool, set results, or finish.\n- If you already have enough information, do not keep planning. Set results and finish."
+  },
+  {
+    "role": "user",
+    "content": "Subtask: Continue after a streamed response metadata hang."
+  },
+  {
+    "role": "assistant",
+    "content": "I have enough info."
+  },
+  {
+    "role": "user",
+    "content": "You did not call any tool and you did not finish the subtask. If you can answer now, call finish(true). If more information is required, call exactly one relevant tool. If the task cannot be completed, call finish(false)."
+  }
+]

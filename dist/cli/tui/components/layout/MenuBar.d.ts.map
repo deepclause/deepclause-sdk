@@ -1,0 +1,1 @@
+{"version":3,"file":"MenuBar.d.ts","sourceRoot":"","sources":["../../../../../src/cli/tui/components/layout/MenuBar.tsx"],"names":[],"mappings":"AAAA;;GAEG;AAEH,OAAO,KAAK,MAAM,OAAO,CAAC;AAG1B,UAAU,YAAY;IACpB,YAAY,EAAE,MAAM,CAAC;IACrB,IAAI,EAAE,OAAO,CAAC;CACf;AAID,eAAO,MAAM,OAAO,EAAE,KAAK,CAAC,EAAE,CAAC,YAAY,CAoB1C,CAAC"}

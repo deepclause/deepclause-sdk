@@ -1,0 +1,64 @@
+{
+  "version": "2026-06-24",
+  "models": {
+    "openai/gpt-5.5": { "name": "GPT-5.5", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 1050000, "output": 128000 }, "open_weights": false, "complexity": "high", "family": "gpt" },
+    "openai/gpt-5.5-pro": { "name": "GPT-5.5 Pro", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 1050000, "output": 128000 }, "open_weights": false, "complexity": "high", "family": "gpt" },
+    "openai/gpt-5.5-instant": { "name": "GPT-5.5 Instant", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 400000, "output": 128000 }, "open_weights": false, "complexity": "high", "family": "gpt" },
+    "openai/gpt-5.4": { "name": "GPT-5.4", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 1050000, "output": 128000 }, "open_weights": false, "complexity": "high", "family": "gpt" },
+    "openai/gpt-5.4-mini": { "name": "GPT-5.4 Mini", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 400000, "output": 128000 }, "open_weights": false, "complexity": "medium", "family": "gpt" },
+    "openai/gpt-5.4-nano": { "name": "GPT-5.4 Nano", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 400000, "output": 128000 }, "open_weights": false, "complexity": "medium", "family": "gpt" },
+    "openai/gpt-4o": { "name": "GPT-4o", "reasoning": false, "tool_call": true, "structured_output": true, "limit": { "context": 128000, "output": 16384 }, "open_weights": false, "complexity": "high", "family": "gpt" },
+    "openai/gpt-4o-mini": { "name": "GPT-4o Mini", "reasoning": false, "tool_call": true, "structured_output": true, "limit": { "context": 128000, "output": 16384 }, "open_weights": false, "complexity": "medium", "family": "gpt" },
+
+    "anthropic/claude-opus-4-8": { "name": "Claude Opus 4.8", "reasoning": true, "tool_call": true, "structured_output": false, "limit": { "context": 1000000, "output": 128000 }, "open_weights": false, "complexity": "high", "family": "claude" },
+    "anthropic/claude-opus-4-7": { "name": "Claude Opus 4.7", "reasoning": true, "tool_call": true, "structured_output": false, "limit": { "context": 1000000, "output": 128000 }, "open_weights": false, "complexity": "high", "family": "claude" },
+    "anthropic/claude-opus-4-6": { "name": "Claude Opus 4.6", "reasoning": true, "tool_call": true, "structured_output": false, "limit": { "context": 1000000, "output": 128000 }, "open_weights": false, "complexity": "high", "family": "claude" },
+    "anthropic/claude-sonnet-4-6": { "name": "Claude Sonnet 4.6", "reasoning": true, "tool_call": true, "structured_output": false, "limit": { "context": 1000000, "output": 64000 }, "open_weights": false, "complexity": "medium", "family": "claude" },
+    "anthropic/claude-fable-5": { "name": "Claude Fable 5", "reasoning": true, "tool_call": true, "structured_output": false, "limit": { "context": 1000000, "output": 128000 }, "open_weights": false, "complexity": "high", "family": "claude" },
+
+    "google/gemini-3.5-flash": { "name": "Gemini 3.5 Flash", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 1048576, "output": 65536 }, "open_weights": false, "complexity": "high", "family": "gemini" },
+    "google/gemini-3.1-pro-preview": { "name": "Gemini 3.1 Pro Preview", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 1048576, "output": 65536 }, "open_weights": false, "complexity": "high", "family": "gemini" },
+    "google/gemini-3.1-flash-lite": { "name": "Gemini 3.1 Flash Lite", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 1048576, "output": 65536 }, "open_weights": false, "complexity": "medium", "family": "gemini" },
+    "google/gemini-2.5-pro": { "name": "Gemini 2.5 Pro", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 1048576, "output": 65536 }, "open_weights": false, "complexity": "high", "family": "gemini" },
+    "google/gemini-2.5-flash": { "name": "Gemini 2.5 Flash", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 1048576, "output": 65536 }, "open_weights": false, "complexity": "medium", "family": "gemini" },
+    "google/gemma-4-31b-it": { "name": "Gemma 4 31B IT", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 262144, "output": 32768 }, "open_weights": true, "complexity": "low", "family": "gemma" },
+    "google/gemma-4-26b-a4b-it": { "name": "Gemma 4 26B A4B IT", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 262144, "output": 32768 }, "open_weights": true, "complexity": "low", "family": "gemma" },
+
+    "alibaba/qwen3.6-27b": { "name": "Qwen3.6 27B", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 262144, "output": 65536 }, "open_weights": true, "complexity": "low", "family": "qwen" },
+    "alibaba/qwen3.6-35b-a3b": { "name": "Qwen3.6 35B-A3B", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 262144, "output": 65536 }, "open_weights": true, "complexity": "low", "family": "qwen" },
+    "alibaba/qwen3.6-plus": { "name": "Qwen3.6 Plus", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 1000000, "output": 65536 }, "open_weights": false, "complexity": "medium", "family": "qwen" },
+    "alibaba/qwen3.6-max-preview": { "name": "Qwen3.6 Max Preview", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 262144, "output": 65536 }, "open_weights": false, "complexity": "medium", "family": "qwen" },
+    "alibaba/qwen3.6-flash": { "name": "Qwen3.6 Flash", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 1000000, "output": 65536 }, "open_weights": false, "complexity": "medium", "family": "qwen" },
+    "alibaba/qwen3.5-27b": { "name": "Qwen3.5 27B", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 262144, "output": 65536 }, "open_weights": true, "complexity": "low", "family": "qwen" },
+    "alibaba/qwen3.5-35b-a3b": { "name": "Qwen3.5 35B-A3B", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 262144, "output": 65536 }, "open_weights": true, "complexity": "low", "family": "qwen" },
+    "alibaba/qwen3.5-9b": { "name": "Qwen3.5 9B", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 262144, "output": 65536 }, "open_weights": true, "complexity": "low", "family": "qwen" },
+
+    "deepseek/deepseek-v4-pro": { "name": "DeepSeek V4 Pro", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 1000000, "output": 384000 }, "open_weights": true, "complexity": "high", "family": "deepseek" },
+    "deepseek/deepseek-v4-flash": { "name": "DeepSeek V4 Flash", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 1000000, "output": 384000 }, "open_weights": true, "complexity": "medium", "family": "deepseek" },
+    "deepseek/deepseek-chat": { "name": "DeepSeek Chat", "reasoning": false, "tool_call": true, "structured_output": false, "limit": { "context": 1000000, "output": 384000 }, "open_weights": true, "complexity": "medium", "family": "deepseek" },
+    "deepseek/deepseek-reasoner": { "name": "DeepSeek Reasoner", "reasoning": true, "tool_call": true, "structured_output": false, "limit": { "context": 1000000, "output": 384000 }, "open_weights": true, "complexity": "high", "family": "deepseek" },
+
+    "xai/grok-4.3": { "name": "Grok 4.3", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 1000000, "output": 30000 }, "open_weights": false, "complexity": "high", "family": "grok" },
+    "xai/grok-build-0.1": { "name": "Grok Build 0.1", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 256000, "output": 256000 }, "open_weights": false, "complexity": "medium", "family": "grok" },
+
+    "mistral/mistral-medium-2604": { "name": "Mistral Medium 3.5", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 262144, "output": 262144 }, "open_weights": true, "complexity": "medium", "family": "mistral" },
+    "mistral/mistral-small-latest": { "name": "Mistral Small", "reasoning": true, "tool_call": true, "structured_output": false, "limit": { "context": 256000, "output": 256000 }, "open_weights": true, "complexity": "low", "family": "mistral" },
+
+    "zhipuai/glm-5.2": { "name": "GLM-5.2", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 1000000, "output": 131072 }, "open_weights": true, "complexity": "high", "family": "glm" },
+    "zhipuai/glm-5.1": { "name": "GLM-5.1", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 200000, "output": 131072 }, "open_weights": true, "complexity": "medium", "family": "glm" },
+
+    "moonshotai/kimi-k2.6": { "name": "Kimi K2.6", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 262144, "output": 262144 }, "open_weights": true, "complexity": "high", "family": "kimi" },
+    "moonshotai/kimi-k2.7-code": { "name": "Kimi K2.7 Code", "reasoning": true, "tool_call": true, "structured_output": true, "limit": { "context": 262144, "output": 262144 }, "open_weights": true, "complexity": "high", "family": "kimi" },
+
+    "nvidia/nemotron-3-ultra-550b-a55b": { "name": "Nemotron 3 Ultra", "reasoning": true, "tool_call": true, "structured_output": false, "limit": { "context": 1000000, "output": 128000 }, "open_weights": true, "complexity": "high", "family": "nemotron" },
+    "nvidia/nemotron-3-super-120b-a12b": { "name": "Nemotron 3 Super", "reasoning": true, "tool_call": true, "structured_output": false, "limit": { "context": 262144, "output": 262144 }, "open_weights": true, "complexity": "medium", "family": "nemotron" }
+  },
+  "providers": {
+    "openai": { "reasoning_type": "effort", "reasoning_values": ["none","low","medium","high"], "default_effort": "medium" },
+    "anthropic": { "reasoning_type": "budget_tokens", "budget_map": { "low": 5000, "medium": 16000, "high": 32000 }, "default_effort": "medium" },
+    "google": { "reasoning_type": "thinking_config", "budget_map": { "low": 0, "medium": 8192, "high": 24576 }, "default_effort": "medium" },
+    "openrouter": { "reasoning_type": "effort", "reasoning_values": ["none","low","medium","high"], "default_effort": "medium" },
+    "xai": { "reasoning_type": "effort", "reasoning_values": ["low","high"], "default_effort": "high" },
+    "custom": { "reasoning_type": "none" }
+  }
+}

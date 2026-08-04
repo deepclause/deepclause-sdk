@@ -17,11 +17,19 @@ interface FSFilesystems {
     NODEFS: unknown;
     MEMFS: unknown;
 }
+interface SWIPLFileSystem {
+    filesystems: FSFilesystems;
+    mount(type: unknown, options: {
+        root: string;
+    }, mountpoint: string): void;
+    unmount(mountpoint: string): void;
+    mkdir(path: string): void;
+    writeFile(path: string, data: string): void;
+    unlink(path: string): void;
+}
 export interface SWIPLModule {
     prolog: Prolog;
-    FS: typeof FS & {
-        filesystems: FSFilesystems;
-    };
+    FS: SWIPLFileSystem;
 }
 /**
  * Load and initialize SWI-Prolog WASM
