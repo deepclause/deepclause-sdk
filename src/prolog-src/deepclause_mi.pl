@@ -562,7 +562,7 @@ process_engine_result(output(Text), output, Text, none) :- !.
 process_engine_result(log(Text), log, Text, none) :- !.
 process_engine_result(answer(Text), answer, Text, none) :- !.
 %% Note: Memory and tool scope are now passed in the payload for the agent loop
-process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ReasoningEffort, RecipeContext), request_agent_loop, '', 
+process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ReasoningEffort, RecipeContext), request_agent_loop, '',
     payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: ReasoningEffort, recipeContext: RecipeContext}) :- !.
 %% Legacy 5-arg format (no reasoning/recipe)
 process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope), request_agent_loop, '', 

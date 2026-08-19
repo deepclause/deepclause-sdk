@@ -9,6 +9,7 @@ import type {
   CompactionOptions,
   DMLEvent,
   MemoryMessage,
+  LLMBackend,
   ToolDefinition,
   ToolPolicy,
   TypedVar,
@@ -169,6 +170,7 @@ export interface RunnerOptions {
   reasoningType?: ReasoningType;
   reasoningBudgetMap?: Record<string, number>;
   contextWindow?: number;
+  llmBackend?: LLMBackend;
 }
 
 export interface InternalRunOptions {
@@ -677,10 +679,10 @@ export class DMLRunner {
     };
 
     // Build available tools for agent - SIMPLIFIED: tools run in isolated engines
+    // The callback runs DML tools in isolated engines with no shared state.
     const availableTools = this.buildAgentTools(
-      userTools, 
+      userTools,
       options.toolPolicy,
-      // executeToolIsolated callback - runs tool in separate engine (no state sharing)
       async (toolName: string, args: Record<string, unknown>) => {
         return this.executeToolIsolated(
           toolName,
@@ -756,6 +758,7 @@ export class DMLRunner {
       }),
       onAskUser: options.onInputRequired,
       signal: options.signal,
+      llmBackend: this.options.llmBackend,
     });
 
     // Yield streaming events as they arrive
@@ -882,6 +885,7 @@ export class DMLRunner {
           providerOptions: this.options.providerOptions,
         },
         signal: options.signal,
+        llmBackend: this.options.llmBackend,
       });
       succeeded = true;
       this.postSampleTokenResult({ success: true, token });
@@ -924,6 +928,7 @@ export class DMLRunner {
           providerOptions: this.options.providerOptions,
         },
         signal: options.signal,
+        llmBackend: this.options.llmBackend,
       });
       succeeded = true;
       this.postLlmResult({ success: true, text });
@@ -1170,20 +1175,17 @@ export class DMLRunner {
    */
   private buildAgentTools(
     userTools: UserToolInfo[],
-    policy: ToolPolicy | null,
+    _policy: ToolPolicy | null,
     executeToolInline: (toolName: string, args: Record<string, unknown>) => Promise<{ result: unknown; outputs: string[] }>
   ): Map<string, ToolDefinition> {
     const result = new Map<string, ToolDefinition>();
 
     // Add user-defined tools from DML file with schema info
     // These are the ONLY tools the LLM can call during task()
+    // Do not apply the host runtime-tool policy to these DML predicates. Their
+    // nested exec/2 calls pass through handleExec/executeToolIsolated, where
+    // the policy still restricts actual host capabilities.
     for (const tool of userTools) {
-      // Check policy for DML tools too
-      const check = checkToolPolicy(tool.name, policy);
-      if (!check.allowed) {
-        continue;
-      }
-
       // Build JSON Schema properties from inputs
       const properties: Record<string, { type: string; description?: string }> = {};
       const required: string[] = [];
@@ -1364,6 +1366,7 @@ export class DMLRunner {
                   providerOptions: this.options.providerOptions,
                 },
                 signal: runContext.signal,
+                llmBackend: this.options.llmBackend,
               });
               this.postSampleTokenResult({ success: true, token });
               if (usage) {
@@ -1398,6 +1401,7 @@ export class DMLRunner {
                   providerOptions: this.options.providerOptions,
                 },
                 signal: runContext.signal,
+                llmBackend: this.options.llmBackend,
               });
               this.postLlmResult({ success: true, text });
               if (usage) {
@@ -1576,6 +1580,7 @@ export class DMLRunner {
                 },
                 streaming: this.options.streaming,
                 debug: this.options.debug,
+                llmBackend: this.options.llmBackend,
                 onOutput: (text) => {
                   outputs.push(text);
                   onOutput(text);

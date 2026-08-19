@@ -10,7 +10,7 @@ import { anthropic, createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { generateText } from 'ai';
 import type { LanguageModel } from 'ai';
-import type { MemoryMessage, LLMUsage } from '../types.js';
+import type { MemoryMessage, LLMBackend, LLMUsage } from '../types.js';
 
 export interface RawProviderResponseSnapshot {
   requestId: string;
@@ -36,6 +36,7 @@ export interface SampleSingleTokenOptions {
   signal?: AbortSignal;
   debugLog?: (...args: unknown[]) => void;
   onRawResponse?: (snapshot: Promise<RawProviderResponseSnapshot>) => void;
+  llmBackend?: LLMBackend;
 }
 
 export interface GenerateLlmReplyOptions {
@@ -52,6 +53,7 @@ export interface GenerateLlmReplyOptions {
   signal?: AbortSignal;
   debugLog?: (...args: unknown[]) => void;
   onRawResponse?: (snapshot: Promise<RawProviderResponseSnapshot>) => void;
+  llmBackend?: LLMBackend;
 }
 
 function describeFetchError(error: unknown): string {
@@ -486,7 +488,7 @@ export function createModelProvider(
             debugLog?.(`[fetch] Body ${kind} requestId=${requestId} seq=${proxyRequestSeq} after ${Date.now() - fetchT0}ms: ${describeFetchError(failure)}`);
           });
 
-          // Return a new Response with the instrumented body 
+          // Return a new Response with the instrumented body
           return new Response(bodyTap.readable, {
             status: response.status,
             statusText: response.statusText,
@@ -620,6 +622,19 @@ function buildSampleTokenPrompt(prompt: string, allowedTokens?: string[]): strin
 }
 
 export async function sampleSingleToken(options: SampleSingleTokenOptions): Promise<{ token: string; usage?: LLMUsage }> {
+  if (options.llmBackend) {
+    const result = await options.llmBackend.complete({
+      messages: [{ role: 'user', content: buildSampleTokenPrompt(options.prompt, options.allowedTokens) }],
+      temperature: options.modelOptions.temperature,
+      maxTokens: 1,
+      signal: options.signal,
+    });
+    const token = options.allowedTokens && options.allowedTokens.length > 0
+      ? chooseAllowedSampleToken(result.text, options.allowedTokens)
+      : normalizeSampleTokenResponse(result.text);
+    return { token, usage: result.usage };
+  }
+
   const model = createModelProvider(
     options.modelOptions.provider,
     options.modelOptions.model,
@@ -651,6 +666,16 @@ export async function sampleSingleToken(options: SampleSingleTokenOptions): Prom
 }
 
 export async function generateLlmReply(options: GenerateLlmReplyOptions): Promise<{ text: string; usage?: LLMUsage }> {
+  if (options.llmBackend) {
+    const result = await options.llmBackend.complete({
+      messages: options.messages,
+      temperature: options.modelOptions.temperature,
+      maxTokens: options.modelOptions.maxOutputTokens,
+      signal: options.signal,
+    });
+    return { text: result.text, usage: result.usage };
+  }
+
   const model = createModelProvider(
     options.modelOptions.provider,
     options.modelOptions.model,

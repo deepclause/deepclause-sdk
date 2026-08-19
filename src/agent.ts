@@ -9,7 +9,14 @@
 
 import { generateText, streamText, hasToolCall, tool as aiTool } from 'ai';
 import { z } from 'zod';
-import type { ToolDefinition, MemoryMessage, TypedVar } from './types.js';
+import type {
+  LLMBackend,
+  LLMBackendMessage,
+  LLMBackendTool,
+  ToolDefinition,
+  MemoryMessage,
+  TypedVar,
+} from './types.js';
 import { createModelProvider, type RawProviderResponseSnapshot } from './prolog/bridge.js';
 import { readSystemPromptAsset } from './system/assets/index.js';
 
@@ -73,6 +80,7 @@ export interface AgentLoopOptions {
   signal?: AbortSignal;
   streaming?: boolean;
   debug?: boolean;
+  llmBackend?: LLMBackend;
 }
 
 export interface AgentLoopResult {
@@ -542,6 +550,183 @@ function jsonSchemaToZod(schema: Record<string, unknown>): z.ZodTypeAny {
   return zodType;
 }
 
+interface InjectedAgentLoopState {
+  outputs: string[];
+  variables: Record<string, unknown>;
+  finished: boolean;
+  success: boolean;
+}
+
+async function runInjectedAgentLoop(
+  options: AgentLoopOptions,
+  normalizedOutputVars: TypedVar[],
+  combinedSystemPrompt: string,
+  conversationHistory: MemoryMessage[],
+): Promise<AgentLoopResult> {
+  const backend = options.llmBackend!;
+  const state: InjectedAgentLoopState = {
+    outputs: [],
+    variables: {},
+    finished: false,
+    success: false,
+  };
+  const requiredVarNames = normalizedOutputVars.map((variable) => variable.name);
+  const backendTools: LLMBackendTool[] = [{
+    name: 'finish',
+    description: 'Complete the task. success=true requires every requested result variable to be set.',
+    parameters: {
+      type: 'object',
+      properties: { success: { type: 'boolean' } },
+      required: ['success'],
+      additionalProperties: false,
+    },
+  }];
+
+  if (normalizedOutputVars.length > 0) {
+    const resultTypes = normalizedOutputVars
+      .map((variable) => `${variable.name}: ${variable.type}${variable.itemType ? `<${variable.itemType}>` : ''}`)
+      .join(', ');
+    backendTools.push({
+      name: 'set_result',
+      description: `Set one requested output variable before calling finish. Required results: ${resultTypes}.`,
+      parameters: {
+        type: 'object',
+        properties: {
+          variable: { type: 'string', enum: requiredVarNames },
+          value: {
+            anyOf: [
+              { type: 'string' },
+              { type: 'number' },
+              { type: 'boolean' },
+              { type: 'array' },
+              { type: 'object' },
+            ],
+          },
+        },
+        required: ['variable', 'value'],
+        additionalProperties: false,
+      },
+    });
+  }
+
+  for (const [name, tool] of options.tools) {
+    if (name === 'finish' || name === 'set_result') continue;
+    backendTools.push({
+      name,
+      description: tool.description,
+      parameters: tool.parameters as unknown as Record<string, unknown>,
+    });
+  }
+
+  const messages: LLMBackendMessage[] = [
+    { role: 'system', content: combinedSystemPrompt },
+    ...conversationHistory.map((message) => ({ role: message.role, content: message.content })),
+    { role: 'user', content: `Subtask: ${options.taskDescription}` },
+  ];
+  const maxIterations = Math.max(1, Number(process.env.DC_MAX_ITERATIONS) || 50);
+
+  for (let iteration = 0; iteration < maxIterations && !state.finished; iteration++) {
+    if (options.signal?.aborted) break;
+
+    let emittedText = false;
+    const response = await backend.complete({
+      messages,
+      tools: backendTools,
+      temperature: options.modelOptions.temperature,
+      maxTokens: options.modelOptions.maxOutputTokens,
+      signal: options.signal,
+      onText: options.streaming && options.onStream
+        ? (chunk) => {
+            emittedText = emittedText || chunk.length > 0;
+            options.onStream?.(chunk, false);
+          }
+        : undefined,
+    });
+
+    if (response.usage) options.onUsage?.(response.usage);
+    if (options.streaming && options.onStream && response.text && !emittedText) {
+      options.onStream(response.text, false);
+    }
+    if (options.streaming && options.onStream && response.text) {
+      options.onStream('', true);
+    }
+    if (response.text) {
+      state.outputs.push(response.text);
+      options.onOutput(response.text);
+    }
+
+    const toolCalls = response.toolCalls ?? [];
+    messages.push({ role: 'assistant', content: response.text, toolCalls, providerData: response.providerData });
+
+    for (const call of toolCalls) {
+      options.onToolCall?.(call.name, call.arguments);
+      let result: unknown;
+
+      if (call.name === 'finish') {
+        const requestedSuccess = call.arguments.success === true;
+        const missing = requiredVarNames.filter((name) => !(name in state.variables));
+        if (requestedSuccess && missing.length > 0) {
+          result = { finished: false, error: `Missing required result variable(s): ${missing.join(', ')}` };
+        } else {
+          state.finished = true;
+          state.success = requestedSuccess;
+          result = { finished: true, success: requestedSuccess };
+        }
+      } else if (call.name === 'set_result') {
+        const variableName = String(call.arguments.variable ?? '');
+        const typedVar = normalizedOutputVars.find((variable) => variable.name === variableName);
+        if (!typedVar) {
+          result = { success: false, error: `Unknown variable: ${variableName}` };
+        } else {
+          const value = coerceTypedResultValue(typedVar, call.arguments.value);
+          const validationError = validateTypedResultValue(typedVar, value);
+          if (validationError) {
+            result = { success: false, error: `${validationError} for ${variableName}` };
+          } else {
+            state.variables[variableName] = value;
+            result = { success: true, variable: variableName, value };
+          }
+        }
+      } else {
+        const tool = options.tools.get(call.name);
+        if (!tool) {
+          result = { error: `Tool not found: ${call.name}` };
+        } else {
+          try {
+            result = cleanPrologMarkers(await tool.execute(call.arguments));
+          } catch (error) {
+            result = { error: error instanceof Error ? error.message : String(error) };
+          }
+        }
+      }
+
+      messages.push({
+        role: 'tool',
+        content: JSON.stringify(result),
+        toolCallId: call.id,
+        toolName: call.name,
+      });
+    }
+
+    if (toolCalls.length === 0 && !state.finished) {
+      messages.push({
+        role: 'user',
+        content: 'Continue the task. Use set_result for each requested output, then call finish.',
+      });
+    }
+  }
+
+  return {
+    success: state.success,
+    outputs: state.outputs,
+    variables: state.variables,
+    messages: messages
+      .filter((message): message is LLMBackendMessage & { role: 'user' | 'assistant' } =>
+        message.role === 'user' || message.role === 'assistant')
+      .map((message) => ({ role: message.role, content: message.content })),
+  };
+}
+
 /**
  * Run an agent loop for a task
  */
@@ -717,6 +902,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     })),
     { role: 'user', content: `Subtask: ${taskDescription}` },
   ];
+
+  if (options.llmBackend) {
+    return runInjectedAgentLoop(options, normalizedOutputVars, combinedSystemPrompt, conversationHistory);
+  }
 
   debugLog('System prompt:', combinedSystemPrompt);
   debugLog('Conversation history:', conversationHistory);

@@ -37,6 +37,53 @@ export interface CreateOptions {
   reasoningBudgetMap?: Record<string, number>;
   /** Model context window in tokens (from model database) */
   contextWindow?: number;
+  /** Host-provided LLM backend. When set, no provider credentials or environment variables are used. */
+  llmBackend?: LLMBackend;
+}
+
+export interface LLMBackendMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string;
+  toolCalls?: LLMBackendToolCall[];
+  toolCallId?: string;
+  toolName?: string;
+  /** Opaque host-native message used to preserve provider state across backend calls. */
+  providerData?: unknown;
+}
+
+export interface LLMBackendTool {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+export interface LLMBackendToolCall {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface LLMBackendRequest {
+  messages: LLMBackendMessage[];
+  tools?: LLMBackendTool[];
+  temperature?: number;
+  maxTokens?: number;
+  signal?: AbortSignal;
+  /** Receives model text as it becomes available. Backends may emit one final chunk. */
+  onText?: (chunk: string) => void;
+}
+
+export interface LLMBackendResponse {
+  text: string;
+  toolCalls?: LLMBackendToolCall[];
+  usage?: LLMUsage;
+  finishReason?: 'stop' | 'length' | 'tool_use' | 'error' | 'aborted';
+  /** Opaque host-native assistant message to replay on a subsequent backend call. */
+  providerData?: unknown;
+}
+
+export interface LLMBackend {
+  complete(request: LLMBackendRequest): Promise<LLMBackendResponse>;
 }
 
 export type CompactorSourceType = 'inline' | 'file' | 'auto';

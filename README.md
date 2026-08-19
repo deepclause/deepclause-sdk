@@ -21,6 +21,39 @@ The three main ways to use DeepClause are:
 3. Testbed for LLM+Prolog
     - Explore how constrained logic, tool calls, and model output interact in a reproducible runtime
 
+## Host-provided LLM backend
+
+DeepClause can run on a model supplied by an embedding host instead of configuring an SDK provider. Pass an `LLMBackend` to `createDeepClause()`:
+
+```ts
+import { createDeepClause, type LLMBackend } from "deepclause-sdk";
+
+const llmBackend: LLMBackend = {
+    async complete(request) {
+        const response = await hostModel.complete({
+            messages: request.messages,
+            tools: request.tools,
+            signal: request.signal,
+        });
+
+        return {
+            text: response.text,
+            toolCalls: response.toolCalls,
+            usage: response.usage,
+        };
+    },
+};
+
+const deepclause = await createDeepClause({
+    model: "host-active-model",
+    llmBackend,
+});
+```
+
+The backend receives model messages, DML task tools, cancellation, token limits, and an optional `onText` callback. It returns text, structured tool calls, usage, and optional opaque `providerData` for replaying provider-native assistant state across agent-loop iterations. When a backend is supplied, DeepClause does not require provider credentials.
+
+DML-defined tool predicates remain available to `task/N` loops under a runtime tool whitelist. Calls made by those predicates through `exec/2` are still checked against the host policy, so an embedding can expose high-level DML tools without exposing its complete runtime tool registry.
+
 
 ## Benchmark: DeepPlanning Travel Planning
 

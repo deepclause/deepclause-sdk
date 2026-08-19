@@ -98,6 +98,7 @@ export async function createDeepClause(options: CreateOptions): Promise<DeepClau
     reasoningType: options.reasoningType,
     reasoningBudgetMap: options.reasoningBudgetMap,
     contextWindow: options.contextWindow,
+    llmBackend: options.llmBackend,
   });
 
   // Tool registry

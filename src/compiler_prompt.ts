@@ -30,14 +30,14 @@ tool(search(Query, Results), "Search the web for information") :-
 \`\`\`
 
 ### 2. External Tools (MCP/Built-ins)
-These are provided by the runtime (via MCP servers or built-in runtime tools) and are invoked 
+These are provided by the runtime (via MCP servers or built-in runtime tools) and are invoked
 directly with \`exec/2\`. Only these are registered as dependencies in the meta file.
 
 ## Available External Tools
 
 {TOOLS_TABLE}
 
-**Note:** Only tools invoked via \`exec/2\` that correspond to external MCP or built-in runtime 
+**Note:** Only tools invoked via \`exec/2\` that correspond to external MCP or built-in runtime
 tools are registered as dependencies. DML tool wrappers are not registered unless they 
 call external tools.
 
