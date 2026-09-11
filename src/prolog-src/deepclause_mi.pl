@@ -1687,6 +1687,28 @@ mi_call(fail, _StateIn, _StateOut) :-
 mi_call(false, _StateIn, _StateOut) :-
     fail.
 
+%% mi_call(assertz(Head), +StateIn, -StateOut)
+%% mi_call(asserta(Head), +StateIn, -StateOut)
+%% mi_call(retract(Head), +StateIn, -StateOut)
+%% mi_call(retractall(Head), +StateIn, -StateOut)
+%% Database predicates must operate on the session module so DML-side facts
+%% (draft/4, claim/3, ...) are asserted/retracted in the right module.
+mi_call(assertz(Head), StateIn, StateIn) :-
+    get_session_id(SessionId),
+    assertz(SessionId:Head).
+
+mi_call(asserta(Head), StateIn, StateIn) :-
+    get_session_id(SessionId),
+    asserta(SessionId:Head).
+
+mi_call(retract(Head), StateIn, StateIn) :-
+    get_session_id(SessionId),
+    retract(SessionId:Head).
+
+mi_call(retractall(Head), StateIn, StateIn) :-
+    get_session_id(SessionId),
+    retractall(SessionId:Head).
+
 %% ============================================================
 %% List Predicates - Interpreted for proper state threading
 %% ============================================================
@@ -2201,6 +2223,10 @@ is_mi_special_predicate(!).
 is_mi_special_predicate(true).
 is_mi_special_predicate(fail).
 is_mi_special_predicate(false).
+is_mi_special_predicate(assertz(_)).
+is_mi_special_predicate(asserta(_)).
+is_mi_special_predicate(retract(_)).
+is_mi_special_predicate(retractall(_)).
 is_mi_special_predicate(_:_).
 %% List predicates
 is_mi_special_predicate(member(_,_)).
@@ -2305,12 +2331,9 @@ mi_call_dispatch(Goal, StateIn, StateOut) :-
         clause(SessionId:Goal, Body),
         NewDepth is Depth + 1,
         set_depth(StateIn, NewDepth, State1),
-        (   mi_call(Body, State1, State2)
-        ->  add_trace_entry(SessionId, exit, Functor, Args, Depth),
-            set_depth(State2, Depth, StateOut)
-        ;   add_trace_entry(SessionId, fail, Functor, Args, Depth),
-            fail
-        )
+        mi_call(Body, State1, State2),
+        add_trace_entry(SessionId, exit, Functor, Args, Depth),
+        set_depth(State2, Depth, StateOut)
     ).
 
 mi_call_dispatch(Goal, StateIn, StateIn) :-
