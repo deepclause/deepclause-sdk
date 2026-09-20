@@ -291,8 +291,15 @@ one-off predicates, judge events, memoization, capability gating,
 
 `tests/jev-backend.test.ts` covers the real Jev mapping with a fake `fetch`:
 request shape and auth, answer mapping (choice/score/noul), usage attribution,
-`429` retry, and the missing-key failure. This means the Jev path is fully
-tested before an API key is obtained; only the live HTTP round trip is pending.
+`429` retry, and the missing-key failure.
+
+`tests/jev-live.test.ts` is the only test that performs the real HTTP round trip.
+It is gated on `TYPESAFE_API_KEY` and skips otherwise; run it locally with the key
+set to validate the live path:
+
+```sh
+TYPESAFE_API_KEY=... npx vitest run tests/jev-live.test.ts
+```
 
 ## 9. Current limitations
 
