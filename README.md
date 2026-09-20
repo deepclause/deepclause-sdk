@@ -1,5 +1,7 @@
 # DeepClause TUI Agent, CLI and SDK
 
+*Update (09/2026): Now also available as an extension for the pi coding agent: [https://github.com/deepclause/deepclause-pi](https://github.com/deepclause/deepclause-pi).*
+
 Compile markdown specs into executable logic programs. Guaranteed execution semantics for agentic workflows. Comes with a minimal coding agent incl. a nostalgic Borland-style TUI.
 
 ![docs/overview.png](docs/DeepClause_AI_Logic_Framework_Overview.png)
