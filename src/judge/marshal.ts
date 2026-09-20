@@ -23,11 +23,11 @@ function isCompound(value: unknown): value is RawObject {
 
 function compoundParts(value: RawObject): { functor: string; args: unknown[] } {
   for (const key of Object.keys(value)) {
-    if (key === '$t') continue;
+    if (key === '$t' || key === 'functor' || key === 'args') continue;
     const payload = value[key];
-    const args =
-      Array.isArray(payload) && Array.isArray(payload[0]) ? (payload[0] as unknown[]) : [];
-    return { functor: key, args };
+    if (Array.isArray(payload) && payload.length > 0 && Array.isArray(payload[0])) {
+      return { functor: key, args: payload[0] as unknown[] };
+    }
   }
   return { functor: '', args: [] };
 }
@@ -46,6 +46,18 @@ export function normalizePrologValue(value: unknown): JsonValue {
     return value;
   }
   if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (isRawObject(value) && typeof value.$t === 'string' && value.$t !== 't') {
+    const tagged = value as { $t: string; v?: unknown };
+    switch (tagged.$t) {
+      case 's':
+      case 'a':
+        return (tagged.v as string) ?? '';
+      case 'n':
+        return (tagged.v as number) ?? 0;
+      default:
+        return (tagged.v as JsonValue) ?? null;
+    }
+  }
   if (Array.isArray(value)) {
     if (value.length > 0 && value.every(isPairCompound)) {
       const object: Record<string, JsonValue> = {};

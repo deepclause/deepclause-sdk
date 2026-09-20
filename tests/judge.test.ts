@@ -5,6 +5,7 @@ import {
   createMockJudgeBackend,
   type DMLEvent,
   type JudgeBackend,
+  type JudgeBackendRequest,
 } from '../src/index.js';
 
 async function run(
@@ -114,6 +115,44 @@ describe('judge primitives (mock Jev backend)', () => {
 
     expect(answer(events)).toBe('billing|billing');
     expect(calls).toBe(1);
+  });
+
+  it('parses option descriptions and Key-Value state objects', async () => {
+    let captured: JudgeBackendRequest | undefined;
+    const backend = createMockJudgeBackend({
+      answers: (request) => {
+        captured = request;
+        return request.questions.map((question) => ({
+          id: question.id,
+          kind: question.kind,
+          value: question.kind === 'choose' ? 'billing' : 'calm',
+          basis: 'mock' as const,
+        }));
+      },
+    });
+
+    const events = await run(
+      backend,
+      `
+      agent_main(Message) :-
+        State = [ message-Message, customer-[plan-pro, tickets-3] ],
+        judge(State, [
+          choose("Which team?", [billing-"Charges and refunds", orders-"Delivery"]) - Team,
+          rate("Tone?", [level(calm, ["no urgency"]), angry]) - Tone
+        ]),
+        format(string(R), "~w|~w", [Team, Tone]),
+        answer(R).
+      `,
+      ['hello'],
+    );
+
+    expect(answer(events)).toBe('billing|calm');
+    expect(captured?.state).toEqual({ message: 'hello', customer: { plan: 'pro', tickets: 3 } });
+    expect(captured?.questions[0]?.options).toEqual([
+      { id: 'billing', description: 'Charges and refunds' },
+      { id: 'orders', description: 'Delivery' },
+    ]);
+    expect(captured?.questions[1]?.levels?.[0]).toEqual({ what: 'calm', examples: ['no urgency'] });
   });
 
   it('gates a goal on a calibrated backend', async () => {
