@@ -2526,9 +2526,14 @@ mi_call_dispatch(Goal, StateIn, StateOut) :-
         clause(SessionId:Goal, Body),
         NewDepth is Depth + 1,
         set_depth(StateIn, NewDepth, State1),
-        mi_call(Body, State1, State2),
-        add_trace_entry(SessionId, exit, Functor, Args, Depth),
-        set_depth(State2, Depth, StateOut)
+        % Soft cut: execute the body for every solution (so findall/backtracking
+        % works), but still record a fail trace when the body has none.
+        (   mi_call(Body, State1, State2)
+        *-> add_trace_entry(SessionId, exit, Functor, Args, Depth),
+            set_depth(State2, Depth, StateOut)
+        ;   add_trace_entry(SessionId, fail, Functor, Args, Depth),
+            fail
+        )
     ).
 
 mi_call_dispatch(Goal, StateIn, StateIn) :-

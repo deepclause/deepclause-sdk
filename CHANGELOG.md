@@ -1,7 +1,11 @@
 # Changelog
 
-## 0.0.88 - 2026-09-20
+## 0.0.89 - 2026-09-20
 
+- Include the meta-interpreter correctness fixes: `assertz/1`, `asserta/1`,
+  `retract/1`, and `retractall/1` now operate on the session module, and
+  user-defined predicates backtrack through every solution again (previously
+  an if-then-else committed to the first).
 - Add generic semantic judgment predicates: `judge/2` (batch), `choose/4`,
   `rate/4`, `verify/3`, `probability/3`, `holds/2,3`, `with_judgment/2`, and
   `require_judgment/2`. Answers are constrained to the supplied options and

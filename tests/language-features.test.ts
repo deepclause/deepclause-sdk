@@ -1403,7 +1403,6 @@ describe('Tool Policies', () => {
 // FILE I/O OPERATIONS
 // ============================================================================
 import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs';
-import { join } from 'path';
 
 describe('File I/O Operations', () => {
   let sdk: DeepClauseSDK;
