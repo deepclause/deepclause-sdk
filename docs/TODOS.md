@@ -1,4 +1,9 @@
 - run/compile path logic (.deepclause always)
+- Meta-interpreter:
+    - cuts (`!`) inside user-defined predicates are not honored; see
+      `docs/META_INTERPRETER_CUTS.md` (affects all versions; exposed by the
+      0.0.88 backtracking fix). Reproduction in
+      `tests/meta-interpreter-cuts.test.ts`.
 - More examples and testing
 - config system
 - Module system?
