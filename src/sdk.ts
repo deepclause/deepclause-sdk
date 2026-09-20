@@ -17,6 +17,8 @@ import { DMLRunner } from './runner.js';
 import { loadProlog } from './prolog/loader.js';
 import { compileToDML } from './compiler.js';
 import { getBuiltInCompileTools } from './tools.js';
+import { createLLMJudgeBackend } from './judge/llm.js';
+import type { JudgeBackend, JudgeCapabilities, JudgeSelection } from './judge/types.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
@@ -83,6 +85,35 @@ export async function createDeepClause(options: CreateOptions): Promise<DeepClau
   // Initialize SWI-Prolog WASM
   const swipl = await loadProlog();
 
+  // Judgment backends: an explicit default/registry, or an LLM judge created
+  // from the same model options so judge predicates work out of the box.
+  const judgeSelection: JudgeSelection = {
+    backends: new Map<string, JudgeBackend>(),
+    defaultName: options.defaultJudge ?? 'llm',
+  };
+  if (options.judgeBackend) {
+    judgeSelection.backends.set(options.judgeBackend.id, options.judgeBackend);
+  }
+  if (options.judgeBackends) {
+    for (const [name, backend] of Object.entries(options.judgeBackends)) {
+      judgeSelection.backends.set(name, backend);
+    }
+  }
+  if (judgeSelection.backends.size === 0) {
+    judgeSelection.backends.set('llm', createLLMJudgeBackend({
+      llmBackend: options.llmBackend,
+      model: options.model,
+      provider,
+      temperature: options.temperature,
+      maxTokens: options.maxTokens,
+      baseUrl: options.baseUrl,
+      providerOptions: options.providerOptions,
+    }));
+  }
+  if (!judgeSelection.backends.has(judgeSelection.defaultName)) {
+    judgeSelection.defaultName = judgeSelection.backends.keys().next().value ?? 'llm';
+  }
+
   // Create the runner instance
   const runner = new DMLRunner(swipl, {
     model: options.model,
@@ -99,6 +130,7 @@ export async function createDeepClause(options: CreateOptions): Promise<DeepClau
     reasoningBudgetMap: options.reasoningBudgetMap,
     contextWindow: options.contextWindow,
     llmBackend: options.llmBackend,
+    judgeSelection,
   });
 
   // Tool registry
@@ -205,6 +237,34 @@ export async function createDeepClause(options: CreateOptions): Promise<DeepClau
 
     getMemory(): MemoryMessage[] {
       return runner.getMemory();
+    },
+
+    registerJudgeBackend(name: string, backend: JudgeBackend): void {
+      if (disposed) {
+        throw new Error('SDK has been disposed');
+      }
+      judgeSelection.backends.set(name, backend);
+    },
+
+    setJudgeBackend(name: string): void {
+      if (disposed) {
+        throw new Error('SDK has been disposed');
+      }
+      if (!judgeSelection.backends.has(name)) {
+        throw new Error(`Unknown judgment backend: ${name}`);
+      }
+      judgeSelection.defaultName = name;
+    },
+
+    getJudgeBackends(): string[] {
+      return [...judgeSelection.backends.keys()];
+    },
+
+    getJudgeCapabilities(name?: string): JudgeCapabilities {
+      const key = name ?? judgeSelection.defaultName;
+      const backend = judgeSelection.backends.get(key);
+      if (!backend) throw new Error(`Unknown judgment backend: ${key}`);
+      return backend.capabilities;
     },
 
     async dispose(): Promise<void> {

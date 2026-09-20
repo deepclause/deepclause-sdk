@@ -3,6 +3,23 @@
  */
 
 import { z } from 'zod';
+import type { JudgeBackend, JudgeCapabilities } from './judge/types.js';
+
+export type {
+  JudgeAnswer,
+  JudgeBackend,
+  JudgeBackendRequest,
+  JudgeBackendResponse,
+  JudgeBasis,
+  JudgeCapabilities,
+  JudgeLevel,
+  JudgeOption,
+  JudgeQuestion,
+  JudgeQuestionKind,
+  JudgeSelection,
+  JudgeUsage,
+  JsonValue,
+} from './judge/types.js';
 
 /**
  * Options for creating a DeepClause SDK instance
@@ -39,6 +56,12 @@ export interface CreateOptions {
   contextWindow?: number;
   /** Host-provided LLM backend. When set, no provider credentials or environment variables are used. */
   llmBackend?: LLMBackend;
+  /** Default judgment backend. When omitted, an LLM judge backend is created from the model options. */
+  judgeBackend?: JudgeBackend;
+  /** Named judgment backends selectable from DML with with_judgment/2. */
+  judgeBackends?: Record<string, JudgeBackend>;
+  /** Name of the default judgment backend. Defaults to the first registered backend. */
+  defaultJudge?: string;
 }
 
 export interface LLMBackendMessage {
@@ -138,6 +161,8 @@ export interface RunOptions {
   params?: Record<string, unknown>;
   /** Path to workspace directory */
   workspacePath?: string;
+  /** Per-run default judgment backend name override. */
+  judgeBackend?: string;
   /** Maximum number of execution steps (gas) */
   gasLimit?: number;
   /** Handler for user input requests */
@@ -232,6 +257,16 @@ export interface DMLEvent {
   taskDescription?: string;
   /** Correlation ID for matching start/end of a step (only for 'task_activity' events) */
   taskId?: string;
+  /** Judgment backend name (only for judge activity events) */
+  judgeBackend?: string;
+  /** Judged question ids (only for judge activity events) */
+  judgeQuestionIds?: string[];
+  /** Judgment step lifecycle state (only for judge activity events) */
+  judgeState?: 'started' | 'completed' | 'failed';
+  /** Which subsystem produced a usage event. */
+  usageSource?: 'llm' | 'judge';
+  /** Model that produced a usage event. */
+  usageModel?: string;
 }
 
 /**
@@ -400,6 +435,18 @@ export interface DeepClauseSDK {
    * @returns Array of memory messages (system, user, assistant)
    */
   getMemory(): MemoryMessage[];
+
+  /** Register or replace a named judgment backend. */
+  registerJudgeBackend(name: string, backend: JudgeBackend): void;
+
+  /** Select the default judgment backend by name. */
+  setJudgeBackend(name: string): void;
+
+  /** List registered judgment backend names. */
+  getJudgeBackends(): string[];
+
+  /** Get the capabilities of a judgment backend (default when omitted). */
+  getJudgeCapabilities(name?: string): JudgeCapabilities;
 
   /**
    * Clean up resources

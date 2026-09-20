@@ -16,6 +16,8 @@ import type {
 } from './types.js';
 import { mountWorkspace } from './prolog/loader.js';
 import { runAgentLoop } from './agent.js';
+import { judgeAnswersToValues, judgeCacheKey, normalizeJudgeState, parseJudgeQuestions, validateJudgeAnswers, valuesToPrologList } from './judge/marshal.js';
+import type { JudgeAnswer, JudgeCapabilities, JudgeSelection, JudgeUsage, JsonValue, JudgeQuestion } from './judge/types.js';
 import {
   executeCompactor,
   getCompactionBindings,
@@ -171,6 +173,7 @@ export interface RunnerOptions {
   reasoningBudgetMap?: Record<string, number>;
   contextWindow?: number;
   llmBackend?: LLMBackend;
+  judgeSelection?: JudgeSelection;
 }
 
 export interface InternalRunOptions {
@@ -184,6 +187,8 @@ export interface InternalRunOptions {
   signal?: AbortSignal;
   initialMessages?: MemoryMessage[];
   compaction?: CompactionOptions;
+  /** Per-run default judgment backend name override. */
+  judgeBackend?: string;
 }
 
 interface RunnerExecutionContext {
@@ -191,6 +196,13 @@ interface RunnerExecutionContext {
   signal?: AbortSignal;
   compaction?: CompactionOptions;
   toolPolicy?: ToolPolicy | null;
+}
+
+interface ParsedJudgment {
+  questions: JudgeQuestion[];
+  state: JsonValue;
+  requiredCapabilities: string[];
+  requestedName: string;
 }
 
 /**
@@ -242,6 +254,7 @@ export class DMLRunner {
   private sessionId: string = '';
   private currentMemory: MemoryMessage[] = [];
   private stepCounter = 0;
+  private judgeCache = new Map<string, JudgeAnswer[]>();
 
   constructor(swipl: SWIPLModule, options: RunnerOptions) {
     this.swipl = swipl;
@@ -262,6 +275,7 @@ export class DMLRunner {
     // Generate unique session ID
     this.sessionId = `sess_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     const memoryId = `mem_${this.sessionId}`; // Kept for API compatibility
+    this.judgeCache.clear();
 
     try {
       // Mount workspace if path provided
@@ -363,6 +377,10 @@ export class DMLRunner {
 
           case 'request_llm':
             yield* this.handleLlm(step.payload, options);
+            break;
+
+          case 'request_judgment':
+            yield* this.handleJudgment(step.payload, options);
             break;
 
           case 'wait_input':
@@ -945,6 +963,145 @@ export class DMLRunner {
   }
 
   /**
+   * Handle a semantic judgment request (judge/2 and the one-off predicates).
+   */
+  private async *handleJudgment(
+    payload: unknown,
+    options: InternalRunOptions,
+  ): AsyncGenerator<DMLEvent> {
+    const parsed = this.parseJudgmentPayload(payload);
+    const ids = parsed.questions.map((question) => question.id);
+    const backendName =
+      parsed.requestedName === 'default'
+        ? options.judgeBackend ?? this.options.judgeSelection?.defaultName ?? 'llm'
+        : parsed.requestedName;
+    const stepId = `judge_${this.stepCounter++}`;
+
+    yield {
+      type: 'task_activity',
+      taskState: 'started',
+      taskDescription: `judge[${backendName}]: ${ids.join(', ')}`,
+      taskId: stepId,
+      judgeBackend: backendName,
+      judgeQuestionIds: ids,
+      judgeState: 'started',
+    };
+
+    const result = await this.completeJudgment(parsed, { signal: options.signal, judgeBackend: options.judgeBackend });
+    if (result.error) {
+      this.postJudgmentResult({ success: false, error: result.error });
+      yield { type: 'log', content: `judgment failed: ${result.error}` };
+    } else {
+      this.postJudgmentResult({ success: true, values: result.values ?? [] });
+      if (result.usage) {
+        yield {
+          type: 'usage',
+          usage: {
+            inputTokens: result.usage.inputTokens,
+            outputTokens: result.usage.outputTokens,
+            totalTokens:
+              result.usage.totalTokens ?? result.usage.inputTokens + result.usage.outputTokens,
+          },
+          usageSource: 'judge',
+          usageModel: result.usageModel,
+        };
+      }
+    }
+
+    yield {
+      type: 'task_activity',
+      taskState: result.error ? 'failed' : 'completed',
+      taskId: stepId,
+      judgeBackend: result.backendName,
+      judgeQuestionIds: result.ids,
+      judgeState: result.error ? 'failed' : 'completed',
+    };
+  }
+
+  private parseJudgmentPayload(payload: unknown): ParsedJudgment {
+    const data = (payload ?? {}) as Record<string, unknown>;
+    return {
+      questions: parseJudgeQuestions(data.questions),
+      state: normalizeJudgeState(data.state),
+      requiredCapabilities: Array.isArray(data.requires) ? data.requires.map(String) : [],
+      requestedName: typeof data.backend === 'string' ? data.backend : 'default',
+    };
+  }
+
+  private async completeJudgment(
+    parsed: ParsedJudgment,
+    context: { signal?: AbortSignal; judgeBackend?: string },
+  ): Promise<{
+    backendName: string;
+    ids: string[];
+    values?: Array<string | number>;
+    usage?: JudgeUsage;
+    usageModel?: string;
+    error?: string;
+  }> {
+    const selection = this.options.judgeSelection;
+    const defaultName = context.judgeBackend ?? selection?.defaultName ?? 'llm';
+    const backendName = parsed.requestedName === 'default' ? defaultName : parsed.requestedName;
+    const ids = parsed.questions.map((question) => question.id);
+    try {
+      const backend = selection?.backends.get(backendName);
+      if (!backend) throw new Error(`Unknown judgment backend: ${backendName}`);
+      const missing = parsed.requiredCapabilities.filter(
+        (capability) => !(backend.capabilities as unknown as Record<string, unknown>)[capability],
+      );
+      if (missing.length > 0) {
+        throw new Error(`Judgment backend '${backendName}' lacks required capabilities: ${missing.join(', ')}`);
+      }
+
+      const model = this.options.model;
+      const key = judgeCacheKey(backend.id, model, parsed.state, parsed.questions);
+      const cached = this.judgeCache.get(key);
+      if (cached) {
+        return { backendName, ids, values: judgeAnswersToValues(parsed.questions, cached) };
+      }
+
+      const response = await backend.complete({
+        state: parsed.state,
+        questions: parsed.questions,
+        signal: context.signal,
+        model,
+        requiredCapabilities: parsed.requiredCapabilities as Array<keyof JudgeCapabilities>,
+      });
+      const answers = validateJudgeAnswers(parsed.questions, response.answers);
+      this.judgeCache.set(key, answers);
+      return {
+        backendName,
+        ids,
+        values: judgeAnswersToValues(parsed.questions, answers),
+        usage: response.usage,
+        usageModel: response.model ?? model,
+      };
+    } catch (error) {
+      return {
+        backendName,
+        ids,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  private postJudgmentResult(result: {
+    success: boolean;
+    values?: Array<string | number>;
+    error?: string;
+  }): void {
+    if (result.success) {
+      this.query(
+        `deepclause_mi:post_judgment_result('${this.sessionId}', success, ${valuesToPrologList(result.values ?? [])})`,
+      );
+    } else {
+      this.query(
+        `deepclause_mi:post_judgment_result('${this.sessionId}', failure, ${this.toPrologTerm(result.error ?? 'Unknown error')})`,
+      );
+    }
+  }
+
+  /**
    * Handle exec request (exec() predicate)
    */
   private async *handleExec(
@@ -1419,6 +1576,50 @@ export class DMLRunner {
             break;
           }
           
+          case 'request_judgment': {
+            const parsed = this.parseJudgmentPayload(payload);
+            const nestedStepId = `judge_${this.stepCounter++}`;
+            const nestedIds = parsed.questions.map((question) => question.id);
+            onToolEvent?.({
+              type: 'task_activity',
+              taskState: 'started',
+              taskDescription: `judge[${parsed.requestedName}]: ${nestedIds.join(', ')}`,
+              taskId: nestedStepId,
+              judgeBackend: parsed.requestedName,
+              judgeQuestionIds: nestedIds,
+              judgeState: 'started',
+            });
+            const judgeResult = await this.completeJudgment(parsed, { signal: runContext.signal, judgeBackend: undefined });
+            if (judgeResult.error) {
+              this.postJudgmentResult({ success: false, error: judgeResult.error });
+            } else {
+              this.postJudgmentResult({ success: true, values: judgeResult.values ?? [] });
+              if (judgeResult.usage) {
+                onToolEvent?.({
+                  type: 'usage',
+                  usage: {
+                    inputTokens: judgeResult.usage.inputTokens,
+                    outputTokens: judgeResult.usage.outputTokens,
+                    totalTokens:
+                      judgeResult.usage.totalTokens ??
+                      judgeResult.usage.inputTokens + judgeResult.usage.outputTokens,
+                  },
+                  usageSource: 'judge',
+                  usageModel: judgeResult.usageModel,
+                });
+              }
+            }
+            onToolEvent?.({
+              type: 'task_activity',
+              taskState: judgeResult.error ? 'failed' : 'completed',
+              taskId: nestedStepId,
+              judgeBackend: judgeResult.backendName,
+              judgeQuestionIds: judgeResult.ids,
+              judgeState: judgeResult.error ? 'failed' : 'completed',
+            });
+            break;
+          }
+
           case 'request_agent_loop': {
             // Tool is calling task() or prompt() - run nested agent loop
             const taskDescription = String(payload?.taskDescription ?? '');

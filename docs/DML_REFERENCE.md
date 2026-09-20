@@ -630,3 +630,84 @@ for await (const event of dc.runDML(code, {
   console.log(event.type, event.content);
 }
 ```
+
+---
+
+## Semantic Judgment Predicates
+
+Semantic judgments answer bounded, typed questions about an explicit state.
+They are not generative: a `choose` picks one of your options, a `rate` picks
+one of your levels, and a `verify` returns a probability / yes-no answer. They
+never read or write DML memory (`system/1`, `user/1`, `task/N`), and one `judge/2`
+call sends every question in a single request.
+
+### `judge(+State, +Specs)`
+
+Each element of `Specs` is `Question - Output`. The output variable is bound
+when the batch completes.
+
+```prolog
+agent_main(Message) :-
+    judge(Message, [
+        choose("Which team should handle this?",
+               [billing-"Charges and refunds", orders-"Delivery and returns",
+                account-"Login and security"]) - Team,
+        rate("How frustrated is the customer?", [calm, frustrated, angry]) - Frustration,
+        verify("Does the message ask for a refund?") - Refund,
+        probability("Is this urgent?") - Urgency
+    ]),
+    (   Refund == yes
+    ->  answer("Escalating to the refund queue.")
+    ;   format(string(R), "Routing to ~w (frustration ~w, urgency ~w)", [Team, Frustration, Urgency]),
+        answer(R)
+    ).
+```
+
+Question forms:
+
+- `choose(Instruction, Options)` - options are atoms or `Option-"description"`.
+- `rate(Instruction, Levels)` - an ordered list of level descriptions.
+- `verify(Instruction)` / `verify(Instruction, criteria(True, False))`.
+- `probability(Instruction)`.
+
+### One-off predicates
+
+Each is a single request for a single judgment:
+
+```prolog
+choose(State, Question, Options, Choice)
+rate(State, Question, Levels, Level)
+verify(State, Question, Truth)          % yes | no | unknown
+probability(State, Question, P)         % number
+holds(State, Question)                  % semidet: succeeds when verify == yes
+holds(State, Question, Threshold)       % semidet: probability >= Threshold
+```
+
+### Backends and capabilities
+
+Judgments are backend-agnostic. Backends are registered on the SDK
+(`createDeepClause({ judgeBackends, defaultJudge })`) and can be selected per
+run or per scope:
+
+```prolog
+with_judgment(jev, choose("state", "Which team?", [billing, orders], Team)).
+require_judgment(calibrated, verify("state", "Is this urgent?", Truth)).
+```
+
+`require_judgment/2` fails the wrapped goal before it runs when the active
+backend does not provide the capability, so a skill that depends on calibrated
+probabilities cannot silently run on an uncalibrated backend. Available
+capabilities include `calibrated`, `probability`, `confidence`, and
+`independentQuestions`.
+
+Observations are memoized per run by backend, model, state, and questions, so
+backtracking reuses an answer instead of re-querying the model.
+
+### Notes
+
+- `verify` is three-valued: `yes`, `no`, or `unknown`. Never read `\+` as
+  "the model said no"; use the returned truth value.
+- Values are constrained to the options/levels you supply. A `choose` answer is
+  always one of your option atoms.
+- Prefer one `judge/2` batch over several one-off calls when you need more than
+  one or two judgments.

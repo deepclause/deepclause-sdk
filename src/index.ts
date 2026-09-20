@@ -43,3 +43,32 @@ export {
   validateWithProlog,
   analyzeDML,
 } from './compiler.js';
+
+// Judgment layer: generic judge primitives with pluggable backends
+export {
+  createMockJudgeBackend,
+  createMockJevJudgeBackend,
+  createJevJudgeBackend,
+  createLLMJudgeBackend,
+  buildJudgePrompt,
+  parseJudgeResponse,
+} from './judge/index.js';
+export type {
+  JudgeAnswer,
+  JudgeBackend,
+  JudgeBackendRequest,
+  JudgeBackendResponse,
+  JudgeBasis,
+  JudgeCapabilities,
+  JudgeLevel,
+  JudgeOption,
+  JudgeQuestion,
+  JudgeQuestionKind,
+  JudgeSelection,
+  JudgeUsage,
+  JsonValue,
+  JevJudgeBackendOptions,
+  LLMJudgeBackendOptions,
+  MockAnswerSource,
+  MockJudgeBackendOptions,
+} from './judge/index.js';

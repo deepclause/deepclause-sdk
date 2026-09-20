@@ -24,6 +24,7 @@
     post_exec_result/3,
     post_sample_token_result/3,
     post_llm_result/3,
+    post_judgment_result/3,
     provide_input/2,
     mi/3,
     % Tool engine predicates for isolated tool execution
@@ -50,6 +51,7 @@
 :- dynamic session_exec_result/2.  % session_exec_result(SessionId, Result)
 :- dynamic session_sample_token_result/2. % session_sample_token_result(SessionId, Result)
 :- dynamic session_llm_result/2. % session_llm_result(SessionId, Result)
+:- dynamic session_judgment_result/2. % session_judgment_result(SessionId, Result)
 :- dynamic session_trace_log/2.    % session_trace_log(SessionId, TraceLog) - accumulated trace entries
 :- dynamic session_trace_enabled/2. % session_trace_enabled(SessionId, true/false)
 :- dynamic session_pending_signal/2. % session_pending_signal(SessionId, Signal) - fallback for engine_fetch
@@ -576,6 +578,7 @@ process_engine_result(request_sample_token(Prompt, Allowed), request_sample_toke
     payload{prompt: Prompt, allowedTokens: Allowed}) :- !.
 process_engine_result(request_llm(Messages), request_llm, '',
     payload{messages: Messages}) :- !.
+process_engine_result(request_judgment(Payload), request_judgment, '', Payload) :- !.
 %% Tool result from inline tool execution
 process_engine_result(tool_result(Result), tool_result, '',
     payload{result: Result}) :- !.
@@ -599,6 +602,7 @@ destroy_engine(SessionId) :-
     retractall(session_exec_result(SessionId, _)),
     retractall(session_sample_token_result(SessionId, _)),
     retractall(session_llm_result(SessionId, _)),
+    retractall(session_judgment_result(SessionId, _)),
     retractall(session_trace_log(SessionId, _)),
     retractall(session_trace_enabled(SessionId, _)),
     (   current_module(SessionId)
@@ -644,6 +648,17 @@ post_sample_token_result(SessionId, Status, TokenOrError) :-
     retractall(session_sample_token_result(SessionId, _)),
     assertz(session_sample_token_result(SessionId, result{status: Status, token: TokenOrError})),
     post_signal_to_engine(SessionId, sample_token_done).
+
+%% post_judgment_result(+SessionId, +Status, +ValuesOrError)
+%% On success Values is the list of answer values in question order.
+post_judgment_result(SessionId, success, Values) :-
+    retractall(session_judgment_result(SessionId, _)),
+    assertz(session_judgment_result(SessionId, result{status: success, values: Values})),
+    post_signal_to_engine(SessionId, judgment_done).
+post_judgment_result(SessionId, failure, Error) :-
+    retractall(session_judgment_result(SessionId, _)),
+    assertz(session_judgment_result(SessionId, result{status: failure, error: Error})),
+    post_signal_to_engine(SessionId, judgment_done).
 
 %% post_llm_result(+SessionId, +Status, +TextOrError)
 post_llm_result(SessionId, Status, TextOrError) :-
@@ -1042,6 +1057,7 @@ process_tool_engine_result(request_sample_token(Prompt, Allowed), request_sample
     payload{prompt: Prompt, allowedTokens: Allowed}) :- !.
 process_tool_engine_result(request_llm(Messages), request_llm, '',
     payload{messages: Messages}) :- !.
+process_tool_engine_result(request_judgment(Payload), request_judgment, '', Payload) :- !.
 process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ReasoningEffort, RecipeContext), request_agent_loop, '',
     payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: ReasoningEffort, recipeContext: RecipeContext}) :- !.
 %% Legacy 5-arg format (no reasoning/recipe)
@@ -1311,6 +1327,175 @@ wait_sample_token_signal(SessionId) :-
     ;   Signal = error_signal(_)
     ->  true
     ;   wait_sample_token_signal(SessionId)
+    ).
+
+%% ============================================================
+%% Semantic Judgment Predicates
+%% ============================================================
+%% judge/2 asks one batch of typed questions about an explicit state and binds
+%% the answers into output variables carried by the spec terms. The one-off
+%% predicates are sugar over the same request.
+%%
+%%   judge(Message, [
+%%       choose("Which team?", [billing, orders, account]) - Team,
+%%       rate("How frustrated?", [calm, frustrated, angry]) - Frustration,
+%%       verify("Does it ask for a refund?") - Refund
+%%   ]).
+%%
+%% Backends (llm, jev, mock) are selected with with_judgment/2, the workspace
+%% configuration, or a per-run override. require_judgment/2 gates a goal on a
+%% backend capability such as calibrated.
+
+mi_call(judge(State, Specs), StateIn, StateOut) :-
+    !,
+    mi_call_judgment(State, Specs, StateIn, StateOut).
+
+mi_call(choose(State, Question, Options, Choice), StateIn, StateOut) :-
+    !,
+    mi_call_judgment(State, [choose(Question, Options) - Choice], StateIn, StateOut).
+
+mi_call(rate(State, Question, Levels, Level), StateIn, StateOut) :-
+    !,
+    mi_call_judgment(State, [rate(Question, Levels) - Level], StateIn, StateOut).
+
+mi_call(verify(State, Question, Truth), StateIn, StateOut) :-
+    !,
+    mi_call_judgment(State, [verify(Question) - Truth], StateIn, StateOut).
+
+mi_call(probability(State, Question, Probability), StateIn, StateOut) :-
+    !,
+    mi_call_judgment(State, [probability(Question) - Probability], StateIn, StateOut).
+
+mi_call(holds(State, Question), StateIn, StateOut) :-
+    !,
+    mi_call_judgment(State, [verify(Question) - Truth], StateIn, StateOut),
+    (   Truth == yes
+    ->  true
+    ;   fail
+    ).
+
+mi_call(holds(State, Question, Threshold), StateIn, StateOut) :-
+    !,
+    mi_call_judgment(State, [probability(Question) - Probability], StateIn, StateOut),
+    (   number(Probability), Probability >= Threshold
+    ->  true
+    ;   fail
+    ).
+
+mi_call(with_judgment(Backend, Goal), StateIn, StateOut) :-
+    !,
+    set_judge_backend(StateIn, Backend, ScopedState),
+    mi_call(Goal, ScopedState, StateWithScope),
+    clear_judge_backend(StateWithScope, StateOut).
+
+mi_call(require_judgment(Capability, Goal), StateIn, StateOut) :-
+    !,
+    push_required_judgment(StateIn, Capability, ScopedState),
+    mi_call(Goal, ScopedState, StateWithScope),
+    pop_required_judgment(StateWithScope, StateOut).
+
+%% mi_call_judgment(+State, +Specs, +StateIn, -StateOut)
+mi_call_judgment(State, Specs, StateIn, StateOut) :-
+    consume_gas(StateIn, State1),
+    get_session_id(SessionId),
+    get_depth(State1, Depth),
+    split_specs(Specs, Questions, Outputs),
+    length(Questions, Count),
+    add_trace_entry(SessionId, llm_call, judgment, [Count], Depth),
+    get_judge_backend(State1, Backend),
+    get_required_judgments(State1, Requires),
+    engine_yield(request_judgment(payload{
+        state: State,
+        questions: Questions,
+        backend: Backend,
+        requires: Requires
+    })),
+    wait_judgment_signal(SessionId),
+    (   session_judgment_result(SessionId, Result)
+    ->  retract(session_judgment_result(SessionId, _)),
+        (   Result.status == success
+        ->  add_trace_with_result(SessionId, exit, judgment, [Count], Result.values, Depth),
+            bind_judgment_outputs(Outputs, Result.values),
+            StateOut = State1
+        ;   (   get_dict(error, Result, ErrorMsg), ErrorMsg \= ""
+            ->  format(atom(WarnMsg), 'Warning: judgment failed: ~w', [ErrorMsg])
+            ;   format(atom(WarnMsg), 'Warning: judgment failed (status=~w)', [Result.status])
+            ),
+            add_trace_entry(SessionId, fail, judgment, [Count], Depth),
+            engine_yield(output(WarnMsg)),
+            fail
+        )
+    ;   add_trace_entry(SessionId, fail, judgment, [Count], Depth),
+        engine_yield(output('Warning: judgment failed (no result returned)')),
+        fail
+    ).
+
+wait_judgment_signal(SessionId) :-
+    get_next_signal(SessionId, Signal),
+    (   Signal == judgment_done
+    ->  true
+    ;   Signal = error_signal(_)
+    ->  true
+    ;   wait_judgment_signal(SessionId)
+    ).
+
+%% split_specs(+Specs, -Questions, -Outputs)
+%% Each spec is `Question - Output`. Outputs are bound after the batch.
+split_specs([], [], []).
+split_specs([Spec-Output|Rest], [Question|Questions], [Output|Outputs]) :-
+    spec_question(Spec, Question),
+    split_specs(Rest, Questions, Outputs).
+
+spec_question(choose(Instruction, Options),
+    question{kind: choose, instruction: Instruction, options: Options}).
+spec_question(rate(Instruction, Levels),
+    question{kind: rate, instruction: Instruction, levels: Levels}).
+spec_question(verify(Instruction),
+    question{kind: verify, instruction: Instruction}).
+spec_question(verify(Instruction, Criteria),
+    question{kind: verify, instruction: Instruction, criteria: Criteria}).
+spec_question(probability(Instruction),
+    question{kind: probability, instruction: Instruction}).
+
+bind_judgment_outputs([], []).
+bind_judgment_outputs([Output|Outputs], [Value|Values]) :-
+    Output = Value,
+    bind_judgment_outputs(Outputs, Values).
+
+%% get_judge_backend(+State, -Backend)
+get_judge_backend(State, Backend) :-
+    (   get_dict(judge_backend, State, Scoped)
+    ->  Backend = Scoped
+    ;   Backend = default
+    ).
+
+set_judge_backend(StateIn, Backend, StateOut) :-
+    StateOut = StateIn.put(judge_backend, Backend).
+
+clear_judge_backend(StateIn, StateOut) :-
+    (   get_dict(judge_backend, StateIn, _)
+    ->  del_dict(judge_backend, StateIn, _, StateOut)
+    ;   StateOut = StateIn
+    ).
+
+get_required_judgments(State, Requires) :-
+    (   get_dict(judgment_requires, State, Requires)
+    ->  true
+    ;   Requires = []
+    ).
+
+push_required_judgment(StateIn, Capability, StateOut) :-
+    get_required_judgments(StateIn, Existing),
+    (   member(Capability, Existing)
+    ->  StateOut = StateIn
+    ;   append(Existing, [Capability], Updated),
+        StateOut = StateIn.put(judgment_requires, Updated)
+    ).
+
+pop_required_judgment(StateIn, StateOut) :-
+    (   get_dict(judgment_requires, StateIn, _)
+    ->  del_dict(judgment_requires, StateIn, _, StateOut)
+    ;   StateOut = StateIn
     ).
 
 mi_call(llm(Messages, Reply), StateIn, StateOut) :-
@@ -2183,6 +2368,16 @@ is_mi_special_predicate(without_tools(_,_)).
 is_mi_special_predicate(with_reasoning(_,_)).
 %% Recipe context scoping
 is_mi_special_predicate(with_recipe(_,_)).
+%% Semantic judgment predicates
+is_mi_special_predicate(judge(_,_)).
+is_mi_special_predicate(choose(_,_,_,_)).
+is_mi_special_predicate(rate(_,_,_,_)).
+is_mi_special_predicate(verify(_,_,_)).
+is_mi_special_predicate(probability(_,_,_)).
+is_mi_special_predicate(holds(_,_)).
+is_mi_special_predicate(holds(_,_,_)).
+is_mi_special_predicate(with_judgment(_,_)).
+is_mi_special_predicate(require_judgment(_,_)).
 %% Context stack management
 is_mi_special_predicate(get_memory(_)).
 is_mi_special_predicate(push_context).
