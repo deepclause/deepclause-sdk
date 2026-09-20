@@ -1,4 +1,8 @@
 - run/compile path logic (.deepclause always)
+- Judgment layer:
+    - the judge predicates use unprefixed generic names (`verify/3`, `choose/4`,
+      `rate/4`, `probability/3`, `holds/2,3`, ...) and shadow user predicates of
+      the same name/arity; see `docs/JUDGE_NAME_COLLISIONS.md`.
 - More examples and testing
 - config system
 - Module system?
