@@ -1,8 +1,27 @@
 # DeepClause TUI Agent, CLI and SDK
 
-*Update (09/2026): Now also available as an extension for the pi coding agent: [https://github.com/deepclause/deepclause-pi](https://github.com/deepclause/deepclause-pi).*
+DeepClause is a framework for building reliable agents. It
+compiles task descriptions into **DML** (DeepClause Meta Language) — a
+Prolog-based program that owns control flow, branching, backtracking and tool
+orchestration, while LLM calls are confined to bounded, typed leaves. The result
+is an agent workflow that can enforce hard constraints and recover from failure
+instead of hoping a prompt behaves.
 
-Compile markdown specs into executable logic programs. Guaranteed execution semantics for agentic workflows. Comes with a minimal coding agent incl. a nostalgic Borland-style TUI.
+## The DeepClause Project
+
+DeepClause is a small ecosystem of projects built around the same DML runtime:
+
+| Project | What it is |
+| --- | --- |
+| **[deepclause-sdk](https://github.com/deepclause/deepclause-sdk)** — this repo | The core DML runtime and semantic judgment layer, plus a CLI and a conductor TUI. Embedders can inject their own LLM backend instead of configuring provider credentials. |
+| **[sop2harness](https://github.com/deepclause/sop2harness)** | `s2h`, a CLI that turns Standard Operating Procedures (Markdown, PDF, DOCX, HTML or text) into validated, versioned DML harnesses — one skill per procedure — and exports them as an API, chat web app, MCP server and Docker image. Built for robust, auditable workflows in heavily regulated industries. |
+| **[agentvm](https://github.com/deepclause/agentvm)** | A lightweight Node.js library that runs an Alpine Linux VM in a worker thread via WASM. It gives agents an isolated sandbox for shell commands, with host directory mounts and optional networking. Also available on npm as `deepclause-agentvm`. |
+| **[deepclause-pi](https://github.com/deepclause/deepclause-pi)** | An extension for the [pi](https://github.com/badlogic/pi-mono) coding agent. It teaches pi to author and edit DML under `.pi/deepclause/`, adds `/dc`-prefixed commands to plan, run, list and cancel programs, and executes them using pi's selected model, existing credentials, session context and UI. |
+| **[pi-box](https://github.com/deepclause/pi-box)** | A native desktop app (macOS, Linux and Windows) that wraps AgentVM with pi preinstalled: a chat UI for pi, in-app provider sign-in, multi-session workspaces, a real terminal, network and port controls, an in-app virtual screen, and optional local LLMs. |
+
+The pieces compose: **pi-box** runs the **deepclause-pi** extension inside an **agentvm** guest, while **sop2harness** uses the pi extension to author harnesses that execute on **deepclause-sdk**.
+
+This repository is **deepclause-sdk**, the runtime at the center of the project. Compile markdown specs into executable logic programs for guaranteed execution semantics. Comes with a minimal coding agent incl. a nostalgic Borland-style TUI.
 
 ![docs/overview.png](docs/DeepClause_AI_Logic_Framework_Overview.png)
 ![docs/tui.png](docs/tui.png)
