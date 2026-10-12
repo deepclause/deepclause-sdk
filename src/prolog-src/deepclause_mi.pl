@@ -71,6 +71,7 @@
     repl_user_predicates/2,
     repl_user_predicates_text/2,
     repl_predicate_arities/3,
+    repl_probe_nondeterminism/6,
     repl_set_meta_catalog/2,
     repl_set_meta_template/2,
     repl_set_harness_examples/2,
@@ -336,6 +337,7 @@ extract_var_info(Bindings, Term, BareVar, Info) :-
     ).
 
 %% wrapper_type(?Wrapper, ?Type)
+wrapper_type(media, media).
 wrapper_type(string, string).
 wrapper_type(integer, integer).
 wrapper_type(float, number).
@@ -477,6 +479,7 @@ typed_arg(Var, Info, Wrapped) :-
     typed_arg_type(Type, Var, Info, Wrapped).
 typed_arg(Var, _, Var).
 
+typed_arg_type(media, Var, _, media(Var)) :- !.
 typed_arg_type(string, Var, _, Var) :- !.
 typed_arg_type(integer, Var, _, integer(Var)) :- !.
 typed_arg_type(number, Var, _, number(Var)) :- !.
@@ -2052,6 +2055,87 @@ repl_predicate_arities(SessionId, Name, Arities) :-
         Arities0),
     sort(Arities0, Arities).
 
+%% ============================================================
+%% Nondeterminism probe (end_turn advisory)
+%%
+%% After a commit, the host may probe each changed pure predicate: if calling it
+%% with fresh variables yields more than a threshold of solutions, the predicate
+%% is probably missing a commit (`once/1` / `!`) and would flood an `execute`.
+%% Side-effecting predicates are never run (see repl_impure_name/1), fact tables
+%% are skipped, and the search is bounded by an inference limit.
+%% ============================================================
+
+%% Functors with side effects: model calls, host tools, file IO, DB mutation.
+repl_impure_name(task). repl_impure_name(prompt). repl_impure_name(exec).
+repl_impure_name(system). repl_impure_name(user). repl_impure_name(answer).
+repl_impure_name(input). repl_impure_name(output). repl_impure_name(read_media).
+repl_impure_name(attach_media). repl_impure_name(save_image). repl_impure_name(gen_image).
+repl_impure_name(judge). repl_impure_name(choose). repl_impure_name(rate).
+repl_impure_name(verify). repl_impure_name(probability).
+repl_impure_name(write_file). repl_impure_name(append_file). repl_impure_name(delete_file).
+repl_impure_name(make_directory_path). repl_impure_name(open). repl_impure_name(close).
+repl_impure_name(assert). repl_impure_name(assertz). repl_impure_name(asserta).
+repl_impure_name(retract). repl_impure_name(retractall).
+repl_impure_name(consult). repl_impure_name(use_module). repl_impure_name(load_files).
+
+%% repl_body_impure(+Goal) — true when the goal tree calls a side-effecting name.
+repl_body_impure(Goal) :-
+    callable(Goal),
+    functor(Goal, Name, _),
+    repl_impure_name(Name),
+    !.
+repl_body_impure((A, _)) :- repl_body_impure(A).
+repl_body_impure((_, B)) :- repl_body_impure(B).
+repl_body_impure((A ; B)) :- ( repl_body_impure(A) ; repl_body_impure(B) ).
+repl_body_impure((A -> B)) :- ( repl_body_impure(A) ; repl_body_impure(B) ).
+repl_body_impure(\+ Goal) :- repl_body_impure(Goal).
+repl_body_impure(once(Goal)) :- repl_body_impure(Goal).
+repl_body_impure(ignore(Goal)) :- repl_body_impure(Goal).
+repl_body_impure(forall(Gen, Action)) :- ( repl_body_impure(Gen) ; repl_body_impure(Action) ).
+repl_body_impure(catch(Goal, _, Recovery)) :- ( repl_body_impure(Goal) ; repl_body_impure(Recovery) ).
+repl_body_impure(findall(_, Goal, _)) :- repl_body_impure(Goal).
+repl_body_impure(findall(_, Goal, _, _)) :- repl_body_impure(Goal).
+repl_body_impure(call_with_inference_limit(Goal, _, _)) :- repl_body_impure(Goal).
+repl_body_impure(with_output_to(_, Goal)) :- repl_body_impure(Goal).
+repl_body_impure(_:Goal) :- repl_body_impure(Goal).
+
+repl_predicate_pure(SessionId, Name, Arity) :-
+    functor(Head, Name, Arity),
+    \+ ( clause(SessionId:Head, Body), repl_body_impure(Body) ).
+
+%% True when the predicate has at least one clause with a real body (not a fact).
+repl_predicate_has_rule(SessionId, Name, Arity) :-
+    functor(Head, Name, Arity),
+    clause(SessionId:Head, Body),
+    Body \== true,
+    !.
+
+%% repl_probe_nondeterminism(+SessionId, +Name, +Arity, +Threshold, +Bound, -Result)
+%% Result: one | many | timeout | data | unsafe | removed | error.
+repl_probe_nondeterminism(SessionId, Name, Arity, Threshold, Bound, Result) :-
+    (   \+ current_predicate(SessionId:Name/Arity)
+    ->  Result = removed
+    ;   \+ repl_predicate_has_rule(SessionId, Name, Arity)
+    ->  Result = data
+    ;   \+ repl_predicate_pure(SessionId, Name, Arity)
+    ->  Result = unsafe
+    ;   functor(Head, Name, Arity),
+        N is Threshold + 1,
+        catch(
+            (   with_output_to(string(_),
+                    call_with_inference_limit(call_nth(SessionId:Head, N), Bound, R)),
+                (   R == false -> Result = one
+                ;   R == inference_limit_exceeded -> Result = timeout
+                ;   R == true -> Result = many
+                ;   R == (!) -> Result = many   % success is returned as `!` in this build
+                ;   Result = error
+                )
+            ),
+            _,
+            Result = error
+        )
+    ).
+
 %% repl_history_listing(+SessionId)
 %% Human-readable tail for `listing(history)`.
 repl_history_listing(SessionId) :-
@@ -2463,8 +2547,15 @@ step_engine(SessionId, Status, Content, Payload) :-
 
 %% process_engine_result(+Result, -Status, -Content, -Payload)
 process_engine_result(output(Text), output, Text, none) :- !.
+process_engine_result(media(Payload), media, '', Payload) :- is_dict(Payload), !.
 process_engine_result(log(Text), log, Text, none) :- !.
 process_engine_result(answer(Text), answer, Text, none) :- !.
+%% Current 8-arg format (with model spec from with_model/2)
+process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ReasoningEffort, RecipeContext, ModelSpec), request_agent_loop, '',
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: ReasoningEffort, recipeContext: RecipeContext, modelSpec: ModelSpec}) :- !.
+%% Prompt-family 6-arg format (tool scope + model spec; no reasoning/recipe)
+process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ModelSpec), request_agent_loop, '',
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: none, recipeContext: "", modelSpec: ModelSpec}) :- !.
 %% Note: Memory and tool scope are now passed in the payload for the agent loop
 process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ReasoningEffort, RecipeContext), request_agent_loop, '',
     payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: ReasoningEffort, recipeContext: RecipeContext}) :- !.
@@ -2476,10 +2567,14 @@ process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory), request_age
     payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: none, reasoningEffort: none, recipeContext: ""}) :- !.
 process_engine_result(request_exec(Tool, Args), request_exec, '',
     payload{toolName: Tool, args: Args}) :- !.
+process_engine_result(request_sample_token(Prompt, Allowed, ModelSpec), request_sample_token, '',
+    payload{prompt: Prompt, allowedTokens: Allowed, modelSpec: ModelSpec}) :- !.
 process_engine_result(request_sample_token(Prompt, Allowed), request_sample_token, '',
-    payload{prompt: Prompt, allowedTokens: Allowed}) :- !.
+    payload{prompt: Prompt, allowedTokens: Allowed, modelSpec: none}) :- !.
+process_engine_result(request_llm(Messages, ModelSpec), request_llm, '',
+    payload{messages: Messages, modelSpec: ModelSpec}) :- !.
 process_engine_result(request_llm(Messages), request_llm, '',
-    payload{messages: Messages}) :- !.
+    payload{messages: Messages, modelSpec: none}) :- !.
 process_engine_result(request_judgment(Payload), request_judgment, '', Payload) :- !.
 %% Tool result from inline tool execution
 process_engine_result(tool_result(Result), tool_result, '',
@@ -2712,6 +2807,25 @@ get_reasoning_effort(State, Effort) :-
     (   get_dict(reasoning_effort, State, Effort)
     ->  true
     ;   Effort = none
+    ).
+
+%% set_model_state(+StateIn, +Spec, -StateOut)
+set_model_state(StateIn, Spec, StateOut) :-
+    StateOut = StateIn.put(model_spec, Spec).
+
+%% clear_model_state(+StateIn, -StateOut)
+clear_model_state(StateIn, StateOut) :-
+    (   get_dict(model_spec, StateIn, _)
+    ->  del_dict(model_spec, StateIn, _, StateOut)
+    ;   StateOut = StateIn
+    ).
+
+%% get_model_spec(+State, -Spec)
+%% `none` means "no override" (use the session model).
+get_model_spec(State, Spec) :-
+    (   get_dict(model_spec, State, Spec)
+    ->  true
+    ;   Spec = none
     ).
 
 %% ============================================================
@@ -3090,8 +3204,9 @@ mi_call(task(Desc), StateIn, StateOut) :-
     get_tool_scope(StateIn, ToolScope),
     get_reasoning_effort(StateIn, ReasoningEffort),
     get_recipe_context(StateIn, RecipeContext),
+    get_model_spec(StateIn, ModelSpec),
     % Yield request with current memory and tool scope
-    engine_yield(request_agent_loop(InterpDesc, [], UserTools, Memory, ToolScope, ReasoningEffort, RecipeContext)),
+    engine_yield(request_agent_loop(InterpDesc, [], UserTools, Memory, ToolScope, ReasoningEffort, RecipeContext, ModelSpec)),
     % Handle signals (tool calls) until agent_done
     handle_agent_signals(SessionId, StateIn, StateAfterAgent),
     session_agent_result(SessionId, Result),
@@ -3161,7 +3276,8 @@ mi_call(prompt(Desc), StateIn, StateOut) :-
     get_depth(StateIn, Depth),
     add_trace_entry(SessionId, llm_call, prompt, [InterpDesc], Depth),
     % prompt/N is a simple LLM call - no tools, no tool scope
-    engine_yield(request_agent_loop(InterpDesc, [], [], [], none)),
+    get_model_spec(StateIn, ModelSpec),
+    engine_yield(request_agent_loop(InterpDesc, [], [], [], none, ModelSpec)),
     % Wait for agent_done (no tool calls expected since no tools provided)
     handle_agent_signals(SessionId, StateIn, StateOut),
     session_agent_result(SessionId, Result),
@@ -3196,7 +3312,8 @@ mi_call_prompt_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     get_depth(StateIn, Depth),
     add_trace_entry(SessionId, llm_call, prompt, [InterpDesc], Depth),
     % prompt/N is a simple LLM call - no tools, no tool scope
-    engine_yield(request_agent_loop(InterpDesc, VarNames, [], [], none)),
+    get_model_spec(StateIn, ModelSpec),
+    engine_yield(request_agent_loop(InterpDesc, VarNames, [], [], none, ModelSpec)),
     % Wait for agent_done (no tool calls expected since no tools provided)
     handle_agent_signals(SessionId, StateIn, StateOut),
     session_agent_result(SessionId, Result),
@@ -3223,7 +3340,8 @@ mi_call_sample_token(Desc, Allowed, Token, StateIn, StateOut) :-
     get_session_id(SessionId),
     get_depth(StateIn, Depth),
     add_trace_entry(SessionId, llm_call, sample_token, [InterpDesc, Allowed], Depth),
-    engine_yield(request_sample_token(InterpDesc, Allowed)),
+    get_model_spec(StateIn, ModelSpec),
+    engine_yield(request_sample_token(InterpDesc, Allowed, ModelSpec)),
     wait_sample_token_signal(SessionId),
     (   session_sample_token_result(SessionId, Result)
     ->  retract(session_sample_token_result(SessionId, _)),
@@ -3431,7 +3549,8 @@ mi_call_llm(Messages, Reply, StateIn, StateOut) :-
     get_session_id(SessionId),
     get_depth(StateIn, Depth),
     add_trace_entry(SessionId, llm_call, llm, [Messages], Depth),
-    engine_yield(request_llm(Messages)),
+    get_model_spec(StateIn, ModelSpec),
+    engine_yield(request_llm(Messages, ModelSpec)),
     wait_llm_signal(SessionId),
     (   session_llm_result(SessionId, Result)
     ->  retract(session_llm_result(SessionId, _)),
@@ -3474,7 +3593,8 @@ mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     get_tool_scope(StateIn, ToolScope),
     get_reasoning_effort(StateIn, ReasoningEffort),
     get_recipe_context(StateIn, RecipeContext),
-    engine_yield(request_agent_loop(InterpDesc, VarNames, UserTools, Memory, ToolScope, ReasoningEffort, RecipeContext)),
+    get_model_spec(StateIn, ModelSpec),
+    engine_yield(request_agent_loop(InterpDesc, VarNames, UserTools, Memory, ToolScope, ReasoningEffort, RecipeContext, ModelSpec)),
     % Handle signals (tool calls) until agent_done
     handle_agent_signals(SessionId, StateIn, StateAfterAgent),
     session_agent_result(SessionId, Result),
@@ -3589,6 +3709,17 @@ mi_call(with_reasoning(Goal, Effort), StateIn, StateOut) :-
     mi_call(Goal, ScopedState, StateWithScope),
     clear_reasoning_effort_state(StateWithScope, StateOut).
 
+%% mi_call(with_model(Spec, Goal), +StateIn, -StateOut)
+%% Run Goal with a specific model, and optionally a reasoning level. `Spec` is a
+%% string — "provider:model", "provider:model#reasoning", "model",
+%% "model#reasoning" — or a model{provider, id, temperature, maxTokens, reasoning}
+%% dict. It applies to task/N, prompt/N and sample_token/N (not judgments).
+mi_call(with_model(Spec, Goal), StateIn, StateOut) :-
+    !,
+    set_model_state(StateIn, Spec, ScopedState),
+    mi_call(Goal, ScopedState, StateWithScope),
+    clear_model_state(StateWithScope, StateOut).
+
 %% mi_call(with_recipe(Goal, Query), +StateIn, -StateOut)
 %% Run Goal with a recipe loaded as transient context (not persisted to memory).
 mi_call(with_recipe(Goal, Query), StateIn, StateOut) :-
@@ -3647,9 +3778,39 @@ mi_call(attach_media(Media), StateIn, StateOut) :-
     append(Memory, [Message], NewMemory),
     set_memory(StateIn, NewMemory, StateOut).
 
+%% mi_call(save_image(+Media, +OutPath), +StateIn, -StateOut)
+%% Write a media reference to a workspace file: `save_image(media(Path, Mime), "out.png")`,
+%% `save_image(media{svg: Svg}, "out.svg")`. Parent directories must exist.
+mi_call(save_image(Media, Out), StateIn, StateIn) :-
+    !,
+    media_dict(Media, Dict),
+    (   get_dict(kind, Dict, inline_svg),
+        get_dict(data, Dict, Svg)
+    ->  resolve_workspace_path(Out, OutAbs),
+        open(OutAbs, write, Stream),
+        write(Stream, Svg),
+        close(Stream)
+    ;   get_dict(path, Dict, Path),
+        Path \== ""
+    ->  resolve_workspace_path(Path, InAbs),
+        resolve_workspace_path(Out, OutAbs),
+        copy_file(InAbs, OutAbs)
+    ;   throw(error(domain_error(save_image, Media), save_image/2))
+    ).
+
 %% media_dict(+Media, -Dict)
-%% Accepts media(Path, Mime) or a bare path; normalizes to the storage dict.
+%% Normalizes an image reference for display/attachment:
+%%   media(Path, Mime) | media(Path) | a bare Path string
+%%   media{path: Path} | media{path: Path, mime: Mime}
+%%   media{svg: SvgString}                 (inline SVG)
+%%   media{data: Base64} | media{data: Base64, mime: Mime}   (inline bytes)
 media_dict(media(Path, Mime), media{path: Path, mime: Mime}) :- !.
+media_dict(media(Path), media{path: Path, mime: Mime}) :- !, media_mime(Path, Mime).
+media_dict(media{path: Path, mime: Mime}, media{path: Path, mime: Mime}) :- !.
+media_dict(media{path: Path}, media{path: Path, mime: Mime}) :- !, media_mime(Path, Mime).
+media_dict(media{svg: Svg}, media{path: "", mime: "image/svg+xml", kind: inline_svg, data: Svg}) :- !.
+media_dict(media{data: Data, mime: Mime}, media{path: "", mime: Mime, kind: inline_data, data: Data}) :- !.
+media_dict(media{data: Data}, media{path: "", mime: "image/png", kind: inline_data, data: Data}) :- !.
 media_dict(Path, media{path: Path, mime: Mime}) :- media_mime(Path, Mime).
 
 %% media_mime(+Path, -Mime)
@@ -3657,6 +3818,7 @@ media_dict(Path, media{path: Path, mime: Mime}) :- media_mime(Path, Mime).
 media_mime(Path, Mime) :-
     (   string(Path) -> atom_string(Atom, Path) ; Atom = Path ),
     (   sub_atom(Atom, _, _, 0, '.png')  -> Mime = "image/png"
+    ;   sub_atom(Atom, _, _, 0, '.svg')  -> Mime = "image/svg+xml"
     ;   sub_atom(Atom, _, _, 0, '.jpg')  -> Mime = "image/jpeg"
     ;   sub_atom(Atom, _, _, 0, '.jpeg') -> Mime = "image/jpeg"
     ;   sub_atom(Atom, _, _, 0, '.gif')  -> Mime = "image/gif"
@@ -3675,6 +3837,29 @@ mi_call(answer(Text), StateIn, StateIn) :-
     interpolate_desc(Text, Params, InterpText),
     engine_yield(answer(InterpText)),
     throw('$answer_commit').
+
+%% mi_call(output(Media), +StateIn, -StateOut)
+%% Present an image instead of text: `output(media(Path, Mime))`, `output(media(Path))`,
+%% or a dict form (`media{svg: Svg}`, `media{data: Base64, mime: Mime}`). The host
+%% renders it inline (kitty/iTerm2) or reports the path.
+%% This clause must come before the generic `output(Text)` clause; it fails
+%% through for anything that is not a media reference.
+mi_call(output(Media), StateIn, StateIn) :-
+    nonvar(Media),
+    (   Media = media(_, _)
+    ;   Media = media(_)
+    ;   is_dict(Media)
+    ),
+    media_dict(Media, Dict),
+    !,
+    get_dict(mime, Dict, Mime),
+    get_dict(path, Dict, Path),
+    (   get_dict(data, Dict, Data) -> true ; Data = "" ),
+    (   get_dict(kind, Dict, Kind) -> true ; Kind = file ),
+    get_session_id(SessionId),
+    get_depth(StateIn, Depth),
+    add_trace_entry(SessionId, media, media, [Path], Depth),
+    engine_yield(media(media{path: Path, mimeType: Mime, kind: Kind, data: Data})).
 
 %% mi_call(output(Text), +StateIn, -StateOut)
 mi_call(output(Text), StateIn, StateIn) :-
@@ -4419,6 +4604,7 @@ is_mi_special_predicate(system(_)).
 is_mi_special_predicate(user(_)).  %% Add user message to context
 is_mi_special_predicate(read_media(_,_)).
 is_mi_special_predicate(attach_media(_)).
+is_mi_special_predicate(save_image(_,_)).
 is_mi_special_predicate(task(_)).
 is_mi_special_predicate(task(_,_)).
 is_mi_special_predicate(task(_,_,_)).
@@ -4442,6 +4628,7 @@ is_mi_special_predicate(with_tools(_,_)).
 is_mi_special_predicate(without_tools(_,_)).
 %% Reasoning effort scoping
 is_mi_special_predicate(with_reasoning(_,_)).
+is_mi_special_predicate(with_model(_,_)).
 %% Recipe context scoping
 is_mi_special_predicate(with_recipe(_,_)).
 %% Semantic judgment predicates

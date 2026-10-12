@@ -7,6 +7,7 @@
  */
 
 import type { DMLEvent, ToolDefinition } from '../types.js';
+import type { DiagramMode } from '../visualize/index.js';
 
 export interface HarnessExecuteResult {
   bindings: Array<{ name: string; value: string }>;
@@ -21,6 +22,8 @@ export interface HarnessCommitResult {
   committed: boolean;
   /** Predicates added/replaced/removed by the commit. */
   changed?: string[];
+  /** Advisory warnings (e.g. a nondeterministic helper). */
+  warnings?: string[];
   error?: string;
 }
 
@@ -49,8 +52,18 @@ export interface HarnessToolController {
   deletePredicate(nameArity: string): Promise<{ ok: boolean; error?: string }>;
   /** Run a DML goal against the scratch harness. */
   execute(goal: string, limit?: number, signal?: AbortSignal, onEvent?: (event: DMLEvent) => void): Promise<HarnessExecuteResult>;
+  /** ASCII diagram of a skill and its sub-agent/tool calls. */
+  visualize(entry?: string, mode?: DiagramMode): Promise<{ message: string; event?: DMLEvent }>;
+  /** Display a workspace image in the terminal. */
+  showImage(path: string): Promise<{ message: string; event?: DMLEvent }>;
+  /** Generate an image from a prompt and display it. */
+  generateImage(prompt: string): Promise<{ message: string; event?: DMLEvent }>;
+  /** Write a workspace file (creates parent directories). */
+  writeFile(path: string, content: string): Promise<{ ok: boolean; error?: string }>;
   /** DML reference / authoring guide / examples / snippets. */
   reference(topic: string): Promise<string>;
+  /** The models available in this session (for `with_model/2`). */
+  listModels(): Promise<string>;
 }
 
 function text(message: string): Record<string, unknown> {
@@ -85,13 +98,22 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
   });
 
   tools.set('end_turn', {
-    description: 'Validate and commit the open transaction (opened by begin_turn) and record a harness version. Returns the predicates changed.',
+    description: 'Validate and commit the open transaction (opened by begin_turn) and record a harness version. Returns the predicates changed and any advisory warnings (e.g. a nondeterministic helper).',
     parameters: {
       type: 'object',
       properties: { summary: stringProp('One-line summary of the change (optional).') },
       required: [],
     },
-    execute: async () => controller.endTurn(),
+    execute: async (_args, context) => {
+      const result = await controller.endTurn();
+      if (result.warnings?.length) {
+        context?.onEvent?.({
+          type: 'output',
+          content: result.warnings.map((warning) => `⚠ ${warning}`).join('\n'),
+        });
+      }
+      return result;
+    },
   });
 
   tools.set('rollback', {
@@ -172,6 +194,73 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
       context?.signal,
       context?.onEvent,
     ),
+  });
+
+  tools.set('visualize', {
+    description: 'Render a diagram of a skill (predicate) showing its model calls (task/prompt), tool calls (exec), and other skills it invokes. In a terminal that supports images the diagram is displayed to the user directly; otherwise the ASCII tree is returned so you can show it. The entry defaults to agent_main/N.',
+    parameters: {
+      type: 'object',
+      properties: {
+        entry: stringProp('Entry predicate, e.g. "patch/3" (default: agent_main/N).'),
+        mode: stringProp('presentation (default, reader-friendly) or spec (engineering detail).'),
+      },
+      required: [],
+    },
+    execute: async (args, context) => {
+      const { message, event } = await controller.visualize(
+        typeof args.entry === 'string' ? args.entry : undefined,
+        args.mode === 'spec' ? 'spec' : args.mode === 'presentation' ? 'presentation' : undefined,
+      );
+      if (event) context?.onEvent?.(event);
+      return text(message);
+    },
+  });
+
+  tools.set('write_file', {
+    description: 'Write a workspace file with the given content (parent directories are created). Use this for SVG, JSON, scripts, or any file whose content is easier to pass whole than to build inside a DML string. The content argument is an ordinary string — no DML/shell escaping.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: stringProp('Workspace-relative path, e.g. "images/foo.svg".'),
+        content: stringProp('The complete file content. Newlines and quotes are passed through verbatim.'),
+      },
+      required: ['path', 'content'],
+    },
+    execute: async (args) => controller.writeFile(String(args.path ?? ''), String(args.content ?? '')),
+  });
+
+  tools.set('show_image', {
+    description: 'Display a workspace image (PNG/JPEG/GIF/WebP/SVG) to the user in the terminal. Use this when the user asks to see an image, or after writing one with save_image/write_file.',
+    parameters: {
+      type: 'object',
+      properties: { path: stringProp('Workspace-relative path of the image to display.') },
+      required: ['path'],
+    },
+    execute: async (args, context) => {
+      const { message, event } = await controller.showImage(String(args.path ?? ''));
+      if (event) context?.onEvent?.(event);
+      return text(message);
+    },
+  });
+
+  tools.set('generate_image', {
+    description: 'Generate an image from a text prompt (using the configured image model) and display it to the user. Returns the workspace path of the written image.',
+    parameters: {
+      type: 'object',
+      properties: { prompt: stringProp('What to depict (be specific: subject, style, composition).') },
+      required: ['prompt'],
+    },
+    execute: async (args, context) => {
+      const { message, event } = await controller.generateImage(String(args.prompt ?? ''));
+      if (event) context?.onEvent?.(event);
+      return text(message);
+    },
+  });
+
+  tools.set('models', {
+    description: 'List the LLM models available in this session (those with configured credentials) and the current default. Call this before writing `with_model(Spec, Goal)` so you use a real provider:model id.',
+    parameters: { type: 'object', properties: {}, required: [] },
+    execute: async () => text(await controller.listModels()),
   });
 
   tools.set('reference', {

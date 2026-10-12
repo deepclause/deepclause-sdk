@@ -16,6 +16,7 @@ import type {
   LLMBackendMessage,
   LLMBackendRequest,
   LLMBackendResponse,
+  ResolvedModel,
 } from '../types.js';
 
 export type BackendKind = 'env' | 'pi';
@@ -44,6 +45,10 @@ export interface PiModelLike {
   api?: string;
   /** Whether the model accepts a thinking/reasoning level. */
   reasoning?: boolean;
+  /** Model compatibility flags (e.g. `supportsTemperature`). */
+  compat?: { supportsTemperature?: boolean; [key: string]: unknown };
+  /** Catalog price, USD per 1M tokens. */
+  cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
   /** Model context window in tokens. */
   contextWindow?: number;
   /** Maximum output tokens. */
@@ -147,6 +152,15 @@ function modelLabel(model: PiModelLike): string {
   return `${model.provider}/${model.id}`;
 }
 
+/** Find a pi model by provider+id (registry `find` when present, else the catalog). */
+function findPiModel(registry: PiRegistryLike, target: ResolvedModel): PiModelLike | undefined {
+  const found = registry.find?.(target.provider, target.id);
+  if (found) {
+    return found;
+  }
+  return registry.getAvailable().find((model) => model.provider === target.provider && model.id === target.id);
+}
+
 /** Select the pi model to use, honoring an explicit provider/model request. */
 export function selectPiModel(registry: PiRegistryLike, requested?: string): PiModelLike {
   const available = registry.getAvailable();
@@ -240,6 +254,7 @@ export function createPiAdapter(
   thinkingLevel?: string,
 ): {
   backend: LLMBackend;
+  registry: PiRegistryLike;
   modelId: string;
   provider: string;
   contextWindow?: number;
@@ -253,10 +268,34 @@ export function createPiAdapter(
     throw new Error(`pi has no configured authentication for ${modelLabel(model)}`);
   }
 
-  const resolved = resolveThinkingLevel(model, thinkingLevel);
+  const baseResolved = resolveThinkingLevel(model, thinkingLevel);
 
-  const backend: LLMBackend = {
-    async complete(request: LLMBackendRequest): Promise<LLMBackendResponse> {
+  // Per-call model overrides from `with_model/2`, resolved lazily and cached.
+  const scoped = new Map<string, { model: PiModelLike; resolved: ReturnType<typeof resolveThinkingLevel> }>();
+  const resolveScoped = (target: ResolvedModel): { model: PiModelLike; resolved: ReturnType<typeof resolveThinkingLevel> } => {
+    const key = `${target.provider}/${target.id}`;
+    const cached = scoped.get(key);
+    if (cached) {
+      return cached;
+    }
+    const found = findPiModel(registry, target);
+    if (!found) {
+      throw new Error(`pi model not found: ${key}`);
+    }
+    if (!registry.hasConfiguredAuth(found)) {
+      throw new Error(`pi has no configured authentication for ${key}`);
+    }
+    const entry = { model: found, resolved: resolveThinkingLevel(found, target.reasoningLevel) };
+    scoped.set(key, entry);
+    return entry;
+  };
+
+  const completeWith = async (
+    activeModel: PiModelLike,
+    activeResolved: ReturnType<typeof resolveThinkingLevel>,
+    defaultMaxTokens: number,
+    request: LLMBackendRequest,
+  ): Promise<LLMBackendResponse> => {
       const systemPrompt = request.messages
         .filter((message) => message.role === 'system')
         .map((message) => message.content)
@@ -264,7 +303,7 @@ export function createPiAdapter(
 
       const context: PiCompletionRequest = {
         systemPrompt: systemPrompt || undefined,
-        messages: toPiMessages(request.messages, model),
+        messages: toPiMessages(request.messages, activeModel),
         tools: request.tools?.map((tool) => ({
           name: tool.name,
           description: tool.description,
@@ -273,20 +312,31 @@ export function createPiAdapter(
       };
       const options: Record<string, unknown> = {
         signal: request.signal,
-        maxTokens: request.maxTokens ?? maxTokens,
+        maxTokens: request.maxTokens ?? defaultMaxTokens,
         cacheRetention: 'none',
       };
-      if (model.reasoning && resolved.level && resolved.level !== 'off') {
+      // Model defaults the caller's temperature only when a scope explicitly set
+      // one (pi itself never forwards an ambient temperature, and some models —
+      // e.g. github-copilot — reject the parameter). `compat.supportsTemperature`
+      // opts a model out when pi knows it rejects it.
+      const scopedTemperature = request.target?.temperature;
+      if (
+        typeof scopedTemperature === 'number'
+        && activeModel.compat?.supportsTemperature !== false
+      ) {
+        options.temperature = scopedTemperature;
+      }
+      if (activeModel.reasoning && activeResolved.level && activeResolved.level !== 'off') {
         // pi's `SimpleStreamOptions` enables thinking with `reasoning` (a
         // ThinkingLevel), not `thinkingLevel`.
-        options.reasoning = resolved.level;
+        options.reasoning = activeResolved.level;
       }
 
       let response: PiCompletionResult;
       if (registry.streamSimple) {
         // Stream text/thinking deltas as they arrive; the final message carries
         // the full text, tool calls, and usage.
-        const stream = registry.streamSimple(model, context, options);
+        const stream = registry.streamSimple(activeModel, context, options);
         for await (const event of stream) {
           if (event.type === 'text_delta') {
             if (event.delta) request.onText?.(event.delta);
@@ -296,7 +346,7 @@ export function createPiAdapter(
         }
         response = await stream.result();
       } else {
-        response = await registry.complete(model, context, options);
+        response = await registry.complete(activeModel, context, options);
         const streamedText = response.content
           .filter((content): content is { type: 'text'; text: string } => content.type === 'text')
           .map((content) => content.text)
@@ -333,19 +383,29 @@ export function createPiAdapter(
             : 'stop',
         providerData: response,
       };
+  };
+
+  const backend: LLMBackend = {
+    async complete(request: LLMBackendRequest): Promise<LLMBackendResponse> {
+      if (request.target && (request.target.provider !== model.provider || request.target.id !== model.id)) {
+        const entry = resolveScoped(request.target);
+        return completeWith(entry.model, entry.resolved, request.target.maxTokens ?? maxTokens, request);
+      }
+      return completeWith(model, baseResolved, maxTokens, request);
     },
   };
 
   return {
     backend,
+    registry,
     modelId: modelLabel(model),
     provider: model.provider,
     contextWindow: model.contextWindow,
     maxTokens,
     reasoning: Boolean(model.reasoning),
-    thinkingLevel: resolved.level,
-    supportedThinkingLevels: resolved.supported,
-    warning: resolved.warning,
+    thinkingLevel: baseResolved.level,
+    supportedThinkingLevels: baseResolved.supported,
+    warning: baseResolved.warning,
   };
 }
 
@@ -396,6 +456,15 @@ export interface PiRuntimeLike {
   listCredentials(options?: unknown): Promise<Array<{ providerId: string; type: string }>>;
   login(providerId: string, type: string, interaction: unknown, options?: unknown): Promise<unknown>;
   logout(providerId: string, options?: unknown): Promise<void>;
+  /** Image models whose provider has complete auth (ModelRuntime). */
+  getAvailableOfType?(type: string, providerId?: string): Promise<Array<unknown>>;
+  /** Runtime lookup of one image model. */
+  getModelOfType?(type: string, providerId: string, modelId: string): unknown;
+  /** Generate images with a resolved pi image model. */
+  generateImages?(model: unknown, context: unknown, options?: unknown): Promise<{
+    output?: Array<{ type: string; data?: string; mimeType?: string; text?: string }>;
+    errorMessage?: string;
+  }>;
 }
 
 export interface PiProviderInfo {
@@ -538,6 +607,8 @@ export async function openPiRuntime(
 /** Resolved pi backend plus the model capabilities the UI/config needs. */
 export interface PiBackendInfo {
   backend: LLMBackend;
+  /** The pi registry, for resolving `with_model/2` scopes. */
+  registry: PiRegistryLike;
   modelId: string;
   provider: string;
   contextWindow?: number;
@@ -597,6 +668,8 @@ export interface ResolvedBackend {
   contextWindow?: number;
   reasoning?: boolean;
   thinkingLevel?: ThinkingLevel;
+  /** pi registry, for resolving `with_model/2` (pi backend only). */
+  registry?: PiRegistryLike;
 }
 
 /**
@@ -618,6 +691,7 @@ export async function resolveLlmBackend(options: ResolveBackendOptions = {}): Pr
     return {
       kind: 'pi',
       llmBackend: pi.backend,
+      registry: pi.registry,
       provider: pi.provider,
       model: pi.modelId.split('/').slice(1).join('/') || pi.modelId,
       modelId: pi.modelId,

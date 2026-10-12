@@ -11,6 +11,7 @@
   - [exec/2](#exec2)
   - [Tool Definitions](#tool-definitions)
   - [Tool Scoping](#tool-scoping)
+  - [Model Selection](#model-selection)
   - [system/1, user/1](#memory-predicates)
   - [output/1, yield/1, log/1](#output-predicates)
   - [answer/1](#answer1)
@@ -368,6 +369,37 @@ agent_main :-
 ```
 
 **Automatic call stack exclusion:** When a tool calls `task()`, the calling tool is automatically excluded from the nested agent's available tools to prevent infinite recursion. This happens in addition to any manual scoping via `with_tools/2` or `without_tools/2`.
+
+---
+
+### Model Selection
+
+#### `with_model(+Spec, +Goal)`
+
+Run `Goal` with a different model — and optionally a reasoning level — for every
+`task/N`, `prompt/N` and `sample_token/N` call inside it. Judgments
+(`choose/rate/verify/probability`) are not affected.
+
+```prolog
+% a cheap model for classification
+with_model("openai:gpt-4o-mini",
+    prompt("Classify as billing/orders/account: {Message}", Team)).
+
+% a strong model with high reasoning, only for the hard step
+with_model("anthropic:claude-sonnet-4#high",
+    task("Review this diff and list defects:\n{Diff}", Notes)).
+
+% full control with a dict
+with_model(model{provider: "google", id: "gemini-2.5-pro",
+                 temperature: 0.2, maxTokens: 8192}, Goal).
+```
+
+`Spec` is a string — `"provider:model"`, `"provider/model"`, `"model"`, each with
+an optional `#reasoning` suffix (`off|minimal|low|medium|high|xhigh|max`) — or a
+`model{provider, id, temperature, maxTokens, reasoning}` dict. The innermost
+`with_model` wins, and a nested `with_reasoning/2` overrides the spec's reasoning.
+The default is the session's active model. An unknown or unsigned-in model fails
+with a clear error.
 
 ---
 

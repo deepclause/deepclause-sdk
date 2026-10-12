@@ -16,6 +16,8 @@ export type TranscriptLineStyle = 'user' | 'steer';
 interface TranscriptEntry {
   text: string;
   style?: TranscriptLineStyle;
+  /** Raw terminal-image line: never wrapped or styled. */
+  image?: boolean;
 }
 
 /** A `Component` holding committed entries plus one live (unterminated) line. */
@@ -48,6 +50,17 @@ export class TranscriptComponent implements Component {
     this.onChange?.();
   }
 
+  /** Append a terminal-image block (escape sequence plus reserved blank rows). */
+  appendImageLines(lines: string[]): void {
+    for (const line of lines) {
+      this.entries.push({ text: line, image: true });
+    }
+    if (this.entries.length > this.maxLines) {
+      this.entries.splice(0, this.entries.length - this.maxLines);
+    }
+    this.onChange?.();
+  }
+
   getLines(): string[] {
     return this.entries.map((entry) => entry.text);
   }
@@ -70,6 +83,12 @@ export class TranscriptComponent implements Component {
     // every line fits, which `TuiMainScreen` requires.
     const out: string[] = [];
     for (const entry of source) {
+      if (entry.image) {
+        // Image lines carry an escape sequence (or a cursor-move prefix) and
+        // must not be wrapped or measured.
+        out.push(entry.text);
+        continue;
+      }
       // Styled blocks reserve room for their label/padding.
       const wrapWidth = entry.style === 'user'
         ? Math.max(1, width - 2)

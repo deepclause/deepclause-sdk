@@ -19,6 +19,7 @@ import type {
   ToolDefinition,
 } from '../types.js';
 import { compactMemory, shouldCompact, type CompactionSettings, type CompactMemoryResult } from './compaction.js';
+import { formatModelCatalogEntry, type ModelCatalogEntry } from './model-resolver.js';
 
 export interface HarnessAgentOptions {
   tools: Map<string, ToolDefinition>;
@@ -29,10 +30,19 @@ export interface HarnessAgentOptions {
   streaming?: boolean;
   /** Maximum model calls for one `run` (0 = unlimited). */
   maxModelCalls?: number;
+  /**
+   * Ask the human a question mid-turn (used to ask whether to extend the
+   * model-call budget). Returns undefined when there is no interactive channel.
+   */
+  askInput?: (prompt: string, options?: string[]) => Promise<string | undefined>;
   contextWindow?: number;
   compaction?: { settings: CompactionSettings; auto: boolean };
   /** Workspace root, so a `.deepclause/system/AGENT_PROMPT.md` override is used. */
   workspacePath?: string;
+  /** The session's active model (`provider:model`), shown to the agent. */
+  currentModel?: string;
+  /** Models available this session (via `with_model/2`). */
+  modelCatalog?: ModelCatalogEntry[];
   /** Pre-loaded documentation for the `reference` tool (handled by the controller). */
   knownMessages?: MemoryMessage[];
 }
@@ -64,12 +74,28 @@ export function describeTools(tools: Map<string, ToolDefinition>): string {
  */
 export async function buildAgentSystemPrompt(options: {
   workspacePath?: string;
+  currentModel?: string;
+  modelCatalog?: ModelCatalogEntry[];
 } = {}): Promise<string> {
   let prompt = '';
   try {
     prompt = await readAgentPromptAsset({ workspacePath: options.workspacePath });
   } catch {
     prompt = 'You are an agent with access to a DML REPL.';
+  }
+
+  // The models this session can switch to with `with_model/2`, with catalog prices.
+  const catalog = options.modelCatalog ?? [];
+  if (options.currentModel || catalog.length > 0) {
+    const shown = catalog.slice(0, 60).map(formatModelCatalogEntry);
+    prompt += [
+      '',
+      'AVAILABLE MODELS  (price = USD per 1M tokens, input/output)',
+      options.currentModel ? `- current: ${options.currentModel}` : '',
+      shown.length > 0 ? `- with_model targets: ${shown.join(', ')}${catalog.length > shown.length ? ', …' : ''}` : '',
+      '- Pick the cheapest model that can do the job; use `with_model/2` to route calls.',
+      '- Other models may be configured with `deepclause login`; a `with_model` spec must name one of these.',
+    ].filter(Boolean).join('\n') + '\n';
   }
 
   // Append a workspace `AGENTS.md` so repo-specific rules always apply.
@@ -202,6 +228,27 @@ export class HarnessAgent {
     return result;
   }
 
+  /**
+   * Ask the human whether to continue after the model-call budget is exhausted.
+   * Returns false when there is no interactive channel (autonomous runs keep the
+   * current abort behaviour).
+   */
+  private async askBudgetExtension(used: number): Promise<boolean> {
+    const ask = this.options.askInput;
+    if (!ask) {
+      return false;
+    }
+    const perChunk = this.options.maxModelCalls ?? 0;
+    const answer = await ask(
+      `The authoring turn has reached its model-call budget (${used} calls).\n`
+      + `Continue for another ${perChunk} calls? [yes/no]\n`
+      + 'change the limit: repl.maxModelCalls in .deepclause/config.json '
+      + '("repl": { "maxModelCalls": N }), or pass --max-model-calls N; 0 means unlimited',
+      ['yes', 'no'],
+    );
+    return /^(y|yes)$/i.test((answer ?? '').trim());
+  }
+
   async *run(request: string, options: HarnessAgentRunOptions = {}): AsyncGenerator<DMLEvent> {
     const { llmBackend, tools } = this.options;
     const streaming = this.options.streaming ?? true;
@@ -211,6 +258,8 @@ export class HarnessAgent {
 
     const systemPrompt = await buildAgentSystemPrompt({
       workspacePath: this.options.workspacePath,
+      currentModel: this.options.currentModel,
+      modelCatalog: this.options.modelCatalog,
     });
 
     this.messages.push({ role: 'user', content: request });
@@ -222,6 +271,9 @@ export class HarnessAgent {
     }));
 
     let calls = 0;
+    // The model-call budget for this turn; `0` means unlimited. It grows by
+    // `maxModelCalls` each time the human agrees to continue.
+    let budget = maxModelCalls;
     let finished = false;
     let lastText = '';
     let lastInputTokens: number | undefined;
@@ -229,9 +281,17 @@ export class HarnessAgent {
 
     while (!finished && calls < maxIterations) {
       if (options.signal?.aborted) break;
-      if (maxModelCalls > 0 && calls >= maxModelCalls) {
-        yield { type: 'error', content: `model-call budget exhausted (${maxModelCalls})` };
-        break;
+      if (budget > 0 && calls >= budget) {
+        const extend = await this.askBudgetExtension(budget);
+        if (!extend) {
+          yield {
+            type: 'error',
+            content: `authoring turn stopped: model-call budget exhausted (${budget} calls). `
+              + 'Raise repl.maxModelCalls in .deepclause/config.json (or pass --max-model-calls); 0 = unlimited.',
+          };
+          break;
+        }
+        budget += maxModelCalls;
       }
       calls += 1;
 

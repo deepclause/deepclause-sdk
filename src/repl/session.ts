@@ -26,6 +26,7 @@ import { createHarnessTools } from './harness-tools.js';
 import type { HarnessCommitResult, HarnessExecuteResult } from './harness-tools.js';import type {
   DMLEvent,
   FrameKind,
+  ImageBackend,
   LLMBackend,
   MemoryMessage,
   ToolDefinition,
@@ -45,6 +46,35 @@ import {
   type HistoryTurnRecord,
   type SessionHarnessSnapshot,
 } from './history.js';
+import {
+  buildDiagramPrompt,
+  extractMermaid,
+  parseMermaidFlowchart,
+  rasterizeSvg,
+  renderFlowchartSvg,
+  renderMermaidAscii,
+  resolveMedia,
+  validateMermaid,
+  type DiagramMode,
+} from '../visualize/index.js';
+import { generateLlmReply } from '../prolog/bridge.js';
+import type { Provider } from '../system/config/model-slots.js';
+import type { ModelResolver } from './model-resolver.js';
+import { formatModelCatalogEntry } from './model-resolver.js';
+
+/** A generated diagram of one harness entry predicate. */
+export interface DiagramResult {
+  entry: string;
+  mode: DiagramMode;
+  mermaid: string;
+  /** Unicode tree (always available, terminal-safe). */
+  ascii: string;
+  /** Self-contained SVG (input to the PNG rasterizer). */
+  svg: string;
+  width: number;
+  height: number;
+  warnings: string[];
+}
 
 export interface DMLSessionOptions {
   /** Optional explicit session id; generated when omitted. */
@@ -136,6 +166,8 @@ export class DMLSession {
   private compactionAuto = false;
   private contextWindow?: number;
   private llmBackend?: LLMBackend;
+  private imageBackend?: ImageBackend;
+  private modelResolver?: ModelResolver;
   private temperature = 0.7;
   private maxTokens = 65536;
   /** Persisted authoring-agent conversation (agent mode). */
@@ -197,12 +229,14 @@ export class DMLSession {
     this.compactionAuto = options.compaction?.auto ?? false;
     this.contextWindow = options.contextWindow;
     this.llmBackend = options.runnerOptions.llmBackend;
+    this.imageBackend = options.runnerOptions.imageBackend;
+    this.modelResolver = options.runnerOptions.modelResolver;
     this.temperature = options.runnerOptions.temperature;
     this.maxTokens = options.runnerOptions.maxTokens;
     this.runner = new DMLRunner(swipl, {
       ...options.runnerOptions,
       compactMessages: options.compaction
-        ? (messages, lastInputTokens) => this.compactLoopMessages(messages, lastInputTokens)
+        ? (messages, lastInputTokens, contextWindow) => this.compactLoopMessages(messages, lastInputTokens, contextWindow)
         : undefined,
     });
     this.runner.bindSession(this.sessionId);
@@ -746,6 +780,11 @@ export class DMLSession {
     return String(plainValue(result?.Text) ?? '').trim() === '';
   }
 
+  /** Number of user predicates (`Name/Arity`) currently in the harness. */
+  predicateCount(): number {
+    return this.predicateList().length;
+  }
+
   async saveCurrentHarness(
     reason: string,
     header: string = `aborted turn: ${reason}`,
@@ -961,8 +1000,16 @@ export class DMLSession {
     try {
       for await (const event of this.runner.runFrame(frame.id, this.buildRunOptions({ signal }))) {
         onEvent?.(event);
-        if (event.type === 'solution' && solutions.length < limit) {
-          solutions.push(event.solution?.bindings ?? []);
+        if (event.type === 'solution') {
+          if (solutions.length < limit) {
+            solutions.push(event.solution?.bindings ?? []);
+          }
+          // Stop enumerating once the limit is reached: a nondeterministic goal
+          // (e.g. an unlabelled CLP model) can otherwise produce unbounded
+          // solutions and flood the session before the turn timeout.
+          if (solutions.length >= limit) {
+            break;
+          }
         } else if (event.type === 'output' || event.type === 'answer') {
           output += `${event.content ?? ''}\n`;
         } else if (event.type === 'error') {
@@ -1097,11 +1144,14 @@ export class DMLSession {
       maxTokens: this.maxTokens,
       streaming: true,
       maxModelCalls: this.maxModelCalls,
+      askInput: (prompt, options) => this.requireInput(prompt, options),
       contextWindow: this.contextWindow,
       compaction: this.compactionSettings
         ? { settings: this.compactionSettings, auto: this.compactionAuto }
         : undefined,
       workspacePath: this.workspacePath,
+      currentModel: `${this.provider}:${this.model}`,
+      modelCatalog: this.modelResolver?.catalog(),
       knownMessages: this.agentMessages,
     });
     return this.harnessAgent;
@@ -1110,6 +1160,137 @@ export class DMLSession {
   /** Read the current harness manifest for the agent system prompt. */
   async manifest(): Promise<string> {
     return this.manifestText();
+  }
+
+  /** The models available in this session (agent `models` tool). */
+  async listModels(): Promise<string> {
+    const current = `${this.provider}:${this.model}`;
+    const resolver = this.modelResolver;
+    if (!resolver) {
+      return `current model: ${current}\n(no model catalog is configured; with_model is unavailable)`;
+    }
+    const models = resolver.catalog();
+    const body = models.length > 0
+      ? models.map((model) => `  ${formatModelCatalogEntry(model)}`).join('\n')
+      : '  (none)';
+    return `current model: ${current}\n\navailable models (price = USD per 1M tokens, input/output):\n${body}`;
+  }
+
+  /**
+   * Generate a diagram of one entry predicate: ask the active model for Mermaid,
+   * then render it deterministically to a Unicode tree (always) and an SVG (for
+   * the terminal-image path). One model call.
+   */
+  async diagram(
+    entry?: string,
+    mode: DiagramMode = 'presentation',
+    options: { signal?: AbortSignal } = {},
+  ): Promise<DiagramResult> {
+    if (!this.llmBackend) {
+      throw new Error('diagram generation needs a model backend');
+    }
+    const listing = await this.listing('all');
+    const resolved = (entry ?? '').trim() || this.defaultDiagramEntry(listing);
+    if (!resolved) {
+      throw new Error('the harness has no predicate to diagram yet');
+    }
+    const prompt = buildDiagramPrompt({ entry: resolved, mode, listing });
+    const { text } = await generateLlmReply({
+      messages: [{ role: 'user', content: prompt }],
+      modelOptions: { provider: this.provider as Provider, model: this.model, temperature: this.temperature },
+      llmBackend: this.llmBackend,
+      signal: options.signal,
+    });
+    const mermaid = extractMermaid(text);
+    const warnings = validateMermaid(mermaid);
+    const svg = renderFlowchartSvg(parseMermaidFlowchart(mermaid));
+    return {
+      entry: resolved,
+      mode,
+      mermaid,
+      ascii: renderMermaidAscii(mermaid),
+      svg: svg.svg,
+      width: svg.width,
+      height: svg.height,
+      warnings,
+    };
+  }
+
+  /** Diagram of a skill for the authoring agent's `visualize` tool. */
+  async visualize(entry?: string, mode: DiagramMode = 'presentation'): Promise<{ message: string; event?: DMLEvent }> {
+    const result = await this.diagram(entry, mode);
+    const png = await rasterizeSvg(result.svg, { width: result.width, height: result.height });
+    if (png) {
+      return {
+        message: `Diagram of ${result.entry} (${result.mode}) is displayed to the user as an image. Do not repeat the diagram text.`,
+        event: { type: 'media', media: { mimeType: 'image/svg+xml', data: png.toString('base64') } },
+      };
+    }
+    return { message: result.ascii };
+  }
+
+  /** Display a workspace image (agent `show_image` tool). */
+  async showImage(relPath: string): Promise<{ message: string; event?: DMLEvent }> {
+    return this.mediaEventFor(relPath);
+  }
+
+  /** Generate an image and display it (agent `generate_image` tool). */
+  async generateImage(prompt: string): Promise<{ message: string; event?: DMLEvent }> {
+    if (!this.imageBackend) {
+      return { message: 'Image generation is unavailable: no image backend is configured.' };
+    }
+    const result = await this.imageBackend.generate({ prompt });
+    const shown = await this.mediaEventFor(result.path);
+    return { message: `Generated ${result.path} (${result.mimeType}). ${shown.message}`, event: shown.event };
+  }
+
+  /** Write a workspace file (agent `write_file` tool); creates parent dirs. */
+  async writeFile(relPath: string, content: string): Promise<{ ok: boolean; error?: string }> {
+    try {
+      const abs = this.resolveWorkspacePath(relPath);
+      await fs.mkdir(path.dirname(abs), { recursive: true });
+      await fs.writeFile(abs, content, 'utf8');
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: (error as Error).message };
+    }
+  }
+
+  /**
+   * Build a `media` event for a workspace image (resolved to a PNG for inline
+   * display). Returning an event lets any host render it through its normal
+   * event pipeline — no session-specific image channel needed.
+   */
+  private async mediaEventFor(relPath: string): Promise<{ message: string; event?: DMLEvent }> {
+    const resolved = await resolveMedia(this.workspacePath ?? process.cwd(), { path: relPath });
+    if (!resolved) {
+      return { message: `Cannot read image ${relPath}.` };
+    }
+    const event: DMLEvent = {
+      type: 'media',
+      media: { path: relPath, mimeType: resolved.mimeType, data: resolved.pngBase64 },
+    };
+    const message = resolved.pngBase64
+      ? `Image ${relPath} (${resolved.mimeType}) is displayed to the user.`
+      : `Image ${relPath} (${resolved.mimeType}) is at workspace path ${relPath} `
+        + '(not rasterized for inline display: SVG needs @resvg/resvg-js, rasters need sharp).';
+    return { message, event };
+  }
+
+  /** Pick a default diagram entry: `agent_main/N`, else the first predicate. */
+  private defaultDiagramEntry(listing: string): string | undefined {
+    const mains = this.predicateArities('agent_main');
+    if (mains.length > 0) {
+      return `agent_main/${mains[0]}`;
+    }
+    const reserved = new Set(['doc', 'module_doc', 'tool', 'system', 'user', 'param', 'parameters', 'answer']);
+    for (const line of listing.split('\n')) {
+      const match = /^([a-z][A-Za-z0-9_]*)\/(\d+)\s*$/.exec(line.trim());
+      if (match && !reserved.has(match[1])) {
+        return `${match[1]}/${match[2]}`;
+      }
+    }
+    return undefined;
   }
 
   async beginTurn(): Promise<void> {
@@ -1126,18 +1307,67 @@ export class DMLSession {
     const before = this.transactionBefore;
     const after = this.predicateList();
     const changed = this.simplePredicateDiff(before, after);
+    const touched = this.editTouched();
     this.transactionBefore = null;
     const committed = this.transactionDirty;
     let version: number | undefined;
     if (committed && this.history) {
-      version = await this.recordHistoryChange('commit', this.turnCounter, before, { touched: this.editTouched() });
+      version = await this.recordHistoryChange('commit', this.turnCounter, before, { touched });
     }
     this.lastTurnCommitted = committed;
     this.lastCommitVersion = version;
     this.transactionDirty = false;
     this.prologQuery(`deepclause_mi:repl_edit_touched_clear('${this.sessionId}')`);
     await this.persistSessionHarness(this.history?.currentVersion ?? 0);
-    return { committed: true, changed };
+
+    // Advisory: probe changed pure predicates for accidental nondeterminism.
+    let warnings: string[] = [];
+    if (committed) {
+      const candidates = new Set<string>();
+      for (const entry of touched) candidates.add(entry.trim());
+      for (const entry of changed) if (entry.startsWith('+')) candidates.add(entry.slice(1));
+      warnings = await this.probeNondeterminism([...candidates]);
+    }
+    return { committed: true, changed, warnings };
+  }
+
+  /**
+   * Probe changed predicates for accidental nondeterminism: a pure predicate
+   * that yields more than `threshold` solutions on fresh variables is very likely
+   * missing an `once/1`/`!` and would flood an `execute`. Fact tables and
+   * side-effecting predicates are skipped by the Prolog probe.
+   */
+  private async probeNondeterminism(indicators: string[]): Promise<string[]> {
+    const reserved = new Set(['doc', 'module_doc', 'tool']);
+    const warnings: string[] = [];
+    const threshold = 100;
+    const bound = 200000;
+    for (const indicator of indicators.slice(0, 8)) {
+      const match = /^([a-z][A-Za-z0-9_]*)\/(\d+)$/.exec(indicator);
+      if (!match || reserved.has(match[1])) continue;
+      const name = match[1];
+      const arity = match[2];
+      try {
+        const result = this.prologQuery(
+          `deepclause_mi:repl_probe_nondeterminism('${this.sessionId}', ${name}, ${arity}, ${threshold}, ${bound}, Result)`,
+        );
+        const verdict = String(plainValue(result?.Result) ?? '');
+        if (verdict === 'many') {
+          warnings.push(
+            `${name}/${arity} yields more than ${threshold} solutions when called with fresh variables. `
+            + 'If a single answer is intended, make it deterministic with once/1 or !.',
+          );
+        } else if (verdict === 'timeout') {
+          warnings.push(
+            `${name}/${arity} did not settle within the inference limit when probed `
+            + '(possible unbounded search, e.g. label/1 without once/1).',
+          );
+        }
+      } catch {
+        // A probe failure must never fail the commit.
+      }
+    }
+    return warnings;
   }
 
   /** Predicates touched by edit tools in the current transaction. */
@@ -1356,13 +1586,14 @@ export class DMLSession {
   private async compactLoopMessages(
     messages: MemoryMessage[],
     lastInputTokens?: number,
+    contextWindow?: number,
   ): Promise<{ messages: MemoryMessage[]; event?: DMLEvent }> {
     const settings = this.compactionSettings;
     if (!settings?.enabled || !this.llmBackend) {
       return { messages };
     }
     const contextTokens = lastInputTokens ?? estimateMemoryTokens(messages);
-    if (!shouldCompact(contextTokens, this.contextWindow ?? 0, settings)) {
+    if (!shouldCompact(contextTokens, contextWindow ?? this.contextWindow ?? 0, settings)) {
       return { messages };
     }
     const result = await compactMemory({
@@ -1432,6 +1663,14 @@ export class DMLSession {
     this.inputHandler = handler;
   }
 
+  /**
+   * @deprecated Terminal images now flow as `media` events (rendered by the
+   * host), so this is a no-op kept for backwards compatibility.
+   */
+  setImageHandler(_handler?: (lines: string[]) => void): void {
+    // no-op
+  }
+
   /** Resolve a human answer, or undefined when no channel is configured. */
   private async requireInput(prompt: string, options?: string[]): Promise<string | undefined> {
     if (!this.inputHandler) {
@@ -1466,7 +1705,10 @@ export class DMLSession {
       return false;
     }
     const answer = await this.inputHandler(
-      `Max model-call budget reached (${this.modelCallBudget}). Continue for another ${this.maxModelCalls} calls? (yes/no)`,
+      `Max model-call budget reached (${this.modelCallBudget}). Continue for another ${this.maxModelCalls} calls? (yes/no)\n`
+      + 'change the limit: repl.maxModelCalls in .deepclause/config.json '
+      + '("repl": { "maxModelCalls": N }), or pass --max-model-calls N; 0 means unlimited',
+      ['yes', 'no'],
     );
     return /^(y|yes)$/i.test((answer ?? '').trim());
   }

@@ -10,7 +10,7 @@ import { anthropic, createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { generateText } from 'ai';
 import type { LanguageModel } from 'ai';
-import type { MemoryMessage, LLMBackend, LLMBackendMedia, LLMBackendMessage, MediaRef, LLMUsage } from '../types.js';
+import type { MemoryMessage, LLMBackend, LLMBackendMedia, LLMBackendMessage, MediaRef, LLMUsage, ResolvedModel } from '../types.js';
 
 export interface RawProviderResponseSnapshot {
   requestId: string;
@@ -32,6 +32,7 @@ export interface SampleSingleTokenOptions {
     baseUrl?: string;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     providerOptions?: Record<string, Record<string, any>>;
+    target?: ResolvedModel;
   };
   signal?: AbortSignal;
   debugLog?: (...args: unknown[]) => void;
@@ -49,6 +50,7 @@ export interface GenerateLlmReplyOptions {
     baseUrl?: string;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     providerOptions?: Record<string, Record<string, any>>;
+    target?: ResolvedModel;
   };
   signal?: AbortSignal;
   debugLog?: (...args: unknown[]) => void;
@@ -629,6 +631,7 @@ export async function sampleSingleToken(options: SampleSingleTokenOptions): Prom
       messages: [{ role: 'user', content: buildSampleTokenPrompt(options.prompt, options.allowedTokens) }],
       temperature: options.modelOptions.temperature,
       maxTokens: 1,
+      target: options.modelOptions.target,
       signal: options.signal,
     });
     const token = options.allowedTokens && options.allowedTokens.length > 0
@@ -680,6 +683,7 @@ export async function generateLlmReply(options: GenerateLlmReplyOptions): Promis
       messages,
       temperature: options.modelOptions.temperature,
       maxTokens: options.modelOptions.maxOutputTokens,
+      target: options.modelOptions.target,
       signal: options.signal,
     });
     return { text: result.text, usage: result.usage };

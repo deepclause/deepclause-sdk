@@ -211,3 +211,13 @@ export async function writeMermaid(mmdPath: string, source: string): Promise<voi
   await fs.mkdir(path.dirname(path.resolve(mmdPath)), { recursive: true });
   await fs.writeFile(mmdPath, `${source.trim()}\n`, 'utf8');
 }
+
+// Terminal rendering: Mermaid → Unicode tree, Mermaid → SVG → PNG (no browser),
+// and phone into pi-tui's Kitty/iTerm2 inline-image encoder.
+export * from './ascii.js';
+export * from './svg.js';
+export * from './raster.js';
+export * from './graphics.js';
+export * from './display.js';
+export * from './image.js';
+export * from './transcode.js';

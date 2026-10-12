@@ -110,6 +110,8 @@ describe('visualizeHarness', () => {
     expect(result.warnings).toEqual([]);
     expect(result.imagePath).toBeUndefined();
     expect(result.mermaid).toContain('flowchart TD');
+    expect(result.ascii).toContain('router');
+    expect(result.svg).toContain('<svg');
     expect(await fs.readFile(outPath, 'utf8')).toContain('router');
 
     expect(backend.calls).toHaveLength(1);
@@ -140,5 +142,23 @@ describe('visualizeHarness', () => {
       workspace,
       llmBackend: new CannedBackend('flowchart TD'),
     })).rejects.toThrow(/not router\/3/);
+  });
+
+  it('writes an SVG without a browser (canned backend)', async () => {
+    const dmlPath = path.join(workspace, 'harness.dml');
+    await fs.writeFile(dmlPath, HARNESS);
+    const outPath = path.join(workspace, 'router.svg');
+    const backend = new CannedBackend('flowchart TD\n  A["router"] --> B{"classify"}\n  B -->|billing| C["billing"]');
+
+    const result = await visualizeHarness(dmlPath, 'router/2', {
+      mode: 'presentation',
+      output: outPath,
+      workspace,
+      llmBackend: backend,
+    });
+
+    expect(result.imagePath).toBe(outPath);
+    expect(result.renderer).toBe('svg');
+    expect(await fs.readFile(outPath, 'utf8')).toContain('<svg');
   });
 });

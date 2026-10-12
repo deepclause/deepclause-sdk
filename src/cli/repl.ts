@@ -26,8 +26,17 @@ import { PromptEditor } from '../repl/tui/editor.js';
 import { loadProjectContext } from '../repl/project-context.js';
 import { createPiBackend } from '../repl/backend.js';
 import { createReplToolset, type ReplToolset } from '../repl/toolset.js';
+import { createPiImageBackend } from '../repl/imagegen.js';
+import { EnvModelResolver, PiModelResolver, type ModelResolver } from '../repl/model-resolver.js';
+import type { ImageBackend } from '../types.js';
 import { parseModelId, resolveModelSlotConfig, type Provider } from '../system/config/model-slots.js';
 import { loadReplConfig, resolveReplCompactionConfig, updateConfig } from './config.js';
+import {
+  renderDiagramImage,
+  resolveMedia,
+  type DiagramMode,
+  type GraphicsMode,
+} from '../visualize/index.js';
 
 export interface ReplCliOptions {
   goal?: string[];
@@ -71,6 +80,10 @@ export interface ReplCliOptions {
   noAsk?: boolean;
   answer?: string;
   interactiveInput?: boolean;
+  /** Image model for generation (`provider:id`); default: first available. */
+  imageModel?: string;
+  /** Hand images to the OS viewer when the terminal cannot render them. */
+  open?: boolean;
   /** Interactive UI: auto (TUI on a TTY), on, or off. */
   tui?: 'auto' | 'on' | 'off';
 }
@@ -91,11 +104,48 @@ export type ReplInput =
   | { kind: 'trace' }
   | { kind: 'notrace' }
   | { kind: 'params' }
+  | { kind: 'viz'; entry?: string; mode: DiagramMode; graphics: GraphicsMode }
+  | { kind: 'show'; path: string }
+  | { kind: 'gen'; prompt: string }
   | { kind: 'goal'; goal: string }
   | { kind: 'prompt'; prompt: string }
   | { kind: 'unknown-command'; name: string };
 
 const OUT_OF_BAND = new Set(['halt', 'help', 'reset', 'rollback', 'freeze', 'unfreeze', 'trace', 'notrace', 'params']);
+
+const GRAPHICS_MODES: GraphicsMode[] = ['auto', 'kitty', 'iterm2', 'ascii', 'off'];
+
+/** Parse the `/viz` argument list: `[entry] [--spec] [--graphics=<mode>]`. */
+export function parseVizArgs(arg: string): { entry?: string; mode: DiagramMode; graphics: GraphicsMode } {
+  const tokens = arg.split(/\s+/).filter(Boolean);
+  let entry: string | undefined;
+  let mode: DiagramMode = 'presentation';
+  let graphics: GraphicsMode = 'auto';
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token === '--spec') {
+      mode = 'spec';
+    } else if (token === '--presentation') {
+      mode = 'presentation';
+    } else if (token === '--ascii') {
+      graphics = 'ascii';
+    } else if (token === '--graphics') {
+      const value = tokens[i + 1] as GraphicsMode | undefined;
+      if (value && GRAPHICS_MODES.includes(value)) {
+        graphics = value;
+        i += 1;
+      }
+    } else if (token.startsWith('--graphics=')) {
+      const value = token.slice('--graphics='.length) as GraphicsMode;
+      if (GRAPHICS_MODES.includes(value)) {
+        graphics = value;
+      }
+    } else if (!token.startsWith('-') && !entry) {
+      entry = token;
+    }
+  }
+  return { entry, mode, graphics };
+}
 
 /** Render a recorded turn as the line the user would retype (goals get `/goal`). */
 export function formatTurnInput(turn: { mode: 'goal' | 'prompt'; request: string }): string {
@@ -155,6 +205,15 @@ export function classifyReplInput(line: string): ReplInput {
         return { kind: 'trace' };
       case 'notrace':
         return { kind: 'notrace' };
+      case 'viz':
+      case 'diagram':
+        return { kind: 'viz', ...parseVizArgs(arg) };
+      case 'show':
+      case 'image':
+        return arg ? { kind: 'show', path: arg } : { kind: 'unknown-command', name: 'show (missing path)' };
+      case 'gen':
+      case 'imagine':
+        return arg ? { kind: 'gen', prompt: arg } : { kind: 'unknown-command', name: 'gen (missing prompt)' };
       default:
         return { kind: 'unknown-command', name };
     }
@@ -304,6 +363,8 @@ export interface ReplRuntime {
   setOnInput(handler: (prompt: string, choices?: string[]) => Promise<string | undefined>): void;
   /** Set when the env backend has no credentials for the selected provider. */
   missingCredential?: string;
+  /** Image generator for `task(…, media(X))` and `/gen`. */
+  imageBackend?: ImageBackend;
 }
 
 const PROVIDER_ENV_KEYS: Record<string, string> = {
@@ -336,6 +397,8 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
     events: options.events !== false,
     reasoning: options.showReasoning ?? config.repl.showReasoning,
     onEvent: (event) => statusHolder.tracker?.observe(event),
+    workspace,
+    openImages: options.open !== false && config.repl.media.open !== false,
   });
   const statusHolder: { tracker?: ReplStatusTracker } = {};
 
@@ -368,6 +431,7 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
   let contextWindow: number | undefined;
   let reasoning = false;
   let thinkingLevel: string | undefined;
+  let modelResolver: ModelResolver | undefined;
   if (backendKind === 'pi') {
     try {
       const pi = await createPiBackend({
@@ -383,6 +447,7 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
       contextWindow = pi.contextWindow;
       reasoning = pi.reasoning;
       thinkingLevel = pi.thinkingLevel;
+      modelResolver = new PiModelResolver(pi.registry);
       if (pi.warning) process.stderr.write(`[deepclause] ${pi.warning}\n`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -398,6 +463,7 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
       modelId: options.model ?? config.models.run,
       temperature: options.temperature ?? config.temperatures.run,
     }).contextWindow;
+    modelResolver = new EnvModelResolver(String(harnessProvider));
   }
 
   // Judgment backends. `llm` reuses the active model/backend; `jev` is opt-in
@@ -465,6 +531,24 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
     }
   }
 
+  // Image generation for `task(…, media(X))`; best effort, pi backend only.
+  let imageBackend: ImageBackend | undefined;
+  if (backendKind === 'pi') {
+    try {
+      imageBackend = await createPiImageBackend({
+        workspacePath: workspace,
+        agentDir: config.backend?.agentDir ?? undefined,
+        modelsPath: config.backend?.modelsPath ?? undefined,
+        authPath: config.backend?.authPath ?? undefined,
+        model: options.imageModel ?? config.repl.media.imageModel,
+        dir: config.repl.media.dir,
+        size: config.repl.media.size,
+      });
+    } catch {
+      imageBackend = undefined;
+    }
+  }
+
   const repl = await createHarnessRepl({
     sessionId,
     resume,
@@ -480,6 +564,8 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
     hostToolsCatalog: toolset.catalog,
     llmBackend,
     judgeSelection,
+    imageBackend,
+    modelResolver,
     history: historyOptions,
     harness: harnessName,
     autoLoadHarness: !(options.load?.length),
@@ -487,6 +573,10 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
     contextWindow,
     onInput: buildCliOnInput(options),
   });
+
+  // Terminal images (agent `visualize` and `/viz`) are painted through the
+  // renderer; the TUI installs an image sink later, which this follows.
+  repl.session.setImageHandler((lines) => renderer.image(lines));
 
   let missingCredential: string | undefined;
 
@@ -517,6 +607,7 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
     promptPrefix: config.repl.promptPrefix ?? 'dml> ',
     toolset,
     version: PACKAGE_VERSION,
+    imageBackend,
     model: backendKind === 'pi' ? harnessModel : `${harnessProvider}:${harnessModel}`,
     backend: backendKind,
     contextWindow,
@@ -553,15 +644,27 @@ async function printBanner(runtime: ReplRuntime, loaded: string[]): Promise<void
   const accent = (text: string): string => paint(text, '36');
   const bold = (text: string): string => paint(text, '1');
 
-  const state = loaded.length > 0
+  const harnessFresh = runtime.repl.session.isEmpty();
+  const predicateCount = runtime.repl.session.predicateCount();
+  const harnessInfo = harnessFresh
+    ? 'new — no predicates yet'
+    : `${predicateCount} predicate${predicateCount === 1 ? '' : 's'}`;
+  const loadedState = loaded.length > 0
     ? `${loaded.length} file${loaded.length === 1 ? '' : 's'} loaded`
-    : (runtime.repl.session.isEmpty() ? 'blank harness' : 'harness loaded');
+    : undefined;
   const frozen = runtime.repl.isFrozen() ? `  ${paint(' FROZEN ', '41;97')}` : '';
+
+  const summary = [
+    loadedState ? dim(loadedState) : undefined,
+    paint(runtime.model, '35'),
+    dim(`backend ${runtime.backend}`),
+    `${dim('harness')} ${paint(runtime.harnessName, '35')} ${dim(`(${harnessInfo})`)}`,
+  ].filter((part): part is string => Boolean(part)).join(`  ${dim('·')}  `);
 
   const lines: string[] = [
     '',
     `  ${paint('DeepClause', '1;36')} ${paint('DML REPL', '1')}  ${dim(`v${runtime.version}`)}${frozen}`,
-    `  ${dim(state)}  ${dim('·')}  ${paint(runtime.model, '35')}  ${dim('·')}  ${dim(`backend ${runtime.backend}`)}  ${dim('·')}  ${dim(`harness ${runtime.harnessName}`)}`,
+    `  ${summary}`,
     `  ${dim(runtime.workspace)}`,
   ];
 
@@ -577,7 +680,7 @@ async function printBanner(runtime: ReplRuntime, loaded: string[]): Promise<void
   }
 
   // A short getting-started guide, shown on a fresh (blank) harness only.
-  if (runtime.repl.session.isEmpty()) {
+  if (harnessFresh) {
     lines.push(
       '',
       `  ${bold('Two modes.')} Plain English authors the harness; ${accent('/goal')} runs DML directly.`,
@@ -609,7 +712,7 @@ async function printBanner(runtime: ReplRuntime, loaded: string[]): Promise<void
     `  ${accent('/goal')} ${dim('<dml>')}            run a DML goal, e.g. ${dim('/goal member(X, [1,2,3])')}`,
     `  ${accent('<plain English>')}        author the harness`,
     '',
-    `  ${accent('/help')}  ${accent('/listing')}  ${accent('/export')}  ${accent('/freeze')}  ${accent('/model')}  ${accent('/halt')}`,
+    `  ${accent('/help')}  ${accent('/listing')}  ${accent('/viz')}  ${accent('/export')}  ${accent('/freeze')}  ${accent('/model')}  ${accent('/halt')}`,
   );
   if (runtime.historyEnabled) {
     lines.push(`  ${dim('resume later:')} deepclause repl --session ${runtime.sessionId}`);
@@ -714,6 +817,65 @@ export async function dispatchReplInput(
     case 'params':
       print('params: (see session configuration)');
       return true;
+    case 'viz': {      if (runtime.missingCredential) {
+        print(`ERROR: ${runtime.missingCredential}`);
+        return true;
+      }
+      let result;
+      try {
+        result = await repl.diagram(input.entry, input.mode, { signal: options.signal });
+      } catch (error) {
+        print(`ERROR: ${(error as Error).message}`);
+        return true;
+      }
+      print(`📊 ${input.mode} diagram of ${result.entry}`);
+      for (const warning of result.warnings) {
+        print(`  ⚠ ${warning}`);
+      }
+      const lines = await renderDiagramImage(result, {
+        graphics: input.graphics,
+        maxWidthCells: Math.max(20, renderer.getWidth() - 2),
+        maxHeightCells: Math.max(8, (process.stdout.rows ?? 40) - 8),
+      });
+      if (lines) {
+        renderer.image(lines);
+        return true;
+      }
+      print(result.ascii);
+      if (input.graphics !== 'ascii' && input.graphics !== 'off') {
+        print('(no terminal image support here — showing text; /viz --ascii to force text)');
+      }
+      return true;
+    }
+    case 'show': {
+      const resolved = await resolveMedia(runtime.workspace, { path: input.path });
+      if (!resolved) {
+        print(`ERROR: cannot read image ${input.path}`);
+        return true;
+      }
+      renderer.render({
+        type: 'media',
+        media: { path: input.path, mimeType: resolved.mimeType, data: resolved.pngBase64 },
+      });
+      return true;
+    }
+    case 'gen': {
+      if (!runtime.imageBackend) {
+        print('ERROR: image generation is unavailable (no image backend; sign in to a provider with image models, or pass --image-model)');
+        return true;
+      }
+      try {
+        const generated = await runtime.imageBackend.generate({ prompt: input.prompt, signal: options.signal });
+        const resolved = await resolveMedia(runtime.workspace, { path: generated.path, mimeType: generated.mimeType });
+        renderer.render({
+          type: 'media',
+          media: { path: generated.path, mimeType: generated.mimeType, data: resolved?.pngBase64 },
+        });
+      } catch (error) {
+        print(`ERROR: ${(error as Error).message}`);
+      }
+      return true;
+    }
     case 'goal':
       await runGoalWithRenderer(repl, input.goal, { first: options.first, renderer, signal: options.signal });
       return true;
@@ -743,6 +905,10 @@ function helpText(): string {
     '',
     '  Commands',
     '    /listing [filter]    inspect the harness (all | Name/Arity | tools | scripts)',
+    '    /viz [entry] [--spec] diagram of a skill, drawn in the terminal',
+    '                         (--graphics=auto|kitty|iterm2|ascii|off)',
+    '    /show <path>         display a workspace image inline',
+    '    /gen <prompt>        generate an image and display it',
     '    /help                this help',
     '    /reset               empty the harness',
     '    /rollback            undo the last change',
@@ -1009,6 +1175,7 @@ export async function runTui(
 
   // Redirect the renderer into the transcript (including error lines).
   runtime.renderer.setSink((text) => sink.write(text), (text) => sink.write(text));
+  runtime.renderer.setImageSink((lines) => transcript.appendImageLines(lines));
   runtime.renderer.setWidth(terminal.columns);
   const onResize = (): void => {
     runtime.renderer.setWidth(terminal.columns);
@@ -1333,6 +1500,8 @@ export function registerReplCommand(program: Command): void {
     .option('--no-tools', 'register no capability host tools')
     .option('--sandbox', 'run shell tools in AgentVM')
     .option('--no-ask', 'make ask_user / input/2 fail instead of prompting')
+    .option('--image-model <provider:id>', 'image model for generation (default: first available)')
+    .option('--no-open', 'do not hand images to the OS viewer on terminals without inline images')
     .option('--answer <text>', 'canned answer for any input request')
     .option('--interactive-input', 'allow input requests to read stdin in non-TTY/--json mode')
     .option('--tui <mode>', 'interactive UI: auto (TUI on a TTY), on, or off', (value: string) => {
@@ -1374,6 +1543,8 @@ export function registerReplCommand(program: Command): void {
         noTools: options.tools === false,
         sandbox: options.sandbox,
         noAsk: options.ask === false,
+        imageModel: options.imageModel,
+        open: options.open,
         answer: options.answer,
         interactiveInput: options.interactiveInput,
         tui: options.tui,

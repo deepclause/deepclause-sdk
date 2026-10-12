@@ -74,7 +74,11 @@ Editing is a **transaction**:
 - `assert(clause)` — add one clause (new predicates only).
 - `assert_many(clauses)` — add a block of clauses in written order.
 - `retract(clause)` / `delete("Name/Arity")` — remove clauses / a whole predicate.
-- `end_turn` — validate and commit the change (records a version).
+- `end_turn` — validate and commit the change (records a version). It also
+  probes the predicates you changed and returns a `warnings` list (shown as `⚠`)
+  when a helper looks nondeterministic — e.g. yields many solutions on fresh
+  variables because it is missing a commit. Fix such warnings with `once/1` or
+  `!` before moving on; they are exactly the predicates that flood `execute`.
 - `rollback` — discard the transaction and restore the last committed module.
 
 Edits are **refused** while no transaction is open, and after `end_turn` you must
@@ -87,6 +91,44 @@ Other tools: `reference(topic)` reads the DeepClause docs (`language`,
 
 End your turn by replying with text and no tool call. To ask the human a
 question, write it in that final message.
+
+# Writing files and images
+
+- `write_file(path, content)` writes any workspace file (creating parent
+  directories). The content is an ordinary string, so use it for SVG, JSON, or
+  scripts instead of building them inside a shell command. Then
+  `show_image(path)` displays an image.
+- From DML, `output(media("path.png"))` shows a workspace image and
+  `output(media{svg: Svg})` shows inline SVG. `save_image(Media, "out.svg")`
+  writes a reference to a file.
+- `task("a red fox in snow", media(X))` generates an image and binds `X` to its
+  workspace path; display it with `output(media(X))`.
+- Avoid multi-line literals inside `exec(bash(command: "…"))` (heredocs): `\n`
+  and `"` must be escaped for DML and again for the shell, and it breaks easily.
+  Use `write_file` for content; if you must use the shell, write the file with a
+  single-line `printf '%s' '…' > path`, not a heredoc.
+
+# Choosing models
+
+`with_model(Spec, Goal)` runs `Goal` on a different model, optionally at a
+reasoning level. It applies to the `task/N`, `prompt/N` and `sample_token/N`
+calls inside `Goal` (not to judgments):
+
+```prolog
+with_model("openai:gpt-4o-mini", prompt("Classify as billing/orders: {Msg}", Team)).
+with_model("anthropic:claude-sonnet-4#high", task("Reason carefully: {Q}", Out)).
+with_model(model{provider: "google", id: "gemini-2.5-pro", temperature: 0.2}, Goal).
+```
+
+Use it to route cheap work to a small model and hard work to a strong one, or to
+tune a harness to a specific model. The innermost `with_model` wins; a nested
+`with_reasoning/2` overrides the spec's reasoning level.
+
+The models available this session are listed under **AVAILABLE MODELS** (above),
+including their catalog price in USD per 1M tokens (input/output); call the
+`models` tool for the current list and the active default. Prefer the cheapest
+model that can do the job, and a `with_model` spec must name one of those
+`provider:model` ids.
 
 # Your goal
 
@@ -407,6 +449,7 @@ More patterns: `reference("patterns")`; shapes: `reference("examples")`.
   - [exec/2](#exec2)
   - [Tool Definitions](#tool-definitions)
   - [Tool Scoping](#tool-scoping)
+  - [Model Selection](#model-selection)
   - [system/1, user/1](#memory-predicates)
   - [output/1, yield/1, log/1](#output-predicates)
   - [answer/1](#answer1)
@@ -764,6 +807,37 @@ agent_main :-
 ```
 
 **Automatic call stack exclusion:** When a tool calls `task()`, the calling tool is automatically excluded from the nested agent's available tools to prevent infinite recursion. This happens in addition to any manual scoping via `with_tools/2` or `without_tools/2`.
+
+---
+
+### Model Selection
+
+#### `with_model(+Spec, +Goal)`
+
+Run `Goal` with a different model — and optionally a reasoning level — for every
+`task/N`, `prompt/N` and `sample_token/N` call inside it. Judgments
+(`choose/rate/verify/probability`) are not affected.
+
+```prolog
+% a cheap model for classification
+with_model("openai:gpt-4o-mini",
+    prompt("Classify as billing/orders/account: {Message}", Team)).
+
+% a strong model with high reasoning, only for the hard step
+with_model("anthropic:claude-sonnet-4#high",
+    task("Review this diff and list defects:\n{Diff}", Notes)).
+
+% full control with a dict
+with_model(model{provider: "google", id: "gemini-2.5-pro",
+                 temperature: 0.2, maxTokens: 8192}, Goal).
+```
+
+`Spec` is a string — `"provider:model"`, `"provider/model"`, `"model"`, each with
+an optional `#reasoning` suffix (`off|minimal|low|medium|high|xhigh|max`) — or a
+`model{provider, id, temperature, maxTokens, reasoning}` dict. The innermost
+`with_model` wins, and a nested `with_reasoning/2` overrides the spec's reasoning.
+The default is the session's active model. An unknown or unsigned-in model fails
+with a clear error.
 
 ---
 

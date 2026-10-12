@@ -12,6 +12,21 @@ function capture(mode: 'rich' | 'plain' | 'json', color = true, width = 100): { 
     mode,
     color,
     width,
+    // Drop in-place spinner redraws (`\r…`); line-based assertions want the
+    // settled lines only. Use `captureRaw` when the spinner itself is under test.
+    sink: (text) => { if (!text.startsWith('\r')) lines.push(text); },
+    errorSink: (text) => lines.push(text),
+  });
+  return { lines, renderer };
+}
+
+/** Like `capture`, but keeps the raw sink chunks (including `\r` spinner redraws). */
+function captureRaw(mode: 'rich' | 'plain' | 'json', color = true, width = 100): { lines: string[]; renderer: ReplRenderer } {
+  const lines: string[] = [];
+  const renderer = new ReplRenderer({
+    mode,
+    color,
+    width,
     sink: (text) => lines.push(text),
     errorSink: (text) => lines.push(text),
   });
@@ -21,6 +36,20 @@ function capture(mode: 'rich' | 'plain' | 'json', color = true, width = 100): { 
 const ANSI_PATTERN = /\u001b\[[0-9;]*m/;
 
 describe('ReplRenderer', () => {
+  it('shows a live running indicator for any tool call while it executes', () => {
+    const { lines, renderer } = captureRaw('rich');
+    renderer.render({ type: 'tool_call', toolName: 'bash', toolArgs: { command: 'sleep 1' }, toolState: 'running', toolPid: 42 } as DMLEvent);
+    renderer.render({ type: 'tool_call', toolName: 'execute', toolArgs: {}, toolState: 'running' } as DMLEvent);
+    const output = lines.join('');
+    expect(output).toContain('bash [42] running…');
+    expect(output).toContain('execute running…');
+    expect(output).toContain('\r'); // the spinner redraws in place
+    // Completion replaces the spinner with the finished line.
+    renderer.render({ type: 'tool_call', toolName: 'bash', toolState: 'completed', toolResult: { success: true, exitCode: 0 } } as DMLEvent);
+    expect(lines.join('')).toContain('✔ bash');
+    renderer.dispose();
+  });
+
   it('stream:false / events:false hide activity but keep outputs and answers', () => {
     const lines: string[] = [];
     const renderer = new ReplRenderer({
@@ -265,7 +294,7 @@ describe('ReplRenderer', () => {
   it('shows a live spinner while a model call is in progress (rich mode)', () => {
     vi.useFakeTimers();
     try {
-      const { lines, renderer } = capture('rich', true, 80);
+      const { lines, renderer } = captureRaw('rich', true, 80);
       renderer.render({ type: 'model_call', modelCallState: 'started', modelId: 'gpt-x', frameKind: 'meta' } as DMLEvent);
       expect(lines.join('')).toContain('working…');
       // The frame is rewritten in place (carriage return + clear line).

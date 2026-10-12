@@ -68,6 +68,65 @@ export interface MediaRef {
   mimeType: string;
 }
 
+/**
+ * A parsed `model_spec` from a `with_model/2` scope: a provider+id with optional
+ * temperature/maxTokens/reasoning overrides. `default`/`none` means "no override".
+ */
+export type ModelSpec =
+  | 'default'
+  | {
+      provider?: string;
+      id: string;
+      temperature?: number;
+      maxTokens?: number;
+      /** Reasoning level (`off|minimal|low|medium|high|xhigh|max`). */
+      reasoning?: string;
+    };
+
+/** A fully resolved model profile used for one call. */
+export interface ResolvedModel {
+  provider: string;
+  id: string;
+  temperature?: number;
+  maxTokens?: number;
+  /** Context window, for nested compaction thresholds. */
+  contextWindow?: number;
+  /** Whether the model supports a reasoning/thinking mode. */
+  reasoning: boolean;
+  /** Requested reasoning level for this scope, if any. */
+  reasoningLevel?: string;
+  /** For the env backend: how reasoning maps to provider options. */
+  reasoningType?: 'effort' | 'budget_tokens' | 'thinking_config' | 'none';
+  reasoningBudgetMap?: Record<string, number>;
+  /** For the pi backend: thinking levels the model accepts. */
+  supportedThinkingLevels?: string[];
+}
+
+/** Request passed to an injected image-generation backend (see `task/…, media(X))`). */
+export interface ImageGenerationRequest {
+  /** The prompt (the task description, interpolated). */
+  prompt: string;
+  /** Attached input images, for image-to-image. */
+  refs?: MediaRef[];
+  /** Optional square/edge size in px. */
+  size?: number;
+  signal?: AbortSignal;
+}
+
+export interface ImageGenerationResult {
+  /** Workspace-relative path of the written image. */
+  path: string;
+  mimeType: string;
+}
+
+/**
+ * A host image generator. The pi backend implements this on top of pi's image
+ * models and credential store; tests inject a canned one.
+ */
+export interface ImageBackend {
+  generate(request: ImageGenerationRequest): Promise<ImageGenerationResult>;
+}
+
 /** Resolved media bytes attached to a backend message (base64). */
 export interface LLMBackendMedia {
   mimeType: string;
@@ -110,6 +169,8 @@ export interface LLMBackendRequest {
   onText?: (chunk: string) => void;
   /** Receives reasoning/thinking text as it becomes available (display only). */
   onReasoning?: (chunk: string) => void;
+  /** Per-call model override from `with_model/2`. */
+  target?: ResolvedModel;
 }
 
 export interface LLMBackendResponse {
@@ -217,7 +278,7 @@ export interface DMLEvent extends FrameEventMeta {
   type: 'output' | 'log' | 'answer' | 'input_required' | 'error' | 'finished' | 'stream' | 'reasoning' | 'tool_call' | 'model_call' | 'usage' | 'memory_compaction' | 'task_activity' | 'solution' | 'meta_result' | 'media';
   content?: string;
   /** Media produced by a step (path in the workspace, optional inline base64). */
-  media?: { path?: string; mimeType: string; data?: string };
+  media?: { path?: string; mimeType: string; data?: string; kind?: string };
   /** Model-call lifecycle (only for 'model_call' events). */
   modelCallState?: 'started' | 'completed' | 'failed';
   /** Model id for a 'model_call' event, when known. */
@@ -410,7 +471,7 @@ export type FrameKind = 'query' | 'nested' | 'object';
  */
 export interface TypedVar {
   name: string;
-  type: 'string' | 'number' | 'integer' | 'boolean' | 'array' | 'object';
+  type: 'string' | 'number' | 'integer' | 'boolean' | 'array' | 'object' | 'media';
   itemType?: TypedVar['type']; // For arrays
 }
 

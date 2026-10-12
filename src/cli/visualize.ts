@@ -7,6 +7,7 @@
  */
 
 import type { Command } from 'commander';
+import * as fs from 'fs/promises';
 import * as path from 'path';
 
 import { loadConfig } from './config.js';
@@ -19,7 +20,10 @@ import {
   buildDiagramPrompt,
   extractMermaid,
   parseEntry,
-  renderMermaidFile,
+  parseMermaidFlowchart,
+  rasterizeSvg,
+  renderFlowchartSvg,
+  renderMermaidAscii,
   resolveOutputPaths,
   validateMermaid,
   writeMermaid,
@@ -38,12 +42,16 @@ export interface VisualizeOptions {
   /** Injected backend (used by tests and hosts that already hold one). */
   llmBackend?: LLMBackend;
   signal?: AbortSignal;
+  /** Print a terminal-friendly ASCII diagram to stdout. */
+  ascii?: boolean;
 }
 
 export interface VisualizeResult {
   entry: string;
   mode: DiagramMode;
   mermaid: string;
+  ascii: string;
+  svg: string;
   mmdPath: string;
   imagePath?: string;
   renderer?: string;
@@ -117,16 +125,35 @@ export async function visualizeHarness(
 
     const mermaid = extractMermaid(text);
     const warnings = validateMermaid(mermaid);
+    const parsed = parseMermaidFlowchart(mermaid);
+    const svg = renderFlowchartSvg(parsed);
+    const ascii = renderMermaidAscii(mermaid);
 
     const { mmdPath, imagePath } = resolveOutputPaths(options.output, entryLabel);
     await writeMermaid(mmdPath, mermaid);
 
     let renderer: string | undefined;
     if (imagePath) {
-      renderer = await renderMermaidFile(mmdPath, imagePath);
+      if (imagePath.toLowerCase().endsWith('.svg')) {
+        // SVG needs no rasterizer and no browser.
+        await fs.mkdir(path.dirname(path.resolve(imagePath)), { recursive: true });
+        await fs.writeFile(imagePath, `${svg.svg.trim()}\n`, 'utf8');
+        renderer = 'svg';
+      } else {
+        const png = await rasterizeSvg(svg.svg, { width: svg.width, height: svg.height });
+        if (!png) {
+          throw new Error(
+            'cannot render PNG without the optional @resvg/resvg-js rasterizer; '
+            + 'use `-o out.svg`, `-o out.mmd`, or `--ascii`.',
+          );
+        }
+        await fs.mkdir(path.dirname(path.resolve(imagePath)), { recursive: true });
+        await fs.writeFile(imagePath, png);
+        renderer = 'resvg (no browser)';
+      }
     }
 
-    return { entry: entryLabel, mode: options.mode, mermaid, mmdPath, imagePath, renderer, warnings };
+    return { entry: entryLabel, mode: options.mode, mermaid, ascii, svg: svg.svg, mmdPath, imagePath, renderer, warnings };
   } finally {
     await session.dispose();
   }
@@ -140,7 +167,8 @@ export function registerVisualizeCommand(program: Command): void {
     .requiredOption('-g, --goal <pred/arity>', 'entry predicate to diagram, e.g. router/2')
     .option('--presentation', 'general-audience overview (default)')
     .option('--spec', 'engineering detail (decisions, calls, branches, fallbacks)')
-    .option('-o, --output <file>', 'output file: .mmd writes Mermaid, .png/.svg renders it')
+    .option('-o, --output <file>', 'output file: .mmd writes Mermaid, .svg/.png render it (no browser)')
+    .option('--ascii', 'print a terminal-friendly ASCII diagram to stdout')
     .option('--workspace <path>', 'workspace root for file operations', './')
     .option('--backend <kind>', 'model backend: pi (default) or env')
     .option('--model <model>', 'override configured model')
@@ -150,11 +178,16 @@ export function registerVisualizeCommand(program: Command): void {
         const result = await visualizeHarness(file, String(options.goal), {
           mode: options.spec ? 'spec' : 'presentation',
           output: typeof options.output === 'string' ? options.output : undefined,
+          ascii: options.ascii === true,
           workspace: typeof options.workspace === 'string' ? options.workspace : undefined,
           backend: options.backend as BackendKind | undefined,
           model: typeof options.model === 'string' ? options.model : undefined,
           provider: typeof options.provider === 'string' ? options.provider : undefined,
         });
+        if (options.ascii) {
+          console.log(result.ascii);
+          return;
+        }
         const lines = [
           '',
           `📊 ${result.mode} diagram of ${result.entry}`,

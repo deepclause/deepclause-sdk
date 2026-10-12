@@ -7,10 +7,12 @@ import type {
   DMLBinding,
   DMLEvent,
   FrameKind,
+  ImageBackend,
   LLMBackendMedia,
   MediaRef,
   MemoryMessage,
   LLMBackend,
+  ResolvedModel,
   ToolDefinition,
   ToolPolicy,
   TypedVar,
@@ -28,6 +30,8 @@ import { checkToolPolicy } from './tools.js';
 import { generateLlmReply, sampleSingleToken } from './prolog/bridge.js';
 import { buildReasoningProviderOptions, type ReasoningType } from './system/config/model-database.js';
 import { resolveMediaRefs } from './system/runtime/media.js';
+import { resolveMedia } from './visualize/image.js';
+import { parseModelSpec, type ModelResolver } from './repl/model-resolver.js';
 
 /**
  * Convert swipl-wasm value to plain JavaScript value
@@ -165,12 +169,17 @@ export interface RunnerOptions {
   compactMessages?: (
     messages: MemoryMessage[],
     lastInputTokens?: number,
+    contextWindow?: number,
   ) => Promise<{ messages: MemoryMessage[]; event?: DMLEvent }>;
   reasoningType?: ReasoningType;
   reasoningBudgetMap?: Record<string, number>;
   contextWindow?: number;
   llmBackend?: LLMBackend;
   judgeSelection?: JudgeSelection;
+  /** Host image generator for `task(…, media(X))` typed outputs. */
+  imageBackend?: ImageBackend;
+  /** Resolves `with_model/2` scopes to concrete models. */
+  modelResolver?: ModelResolver;
 }
 
 export interface InternalRunOptions {
@@ -406,6 +415,28 @@ export class DMLRunner {
             yield { type: 'output', content: step.content };
           }
           break;
+
+        case 'media': {
+          // `output(media(...))` — resolve to a base64 PNG for inline display.
+          const payload = (step.payload ?? {}) as Record<string, unknown>;
+          const media = {
+            path: typeof payload.path === 'string' && payload.path ? payload.path : undefined,
+            mimeType: typeof payload.mimeType === 'string' ? payload.mimeType : 'image/png',
+            kind: typeof payload.kind === 'string' ? payload.kind : undefined,
+            data: typeof payload.data === 'string' && payload.data ? payload.data : undefined,
+          };
+          const resolved = await resolveMedia(options.workspacePath ?? process.cwd(), media);
+          yield {
+            type: 'media',
+            media: {
+              path: media.path,
+              mimeType: media.mimeType,
+              kind: media.kind,
+              data: resolved?.pngBase64,
+            },
+          };
+          break;
+        }
 
         case 'log':
           if (step.content) {
@@ -848,18 +879,54 @@ export class DMLRunner {
     // Extract memory from payload (now passed via state threading)
     const preparedMemory = this.extractMemoryFromPayload(rawPayload);
 
+    // A task with a `media(X)` typed output generates an image instead of running
+    // a text agent turn; the harness displays it only when it calls output(media(X)).
+    const mediaOutputs = outputVars.filter((v): v is TypedVar => typeof v !== 'string' && v.type === 'media');
+    if (mediaOutputs.length > 0) {
+      const imageBackend = this.options.imageBackend;
+      if (!imageBackend) {
+        yield { type: 'error', content: 'image generation is unavailable: no image backend is configured' };
+        this.postAgentResult({ success: false, outputs: [], variables: {}, messages: preparedMemory }, preparedMemory);
+        stepSucceeded = false;
+        return;
+      }
+      const refs: MediaRef[] = [];
+      for (const message of preparedMemory) {
+        for (const ref of message.media ?? []) {
+          refs.push(ref);
+        }
+      }
+      const generated = await imageBackend.generate({
+        prompt: taskDescription,
+        refs: refs.length > 0 ? refs : undefined,
+        signal: options.signal,
+      });
+      const variables: Record<string, unknown> = {};
+      for (const output of mediaOutputs) {
+        variables[output.name] = generated.path;
+      }
+      this.postAgentResult({ success: true, outputs: [], variables, messages: preparedMemory }, preparedMemory);
+      stepSucceeded = true;
+      return;
+    }
+
     // Extract reasoning effort and recipe context (from with_reasoning/with_recipe scoping)
     const reasoningEffort = String(toJsValue(rawPayload.reasoningEffort) ?? 'none');
     const recipeContext = String(toJsValue(rawPayload.recipeContext) ?? '');
 
+    // Per-call model override from with_model/2 (undefined = the session model).
+    const scopedModel = await this.resolveScope(rawPayload.modelSpec);
+
     // Build provider options — merge reasoning effort if set
     const baseProviderOptions = this.options.providerOptions ?? {};
     let effectiveProviderOptions = baseProviderOptions;
-    if (reasoningEffort !== 'none' && this.options.reasoningType && this.options.reasoningType !== 'none') {
+    const reasoningType = scopedModel?.reasoningType ?? this.options.reasoningType;
+    const reasoningBudgetMap = scopedModel?.reasoningBudgetMap ?? this.options.reasoningBudgetMap;
+    if (reasoningEffort !== 'none' && reasoningType && reasoningType !== 'none') {
       const reasoningOpts = buildReasoningProviderOptions(
         reasoningEffort,
-        this.options.reasoningType,
-        this.options.reasoningBudgetMap,
+        reasoningType,
+        reasoningBudgetMap,
       );
       effectiveProviderOptions = { ...baseProviderOptions, ...reasoningOpts } as typeof baseProviderOptions;
     }
@@ -956,12 +1023,13 @@ export class DMLRunner {
       workspacePath: options.workspacePath,
       resolveMedia: (refs) => this.readMediaRefs(options.workspacePath, refs),
       modelOptions: {
-        model: this.options.model,
-        provider: this.options.provider,
-        temperature: this.options.temperature,
-        maxOutputTokens: this.options.maxTokens,
+        model: scopedModel?.id ?? this.options.model,
+        provider: scopedModel?.provider ?? this.options.provider,
+        temperature: scopedModel?.temperature ?? this.options.temperature,
+        maxOutputTokens: scopedModel?.maxTokens ?? this.options.maxTokens,
         baseUrl: this.options.baseUrl,
         providerOptions: effectiveProviderOptions,
+        target: scopedModel,
       },
       streaming: this.options.streaming,
       debug: this.options.debug,
@@ -1010,7 +1078,12 @@ export class DMLRunner {
         }
       },
       onBeforeModelCall: async (messages, lastInputTokens) => {
-        const hostCompacted = await this.applyHostCompaction(messages, lastInputTokens, emitRunnerEvent);
+        const hostCompacted = await this.applyHostCompaction(
+          messages,
+          lastInputTokens,
+          emitRunnerEvent,
+          scopedModel?.contextWindow,
+        );
         return hostCompacted ?? messages;
       },
       onAskUser: options.onInputRequired,
@@ -1132,15 +1205,17 @@ export class DMLRunner {
 
     let succeeded = false;
     try {
+      const scopedModel = await this.resolveScope(data.modelSpec);
       const { token, usage } = await sampleSingleToken({
         prompt,
         allowedTokens,
         modelOptions: {
-          provider: this.options.provider,
-          model: this.options.model,
-          temperature: this.options.temperature,
+          provider: scopedModel?.provider ?? this.options.provider,
+          model: scopedModel?.id ?? this.options.model,
+          temperature: scopedModel?.temperature ?? this.options.temperature,
           baseUrl: this.options.baseUrl,
           providerOptions: this.options.providerOptions,
+          target: scopedModel,
         },
         signal: options.signal,
         llmBackend: this.options.llmBackend,
@@ -1175,15 +1250,17 @@ export class DMLRunner {
 
     let succeeded = false;
     try {
+      const scopedModel = await this.resolveScope(data.modelSpec);
       const { text, usage } = await generateLlmReply({
         messages,
         modelOptions: {
-          provider: this.options.provider,
-          model: this.options.model,
-          temperature: this.options.temperature,
-          maxOutputTokens: this.options.maxTokens,
+          provider: scopedModel?.provider ?? this.options.provider,
+          model: scopedModel?.id ?? this.options.model,
+          temperature: scopedModel?.temperature ?? this.options.temperature,
+          maxOutputTokens: scopedModel?.maxTokens ?? this.options.maxTokens,
           baseUrl: this.options.baseUrl,
           providerOptions: this.options.providerOptions,
+          target: scopedModel,
         },
         signal: options.signal,
         llmBackend: this.options.llmBackend,
@@ -2127,12 +2204,13 @@ export class DMLRunner {
     messages: MemoryMessage[],
     lastInputTokens: number | undefined,
     emit?: (event: DMLEvent) => void,
+    contextWindow?: number,
   ): Promise<MemoryMessage[] | null> {
     const host = this.options.compactMessages;
     if (!host) {
       return null;
     }
-    const result = await host(messages, lastInputTokens);
+    const result = await host(messages, lastInputTokens, contextWindow);
     if (result.event) {
       emit?.(result.event);
     }
@@ -2352,6 +2430,31 @@ export class DMLRunner {
   /**
    * Execute a Prolog query
    */
+  private readonly scopedModels = new Map<string, ResolvedModel>();
+
+  /**
+   * Resolve a `with_model/2` spec to a model profile (cached). Returns undefined
+   * for a `default`/absent scope (use the session model).
+   */
+  private async resolveScope(rawSpec: unknown): Promise<ResolvedModel | undefined> {
+    const spec = parseModelSpec(rawSpec);
+    if (spec === 'default') {
+      return undefined;
+    }
+    const key = JSON.stringify(spec);
+    const cached = this.scopedModels.get(key);
+    if (cached) {
+      return cached;
+    }
+    const resolver = this.options.modelResolver;
+    if (!resolver) {
+      throw new Error('with_model is unavailable: no model resolver is configured');
+    }
+    const resolved = await resolver.resolve(spec);
+    this.scopedModels.set(key, resolved);
+    return resolved;
+  }
+
   private query(goal: string): Record<string, unknown> | null {
     try {
       const q = this.swipl.prolog.query(goal);

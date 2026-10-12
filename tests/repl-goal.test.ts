@@ -57,6 +57,19 @@ describe('goal mode', () => {
     expect(events.at(-1)?.type).toBe('finished');
   });
 
+  it('stops `execute` enumeration at the solution limit', async () => {
+    let solutionEvents = 0;
+    const result = await repl.session.execute(
+      'member(X, [1,2,3,4,5,6,7,8,9,10])',
+      2,
+      undefined,
+      (event) => { if (event.type === 'solution') solutionEvents += 1; },
+    );
+    expect(result.solutions).toHaveLength(2);
+    expect(solutionEvents).toBe(2);
+    expect(result.bindings.find((binding) => binding.name === 'X')?.value).toBe('1');
+  });
+
   it('binds variables after loading DML code', async () => {
     const loaded = await repl.session.loadCode(
       'fact(0, 1).\nfact(N, F) :- N > 0, N1 is N - 1, fact(N1, F1), F is N * F1.\n',
@@ -65,6 +78,12 @@ describe('goal mode', () => {
 
     const events = await collect(repl.query('fact(5, F)'));
     expect(solutionValues(events, 'F')).toEqual(['120']);
+  });
+
+  it('counts the user predicates in the harness', async () => {
+    expect(repl.session.predicateCount()).toBe(0);
+    await repl.session.loadCode('a(1).\nb(2).\nc(X) :- X = 1.');
+    expect(repl.session.predicateCount()).toBe(3);
   });
 
   it('keeps a predicate annotated with tool/2 callable from a goal', async () => {

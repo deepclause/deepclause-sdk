@@ -11,6 +11,10 @@
  */
 
 import type { DMLBinding, DMLEvent } from '../types.js';
+import { spawn } from 'child_process';
+import * as path from 'path';
+import { hyperlink } from '@earendil-works/pi-tui';
+import { renderTerminalImage, resolveGraphicsProtocol } from '../visualize/index.js';
 import { formatListing } from './highlight.js';
 import { MarkdownStream } from './markdown.js';
 
@@ -38,6 +42,10 @@ export interface ReplRendererOptions {
   errorSink?: (text: string) => void;
   /** Observe every event before filtering (used by the status tracker). */
   onEvent?: (event: DMLEvent) => void;
+  /** Workspace root, used to resolve media paths for the non-image fallback. */
+  workspace?: string;
+  /** Hand images to the OS viewer (xdg-open/open) when the terminal cannot show them. */
+  openImages?: boolean;
 }
 
 /** Activity events hidden by `--no-events` (output/answer/input/error stay). */
@@ -227,7 +235,10 @@ export class ReplRenderer {
   private width: number;
   private sink: (text: string) => void;
   private errorSink: (text: string) => void;
+  private imageSink?: (lines: string[]) => void;
   private eventSink?: (event: DMLEvent) => void;
+  private workspace?: string;
+  private openImages: boolean;
   /** Frame key of the currently open streamed-text region, or null. */
   private lastStreamFrame: string | null = null;
   /** Reasoning region key and characters shown so far (for `summary` mode). */
@@ -256,12 +267,27 @@ export class ReplRenderer {
     this.sink = options.sink ?? ((text) => process.stdout.write(text));
     this.errorSink = options.errorSink ?? ((text) => process.stderr.write(text));
     this.eventSink = options.onEvent;
+    this.workspace = options.workspace;
+    this.openImages = options.openImages ?? true;
   }
 
   /** Replace the output sinks (used when moving into a TUI transcript). */
   setSink(sink: (text: string) => void, errorSink?: (text: string) => void): void {
     this.sink = sink;
     if (errorSink) this.errorSink = errorSink;
+  }
+
+  /**
+   * Route terminal-image blocks (from `image()`) into a TUI transcript. When no
+   * sink is set, `image()` writes the escape sequence to stdout directly.
+   */
+  setImageSink(sink?: (lines: string[]) => void): void {
+    this.imageSink = sink;
+  }
+
+  /** Current rendering width in cells. */
+  getWidth(): number {
+    return this.width;
   }
 
   /** Update the rendering width (TUI resize). */
@@ -311,7 +337,66 @@ export class ReplRenderer {
     this.atLineStart = true;
   }
 
-  /** Flush any buffered streamed text (e.g. an unterminated markdown line). */
+  /**
+   * Write a terminal-image block (the escape sequence plus reserved blank rows).
+   * In a TUI this goes to the image sink; otherwise it is written raw.
+   */
+  image(lines: string[]): void {
+    if (lines.length === 0) {
+      return;
+    }
+    this.stopSpinner();
+    this.flushStream();
+    if (this.imageSink) {
+      this.imageSink(lines);
+    } else {
+      this.sink(`${lines.join('\n')}\n`);
+    }
+    this.lastStreamFrame = null;
+    this.atLineStart = true;
+  }
+
+  /**
+   * Render a `media` event (from `output(media(...))`): an inline terminal image
+   * when supported, otherwise an OSC-8 hyperlinked path (optionally opened).
+   */
+  private renderMedia(event: DMLEvent): void {
+    const media = event.media;
+    if (!media) {
+      return;
+    }
+    if (media.data) {
+      const protocol = resolveGraphicsProtocol('auto');
+      if (protocol) {
+        const image = renderTerminalImage(Buffer.from(media.data, 'base64'), {
+          protocol,
+          maxWidthCells: Math.max(20, this.width - 2),
+          maxHeightCells: Math.max(8, (process.stdout.rows ?? 40) - 8),
+        });
+        if (image) {
+          this.image(image.lines);
+          return;
+        }
+      }
+    }
+    const rel = media.path;
+    const abs = rel ? (this.workspace ? path.resolve(this.workspace, rel) : rel) : undefined;
+    const label = abs ? `${media.mimeType}  ${abs}` : `[image ${media.mimeType}]`;
+    this.writeLine(abs ? hyperlink(label, `file://${abs}`) : label);
+    if (abs && rel && this.openImages) {
+      this.openExternal(abs);
+    }
+  }
+
+  /** Hand a file to the OS viewer (best effort, never blocks). */
+  private openExternal(abs: string): void {
+    const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
+    try {
+      spawn(command, [abs], { detached: true, stdio: 'ignore' }).unref();
+    } catch {
+      // Ignore: the path line above is the guaranteed fallback.
+    }
+  }
   flush(): void {
     this.flushStream();
   }
@@ -367,8 +452,7 @@ export class ReplRenderer {
   }
 
   /** Render one runtime event. */
-  render(event: DMLEvent): void {
-    this.eventSink?.(event);
+  render(event: DMLEvent): void {    this.eventSink?.(event);
     if (!this.showStream && (event.type === 'stream' || event.type === 'reasoning')) {
       return;
     }
@@ -377,6 +461,11 @@ export class ReplRenderer {
     }
     if (this.mode === 'json') {
       this.sink(`${JSON.stringify(event)}\n`);
+      return;
+    }
+
+    if (event.type === 'media') {
+      this.renderMedia(event);
       return;
     }
 
@@ -504,6 +593,7 @@ export class ReplRenderer {
   private renderToolCall(event: DMLEvent, prefix: string): void {
     const name = event.toolName ?? 'tool';
     const state = event.toolState;
+    const pidSuffix = typeof event.toolPid === 'number' ? ` [${event.toolPid}]` : '';
     // Some tools have a long literal argument (a shell script, a DML goal) that
     // is shown in full, wrapped and indented, rather than truncated inline.
     const spec = TOOL_DETAIL[name];
@@ -549,10 +639,12 @@ export class ReplRenderer {
           }
         }
       }
+      this.ensureToolSpinner(prefix, `${name}${pidSuffix} running…`);
       return;
     }
 
     this.writeLine(this.toolPanel(`${prefix}  ⚙ ${name}${args}`, tone));
+    this.ensureToolSpinner(prefix, `${name}${pidSuffix} running…`);
   }
 
   /** Up to TOOL_OUTPUT_LINES captured output lines, as tinted panel lines. */
@@ -696,6 +788,14 @@ export class ReplRenderer {
       return;
     }
     this.startSpinner(prefix, 'thinking…');
+  }
+
+  /** Keep a live indicator on screen while a tool (e.g. bash) is running. */
+  private ensureToolSpinner(prefix: string, label: string): void {
+    if (this.spinnerTimer && this.spinnerLabel === label) {
+      return;
+    }
+    this.startSpinner(prefix, label);
   }
 
   private announceReasoningTruncated(event: DMLEvent): void {

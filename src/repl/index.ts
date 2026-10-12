@@ -8,18 +8,21 @@
 
 import type {
   DMLEvent,
+  ImageBackend,
   LLMBackend,
   MemoryMessage,
   ToolDefinition,
   ToolPolicy,
 } from '../types.js';
 import type { FrameKind } from '../types.js';
-import { DMLSession, type DMLQueryOptions } from './session.js';
+import { DMLSession, type DMLQueryOptions, type DiagramResult } from './session.js';
 import type { HarnessExportOptions, HarnessExportResult } from './export.js';
 import { resolveReplJudgeSelection, type JevJudgeOptions } from './judge.js';
 import type { HistoryOptions } from './history.js';
 import type { JudgeSelection } from '../judge/types.js';
 import type { CompactionSettings } from './compaction.js';
+import type { DiagramMode } from '../visualize/index.js';
+import type { ModelResolver } from './model-resolver.js';
 
 export type RunOpts = DMLQueryOptions;
 
@@ -74,6 +77,10 @@ export interface HarnessReplOptions {
   compaction?: { settings: CompactionSettings; auto: boolean };
   /** Active model context window, used for compaction thresholds. */
   contextWindow?: number;
+  /** Host image generator for `task(…, media(X))` typed outputs. */
+  imageBackend?: ImageBackend;
+  /** Resolves `with_model/2` scopes to concrete models. */
+  modelResolver?: ModelResolver;
 }
 
 export interface RollbackResult {
@@ -107,6 +114,8 @@ export interface HarnessRepl {
   rollback(): Promise<RollbackResult>;
   /** Compact the session (meta) memory (TypeScript, ported from pi). */
   compact(customInstructions?: string): Promise<{ applied: boolean; beforeTokens: number; afterTokens: number; error?: string }>;
+  /** Generate a diagram of an entry predicate (Mermaid → ASCII tree + SVG). */
+  diagram(entry?: string, mode?: DiagramMode, options?: { signal?: AbortSignal }): Promise<DiagramResult>;
   /** Deliver a steering message into the running authoring turn. */
   steer(text: string): void;
   dispose(): Promise<void>;
@@ -173,6 +182,10 @@ class HarnessReplImpl implements HarnessRepl {
     return this.session.compact(customInstructions);
   }
 
+  diagram(entry?: string, mode?: DiagramMode, options?: { signal?: AbortSignal }): Promise<DiagramResult> {
+    return this.session.diagram(entry, mode, options);
+  }
+
   steer(text: string): void {
     this.session.steer(text);
   }
@@ -225,6 +238,8 @@ export async function createHarnessRepl(options: HarnessReplOptions): Promise<Ha
       streaming: options.streaming ?? true,
       llmBackend: options.llmBackend,
       judgeSelection,
+      imageBackend: options.imageBackend,
+      modelResolver: options.modelResolver,
     },
   });
   return new HarnessReplImpl(session);

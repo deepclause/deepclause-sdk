@@ -16,6 +16,7 @@ import type {
   LLMBackendResponse,
   LLMBackendTool,
   MediaRef,
+  ResolvedModel,
   ToolDefinition,
   MemoryMessage,
   TypedVar,
@@ -73,6 +74,7 @@ export interface AgentLoopOptions {
     baseUrl?: string;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     providerOptions?: Record<string, Record<string, any>>;
+    target?: ResolvedModel;
   };
   onOutput: (text: string) => void;
   onStream?: (chunk: string, done: boolean) => void;
@@ -675,6 +677,7 @@ async function runInjectedAgentLoop(
         tools: backendTools,
         temperature: options.modelOptions.temperature,
         maxTokens: options.modelOptions.maxOutputTokens,
+        target: options.modelOptions.target,
         signal: options.signal,
         onText: options.streaming && options.onStream
           ? (chunk) => {

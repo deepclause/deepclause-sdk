@@ -126,6 +126,20 @@ const ReplConfigSchema = z.object({
   tools: z.array(z.string()).nullish(),
   /** pi-style context compaction (TypeScript; replaces the DML compactor). */
   compaction: ReplCompactionSchema,
+  /** Media display + image generation (docs/DML_MEDIA.md). */
+  media: z.object({
+    /** Workspace-relative directory for generated images. */
+    dir: z.string().optional().default('.deepclause/media'),
+    maxBytes: z.number().int().positive().optional().default(10485760),
+    /** Image model as `provider:id`; default: first available. */
+    imageModel: z.string().optional(),
+    /** Default generation size in px. */
+    size: z.number().int().positive().optional(),
+    /** Hand images to the OS viewer when the terminal cannot render them. */
+    open: z.boolean().optional().default(true),
+    /** Include base64 image data in `--json` events (default true). */
+    inlineJson: z.boolean().optional().default(true),
+  }).optional().default({}),
   /** Persistent session/trace/harness history (docs/DML_REPL_SESSION_HISTORY.md). */
   history: z.object({
     enabled: z.boolean().optional().default(true),
@@ -219,6 +233,7 @@ const DEFAULT_CONFIG: Config = {
     showToolArgs: true,
     maxToolResultChars: 2000,
     color: true,
+    media: { dir: '.deepclause/media', maxBytes: 10485760, open: true, inlineJson: true },
     compaction: {
       enabled: true,
       auto: true,

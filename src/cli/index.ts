@@ -212,6 +212,45 @@ program
     }
   });
 
+program
+  .command('image-models')
+  .description('List image-generation models for /gen and task(…, media(X))')
+  .option('--json', 'Output as JSON')
+  .action(async (options) => {
+    try {
+      const { openPiRuntime } = await import('../repl/backend.js');
+      const handle = await openPiRuntime({});
+      const runtime = handle.runtime as {
+        getModelsOfType?: (type: string) => Array<{ provider?: string; id?: string }>;
+        getAvailableOfType?: (type: string) => Promise<Array<{ provider?: string; id?: string }>>;
+      };
+      const all = runtime.getModelsOfType?.('image') ?? [];
+      const available = typeof runtime.getAvailableOfType === 'function'
+        ? await runtime.getAvailableOfType('image')
+        : [];
+      const ready = new Set(available.map((m) => `${m.provider}:${m.id}`));
+      const rows = all.map((m) => ({ model: `${m.provider}:${m.id}`, authenticated: ready.has(`${m.provider}:${m.id}`) }));
+      if (options.json) {
+        console.log(JSON.stringify(rows, null, 2));
+      } else if (all.length === 0) {
+        console.log('No image-generation models are known. Run `deepclause login` and sign in to a provider that offers image models.');
+      } else {
+        console.log(`Image models (${available.length} available)\n`);
+        for (const row of rows) {
+          console.log(`  ${row.model}  [${row.authenticated ? 'ready' : 'needs auth'}]`);
+        }
+        const first = available[0];
+        if (first) {
+          console.log(`\nUse one with:  deepclause repl --image-model ${first.provider}:${first.id}`);
+          console.log('or set "repl": { "media": { "imageModel": "' + `${first.provider}:${first.id}` + '" } } in .deepclause/config.json');
+        }
+      }
+    } catch (error) {
+      console.error('❌ Error:', (error as Error).message);
+      process.exit(1);
+    }
+  });
+
 // =============================================================================
 // Execution Commands
 // =============================================================================

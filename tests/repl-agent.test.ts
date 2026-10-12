@@ -42,6 +42,7 @@ function stubController(overrides: Partial<HarnessToolController> = {}): {
       return { bindings: [], solutions: [], output: 'child-output' };
     },
     reference: async () => record('reference', 'reference text'),
+    listModels: async () => record('listModels', 'current model: a:b\n\n  a:b'),
     ...overrides,
   };
   return { controller, calls };
@@ -249,5 +250,67 @@ describe('HarnessAgent', () => {
     expect(prompt).toContain('DML REPL');
     expect(prompt).toContain('`tool/2`');
     expect(prompt).not.toContain('{{');
+  });
+
+  it('asks the human to extend the model-call budget, then continues', async () => {
+    const { controller } = stubController();
+    let backendCalls = 0;
+    const backend: LLMBackend = {
+      complete: async () => {
+        backendCalls += 1;
+        return {
+          text: '',
+          toolCalls: [{ id: String(backendCalls), name: 'listing', arguments: { filter: 'all' } }],
+          finishReason: 'tool_use',
+        };
+      },
+    };
+    const asks: string[] = [];
+    let asked = 0;
+    const agent = new HarnessAgent({
+      tools: createHarnessTools(controller),
+      llmBackend: backend,
+      model: 'm',
+      streaming: false,
+      maxModelCalls: 2,
+      askInput: async (prompt) => {
+        asks.push(prompt);
+        asked += 1;
+        return asked === 1 ? 'yes' : 'no';
+      },
+    });
+
+    const events = await collect(agent.run('keep going'));
+
+    expect(asks.length).toBeGreaterThanOrEqual(1);
+    expect(asks[0]).toContain('model-call budget');
+    expect(asks[0]).toContain('repl.maxModelCalls'); // reminds the user of the setting
+    expect(backendCalls).toBeGreaterThan(2); // continued past the first budget
+    const error = events.find((event) => event.type === 'error');
+    expect(error?.content).toContain('budget exhausted');
+    expect(error?.content).toContain('repl.maxModelCalls');
+  });
+
+  it('aborts with a helpful message when there is no input channel', async () => {
+    const { controller } = stubController();
+    const backend: LLMBackend = {
+      complete: async () => ({
+        text: '',
+        toolCalls: [{ id: '1', name: 'listing', arguments: { filter: 'all' } }],
+        finishReason: 'tool_use',
+      }),
+    };
+    const agent = new HarnessAgent({
+      tools: createHarnessTools(controller),
+      llmBackend: backend,
+      model: 'm',
+      streaming: false,
+      maxModelCalls: 1,
+    });
+
+    const events = await collect(agent.run('loop'));
+    const error = events.find((event) => event.type === 'error');
+    expect(error?.content).toContain('budget exhausted');
+    expect(error?.content).toContain('repl.maxModelCalls');
   });
 });

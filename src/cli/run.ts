@@ -18,6 +18,7 @@ import { DMLSession } from '../repl/session.js';
 import { ReplRenderer, type RenderMode } from '../repl/render.js';
 import { createReplToolset } from '../repl/toolset.js';
 import { resolveLlmBackend, type BackendKind } from '../repl/backend.js';
+import { EnvModelResolver, PiModelResolver } from '../repl/model-resolver.js';
 import { resolveReplJudgeSelection } from '../repl/judge.js';
 import { recordTokenUsage, type TokenUsageByModel } from '../system/runtime/token-usage.js';
 import { buildDmlParams } from '../system/runtime/dml-params.js';
@@ -110,6 +111,11 @@ export async function run(
       temperature: options.temperature ?? config.temperatures.run,
     }).contextWindow;
 
+  // Resolve `with_model/2` scopes for this run.
+  const modelResolver = backend.kind === 'pi' && backend.registry
+    ? new PiModelResolver(backend.registry)
+    : new EnvModelResolver(String(backend.provider));
+
   const { selection: judgeSelection, warnings: judgeWarnings } = resolveReplJudgeSelection({
     llmBackend: backend.llmBackend,
     model: backend.model,
@@ -175,6 +181,7 @@ export async function run(
       debug: options.verbose ?? false,
       baseUrl: providerConfig?.baseUrl,
       llmBackend: backend.llmBackend,
+      modelResolver,
       judgeSelection,
     },
     compaction: { settings: resolveReplCompactionConfig(config), auto: true },
