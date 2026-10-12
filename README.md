@@ -1,5 +1,9 @@
 # DeepClause SDK
 
+**Effortlessly build efficient model-, task-, or domain-specific harnesses.**
+
+Follow us on [X (@hilbertshelper)](https://x.com/hilbertshelper) · Blog: [deepclause.substack.com](https://deepclause.substack.com)
+
 DeepClause is a **Prolog-based runtime for self-modifying agent harnesses**. A
 harness created with DeepClause is a self contained library in the form of a **DML** module. DML (DeepClause Meta Language) is a Prolog DSL with added functionality for LLM model calls, semantic
 judgments (Jev-type models), and constraints. An LLM agent embedded in the runtime reads, extends, and tests code in a live module a turn by
@@ -16,6 +20,16 @@ retries are clause order and backtracking, and a workflow is simply predicates
 calling predicates. Because it is one language in one self-contained file, the
 parts can read, reuse, and extend one another, and a whole harness can be
 inspected, versioned, and moved as a unit.
+
+That shape pays off most when a capability is *specific*. Because a harness is a
+single module you can edit, diff, and version — and because the REPL lets an
+authoring agent grow it by talking — it is unusually cheap to build one tuned to
+a particular **model** (its prompt style, context budget, reasoning level), a
+particular **task**, or a particular **domain**. The same file can also route
+individual calls across several models with `with_model/2`: a cheap model for
+classification, a strong one for the hard step, all decided in plain Prolog.
+
+![The DeepClause REPL: an authoring turn running tests, committing, and rendering a diagram inline](docs/images/repl.png)
 
 ## Dependencies and acknowledgements
 
@@ -274,6 +288,36 @@ edit files, `patch` can.
 - Because a `task/N` turn can call these tools (and itself), the module is an
 RLM-style harness, not a fixed script.
 
+### Model switching
+
+A harness can choose the model for individual calls with `with_model/2`, so you
+can route cheap work to a small model and hard work to a strong one — or tune a
+whole harness to one model:
+
+```prolog
+% a cheap model for classification
+triage(Message, Team) :-
+    with_model("openai:gpt-4o-mini",
+        prompt("Classify as billing/orders/account: {Message}", Team)).
+
+% a strong model at high reasoning, only for the hard step
+review(Diff, Notes) :-
+    with_model("anthropic:claude-sonnet-4#high",
+        task("Review this diff and list defects:\n{Diff}", Notes)).
+
+% full control via a dict
+with_model(model{provider: "google", id: "gemini-2.5-pro",
+                 temperature: 0.2, maxTokens: 8192}, Goal).
+```
+
+`with_model` scopes the `task/N`, `prompt/N` and `sample_token/N` calls inside
+`Goal` (judgments keep their own backend); the innermost scope wins, and it
+composes with `with_reasoning/2`. The models available to a session are the
+**credentialed** ones from pi's catalog, each shown to the authoring agent with
+its price (USD per 1M tokens, in/out) so it can pick the cheapest model that
+fits — call the `models` tool for the live list. An unknown or unsigned-in model
+fails with a clear error.
+
 ### Sessions
 
 The REPL also records sessions, turns, and harness versions under
@@ -338,9 +382,10 @@ See [`docs/REPL.md`](docs/REPL.md) and
 
 ### Commands
 
-`/goal <dml>`, `/listing [filter]`, `/help`, `/reset`, `/rollback`,
-`/compact [notes]`, `/export [file]`, `/model [id]`, `/freeze`/`/unfreeze`,
-`/params`, `/trace`/`/notrace`, `/halt` (aliases `/exit`, `/quit`). The legacy
+`/goal <dml>`, `/listing [filter]`, `/viz [entry] [--spec]`, `/show <path>`,
+`/gen <prompt>`, `/help`, `/reset`, `/rollback`, `/compact [notes]`,
+`/export [file]`, `/model [id]`, `/freeze`/`/unfreeze`, `/params`,
+`/trace`/`/notrace`, `/halt` (aliases `/exit`, `/quit`). The legacy
 `goal:`/`listing.` dotted forms still work.
 
 ## Install
@@ -438,15 +483,24 @@ one entry, then renders it.
 
 ```bash
 deepclause visualize skill.dml -g router/2 --presentation -o router.png
-deepclause visualize skill.dml -g router/2 --spec -o router.spec.png
+deepclause visualize skill.dml -g router/2 --spec -o router.spec.svg
+deepclause visualize skill.dml -g router/2 --ascii
 ```
 
 `-g/--goal` names the entry predicate to document. `--presentation` (default) is
 an audience-facing overview (inputs, steps, answer); `--spec` shows engineering
 detail (decisions, `task`/`exec` calls, branches, fallbacks). A `.mmd` output
-writes the Mermaid source; a `.png`/`.svg` output renders it via
-`@mermaid-js/mermaid-cli` (fetched with `npx` on first use) and always writes the
-`.mmd` beside the image.
+writes the Mermaid source; `.svg`/`.png` render it **without a browser** (SVG is
+generated directly, PNG via the bundled `@resvg/resvg-js` rasterizer), and the
+`.mmd` is always written beside the image. `--ascii` prints a terminal-friendly
+Unicode tree instead of a file.
+
+In the REPL, `/viz [entry] [--spec]` draws a skill inline: on Kitty/Ghostty/
+WezTerm/iTerm2 it emits an inline image (through pi-tui's terminal-image encoder);
+on other terminals it falls back to the ASCII tree. Force a renderer with
+`/viz --graphics=kitty|iterm2|ascii|off`. The authoring agent's `visualize` tool
+uses the same path, so *"visualize this harness"* paints the image too (and
+falls back to the ASCII tree on terminals without image support).
 
 ## Media (images)
 
@@ -462,8 +516,20 @@ agent_main :-
     answer(Description).
 ```
 
-Only PNG/JPEG/GIF/WebP are accepted, and judgments stay text-only. Image
-generation and video are not implemented — see [`docs/DML_MEDIA.md`](docs/DML_MEDIA.md).
+Only PNG/JPEG/GIF/WebP/SVG are accepted, and judgments stay text-only.
+
+Images can also be **displayed** and **generated**:
+
+```prolog
+output(media("charts/plot.png")).        % show an image inline (kitty/iTerm2)
+task("a red fox in snow", media(Img)),    % generate → Img = "…/image-….png"
+output(media(Img)).                        % …and show it
+```
+
+`output(media{svg: Svg})` shows inline SVG; `save_image(Media, "out.svg")`
+persists a reference. On other terminals the path is printed (and opened with
+`xdg-open`/`open`), and `--json` emits a `media` event with base64 PNG data. In
+the REPL: `/show <path>` and `/gen <prompt>`. See [`docs/DML_MEDIA.md`](docs/DML_MEDIA.md).
 
 ## TypeScript SDK
 
@@ -518,6 +584,7 @@ const { valid, errors, warnings } = await validateWithProlog(dmlSource);
     "showReasoning": "summary",
     "maxModelCalls": 100,
     "compaction": { "enabled": true, "auto": true },
+    "media": { "dir": ".deepclause/media", "open": true, "inlineJson": true, "imageModel": "openai:gpt-image-1" },
     "history": { "enabled": true, "dir": ".deepclause/repl", "trace": "summary" }
   },
   "judgment": { "default": "llm", "jev": { "enabled": false } }
@@ -528,9 +595,10 @@ const { valid, errors, warnings } = await validateWithProlog(dmlSource);
 
 ```text
 src/
-├── repl/         # the living-module REPL (session, frames, renderer, auth, history)
-├── cli/          # init, run, repl, login, set-backend
-├── system/       # shell/AgentVM, config, bundled docs
+├── repl/         # living-module REPL (session, agent, render, history, media, models)
+├── cli/          # init, run, repl, login, set-backend, visualize
+├── visualize/    # diagrams: Mermaid → Unicode tree / SVG / PNG + terminal graphics
+├── system/       # shell/AgentVM, config, model database + catalog, bundled docs
 ├── judge/        # semantic judgment backends (llm, jev, mock)
 ├── prolog/       # SWI-Prolog-WASM loader/bridge
 ├── prolog-src/   # deepclause_mi.pl, deepclause_analysis.pl, …
@@ -560,6 +628,9 @@ See [`docs/`](docs/): [`STATUS.md`](docs/STATUS.md) (current state),
 [`REPL.md`](docs/REPL.md),
 [`DML_REPL_PROPOSAL.md`](docs/DML_REPL_PROPOSAL.md),
 [`DML_REPL_SESSION_HISTORY.md`](docs/DML_REPL_SESSION_HISTORY.md),
+[`DML_MEDIA.md`](docs/DML_MEDIA.md),
+[`DML_MODEL_SWITCHING.md`](docs/DML_MODEL_SWITCHING.md),
+[`DML_REPL_WORKER_EXECUTION.md`](docs/DML_REPL_WORKER_EXECUTION.md) (plan),
 [`JUDGMENT_BACKENDS.md`](docs/JUDGMENT_BACKENDS.md).
 
 ## License

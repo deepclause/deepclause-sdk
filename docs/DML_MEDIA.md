@@ -1,8 +1,8 @@
 # Images and video in DML
 
 How DeepClause handles media (images now; video later), and the decisions behind
-the implementation. Status: **image input implemented**; image generation and
-video are planned.
+the implementation. Status: **image input, inline terminal display, and image
+generation implemented**; video is planned.
 
 ## Principles
 
@@ -46,17 +46,47 @@ receives the text and a `[attached ...]` note, not the image block, when
 
 ## Images out (generation)
 
-`gen_image(Prompt, Out, Refs..., Result)` is a host capability tool:
-resolve an image model from the pi registry (`getModelOfType("image", ...)`),
-call `generateImages(model, { input })`, write the base64 block to
-`media.dir`, and return `media(Out, Mime)`. Generated images can be fed back to a
-vision task.
+Generation is a **typed task output**:
 
-## Rendering
+```prolog
+% text-to-image: bind Img to the generated, workspace-relative path
+task("a red fox in snow, 512x512", media(Img)).
 
-Generated media is reported on a `media` event carrying the path (and optional
-inline data). The plain renderer prints the workspace path; inline terminal
-rendering (kitty/iTerm2) is deferred.
+% image-to-image: attach the input, then generate
+read_media("a.png", In), attach_media(In),
+task("turn this into a watercolour", media(Out)).
+```
+
+A `media(X)` output var short-circuits the text agent loop: the host resolves the
+first available pi image model (or the configured `media.imageModel`), calls
+`generateImages`, writes the bytes under `media.dir` (default
+`.deepclause/media`), and binds `X` to the path. It does **not** display the
+image — call `output(media(X))` for that. Same credentials and model catalog as
+chat; no separate keys. A task with a `media` output and no image backend fails
+with a clear error.
+
+## Rendering and saving
+
+`output/1` presents an image instead of text:
+
+```prolog
+output(media("charts/plot.png")).                 % a workspace file (mime inferred)
+output(media{svg: Svg}).                          % inline SVG (rasterized via resvg)
+output(media{data: Base64, mime: "image/png"}).   % inline bytes
+```
+
+The host resolves it to a PNG (resvg for SVG; PNG passthrough; JPEG/WebP/GIF via
+an optional `sharp`) and renders it inline on Kitty/Ghostty/WezTerm/iTerm2.
+On other terminals it prints an OSC-8 hyperlinked path and (unless `--no-open`)
+hands the file to `xdg-open`/`open`. In `--json` the same event is emitted as
+`{"type":"media","media":{"path":…,"mimeType":…,"data":"<png base64>"}}`.
+
+In the REPL: `/show <path>` displays an existing image, `/gen <prompt>` generates
+one and displays it. The authoring agent has `show_image` and `generate_image`
+tools.
+
+`save_image(+Media, +OutPath)` writes a reference to a workspace file
+(file copy, or an inline SVG written verbatim); parent directories must exist.
 
 ## Video (deferred)
 

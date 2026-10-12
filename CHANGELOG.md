@@ -1,8 +1,21 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 - 2026-10-12
 
 ### Fixed
+
+- **`execute` no longer floods on a nondeterministic goal.** It stops enumerating
+  at the solution limit instead of streaming every solution (a runaway CLP search
+  previously wrote tens of thousands of events and hung the turn).
+- **The pi adapter no longer forwards an ambient temperature** — pi itself does
+  not, and some models (e.g. github-copilot) reject the parameter. A `with_model`
+  temperature is forwarded only when a scope sets one *and* the model does not
+  opt out via `compat.supportsTemperature`.
+- **The model-call budget is interactive.** When the authoring budget is
+  exhausted the agent asks whether to continue (naming `repl.maxModelCalls` /
+  `--max-model-calls`; `0` = unlimited) instead of aborting silently.
+- **Media mime is inferred from the extension.** `/show` and the agent's image
+  tools no longer misread an SVG as a PNG.
 
 - **Harness-scoped history facts.** `harness_change`/`harness_changed`/
   `harness_head`/`harness_rollback` now live in `harnesses/<name>/history.dml`
@@ -74,6 +87,34 @@
 
 ### Added
 
+- **`with_model/2` — per-call model switching.** Scope `task/N`, `prompt/N` and
+  `sample_token/N` inside a goal to a different model:
+  `with_model("provider:model[#reasoning]", Goal)` or
+  `with_model(model{provider, id, temperature, maxTokens, reasoning}, Goal)`.
+  Composes with `with_reasoning/2`; judgments keep their own backend; nested
+  `task/N` inherits the scope. Unknown or unsigned-in models fail clearly.
+- **Model catalog in the prompt.** The authoring agent sees the session's
+  credentialed models with catalog prices (USD per 1M tokens, in/out) in an
+  `AVAILABLE MODELS` prompt section, plus a `models` tool for the live list.
+- **Media display and generation.** `output(media("path"))` and
+  `output(media{svg: Svg})` render an image inline (Kitty/Ghostty/WezTerm/iTerm2)
+  or print a path to open; `task("…", media(X))` generates one and binds its
+  path; `save_image/2` writes a reference; `/show <path>` and `/gen <prompt>` run
+  from the REPL; `--json` emits a `media` event with base64 PNG. `image-models`
+  lists image-capable models.
+- **`/viz` terminal diagrams.** `/viz [entry] [--spec]` draws a skill inline
+  (`--graphics=auto|kitty|iterm2|ascii|off`); the agent gets a `visualize` tool.
+- **Browser-free `visualize`.** `deepclause visualize -o out.svg|out.png` now
+  generates the SVG directly and rasterizes with the bundled `@resvg/resvg-js`
+  (no `mermaid-cli`, no Chromium); `--ascii` prints a Unicode tree.
+- **New authoring tools**: `models`, `write_file` (verbatim content — no DML/shell
+  escaping), `show_image`, `generate_image`.
+- **Harness in the banner.** The startup banner shows the active harness, whether
+  it is new, and its predicate count.
+- **`end_turn` nondeterminism probe.** Committed predicates are probed and the
+  agent is warned (`⚠`) when a helper yields many solutions on fresh variables
+  (a missing `once/1`/`!`), with the warning surfaced in the transcript.
+
 - **Multiple harnesses per project.** A project now holds one directory per
   harness under `.deepclause/repl/harnesses/<name>/` (`harness.dml`,
   `baseline.dml`, `HEAD.json`, `changes.jsonl`, `versions/`). `--harness <name>`
@@ -100,7 +141,8 @@
 - **TypeScript authoring agent**: the REPL's main agent is a normal LLM agent
   with a system prompt and harness tools (`begin_turn`, `end_turn`, `rollback`,
   `listing`, `define`, `assert`, `assert_many`, `retract`, `delete`, `execute`,
-  the workspace file tools, `ask_user`, `reference`). It can run several
+  `models`, `write_file`, `show_image`, `generate_image`, `visualize`,
+  `reference`). It can run several
   committed turns in one request; `end_turn` validates and records a version, and
   it is asked to commit larger changes incrementally. The DML `task_named/3`
   meta-frame authoring path was **removed**.
@@ -109,9 +151,10 @@
   active frame, model + thinking level), and a fixed editor.
 - **Steering**: submit while a turn is running to interrupt the in-flight model
   call and inject the message, rendered as a full-width `Steering:` block.
-- **Slash commands**: `/goal`, `/listing`, `/help`, `/reset`, `/rollback`,
-  `/compact`, `/export`, `/model`, `/freeze`/`/unfreeze`, `/params`,
-  `/trace`/`/notrace`, `/halt` (the legacy `goal:`/`listing.` forms still work).
+- **Slash commands**: `/goal`, `/listing`, `/help`, `/viz`, `/show`, `/gen`,
+  `/reset`, `/rollback`, `/compact`, `/export`, `/model`, `/freeze`/`/unfreeze`,
+  `/params`, `/trace`/`/notrace`, `/halt` (the legacy `goal:`/`listing.` forms
+  still work).
 - **Editor input history**: recalled for the session and seeded from the target
   session on startup (goal turns re-prefixed with `/goal`).
 - **Reasoning levels**: `backend.thinkingLevel` (off|minimal|low|medium|high|
@@ -121,9 +164,9 @@
   removed.
 - **Listing syntax highlighting** and reflow (doc merged onto the header,
   predicates separated, long clause bodies split).
-- **Workspace `AGENTS.md`** appended to the authoring agent's prompt;
-  `repl.agentDocs: embed|tool` controls whether the DML reference and authoring
-  guide are embedded or left to the `reference` tool.
+- **Workspace `AGENTS.md`** appended to the authoring agent's prompt. The prompt
+  itself is one file (`AGENT_PROMPT.md`, used verbatim); the DML reference,
+  authoring guide and pattern library are read on demand via the `reference` tool.
 - **`execute` child events** stream (model text, tool calls, `output/1`) under a
   nested label.
 

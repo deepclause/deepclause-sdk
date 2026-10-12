@@ -1,6 +1,6 @@
 # Current state
 
-A snapshot of what DeepClause SDK is today. Branch `feat/dml-repl` (not merged).
+A snapshot of what DeepClause SDK is today.
 
 ## Surfaces
 
@@ -13,7 +13,7 @@ A snapshot of what DeepClause SDK is today. Branch `feat/dml-repl` (not merged).
   (embed the REPL), judge backends, the pi/env backend helpers.
 
 CLI commands: `init`, `login`, `logout`, `set-backend`, `set-model`, `show-model`,
-`list-models`, `run`, `repl`, `visualize`.
+`list-models`, `image-models`, `run`, `repl`, `visualize`.
 
 ## Runtime
 
@@ -33,7 +33,8 @@ CLI commands: `init`, `login`, `logout`, `set-backend`, `set-model`, `show-model
 - **Author mode** (plain English): a TypeScript authoring agent writes, tests,
   and commits DML through harness tools
   (`begin_turn`/`end_turn`/`rollback`/`listing`/`define`/`assert`/`retract`/
-  `delete`/`execute`/`reference`), and can run several
+  `delete`/`execute`/`reference`/`models`/`write_file`/`show_image`/
+  `generate_image`/`visualize`), and can run several
   committed turns in one request.
 - **Transactions**: each turn snapshots the module and commits
   replace-by-predicate; a failed turn leaves the harness unchanged.
@@ -48,8 +49,19 @@ CLI commands: `init`, `login`, `logout`, `set-backend`, `set-model`, `show-model
 - **Resume**: `deepclause repl --session <id|last>` restores the harness, memory,
   and turn numbering from the durable `sessions/<id>/harness.json`.
 - **Media**: `read_media/2` + `attach_media/1` attach a workspace image to the next
-  `task/N` (reference-only; no bytes in clauses). Vision-capable models only.
-- **Commands**: `/goal <dml>`, `/help`, `/listing [filter]`, `/reset`,
+  `task/N` (reference-only; no bytes in clauses). Images can also be **displayed**
+  (`output(media(...))`, `output(media{svg: …})`, `/show <path>`) and **generated**
+  (`task("…", media(X))`, `/gen <prompt>`) — rendered inline on Kitty/
+  Ghostty/WezTerm/iTerm2, else a path (plus `xdg-open`/`open`). `save_image/2`
+  writes a reference to a file. See [`DML_MEDIA.md`](./DML_MEDIA.md).
+- **Model switching**: `with_model/2` scopes `task/N`/`prompt/N`/`sample_token/N`
+  inside `Goal` to a different model — string `"provider:model"` (optional
+  `#reasoning`) or a `model{provider,id,temperature,maxTokens,reasoning}` dict.
+  The authoring agent sees the session's credentialed models and their prices
+  (an `AVAILABLE MODELS` prompt section plus the `models` tool). Judgments keep
+  their own backend. See [`DML_MODEL_SWITCHING.md`](./DML_MODEL_SWITCHING.md).
+- **Commands**: `/goal <dml>`, `/help`, `/listing [filter]`, `/viz [entry] [--spec]`,
+  `/show <path>`, `/gen <prompt>`, `/reset`,
   `/rollback`, `/compact [notes]`, `/export [file]`, `/model [id]`,
   `/freeze`/`/unfreeze`, `/params`, `/trace`/`/notrace`, `/halt` (aliases
   `/exit`, `/quit`; the legacy `goal:`/`listing.` forms still work).
@@ -115,18 +127,18 @@ workspace `AGENTS.md`); the shorter guides (`DML_AUTHORING.md`,
 
 ## Tests
 
-`npm test`: **455 passed / 25 skipped / 0 failed**. The skipped 25 are the
+`npm test`: **517 passed / 25 skipped / 0 failed**. The skipped 25 are the
 `llm-integration` suite, gated behind real provider API keys.
 
 ## Not implemented / known gaps
 
 - **`.deepclause/lib/` libraries** — designed but not built; see
   [`DML_LIBS_PROPOSAL.md`](./DML_LIBS_PROPOSAL.md).
-- **Media generation and video** — image *input* works; `gen_image` and video
-  (frame sampling) are not built; see [`DML_MEDIA.md`](./DML_MEDIA.md).
+- **Video** — image input, inline display, and image generation all work, but
+  video (frame sampling) is not built; see [`DML_MEDIA.md`](./DML_MEDIA.md).
 - **No per-goal wall-clock timeout** — a runaway goal (e.g. unbounded CLP) hangs.
-- **`visualize` images** need `@mermaid-js/mermaid-cli` + a browser (fetched with
-  `npx`); a `.mmd` output always works.
+- **`visualize` images** render without a browser (SVG generated directly, PNG via
+  the bundled `@resvg/resvg-js`); a `.mmd` output always works.
 - **`deepclause-sdk/compiler`** is retained as a thin `validateWithProlog` alias
   for the sibling apps until the next publish, then remove it.
 - **`dist/`** is untracked build output (gitignored).
@@ -139,4 +151,5 @@ workspace `AGENTS.md`); the shorter guides (`DML_AUTHORING.md`,
 - REPL: `REPL.md`, `DML_REPL_PROPOSAL.md`, `DML_REPL_IMPLEMENTATION_PLAN.md`,
   `DML_REPL_SESSION_HISTORY.md`, `DML_REPL_SCRIPT_BUNDLES.md`.
 - Other: `JUDGMENT_BACKENDS.md`, `JUDGE_EXAMPLES.md`, `DML_MEDIA.md`,
+  `DML_MODEL_SWITCHING.md`, `DML_REPL_WORKER_EXECUTION.md` (plan),
   `DML_LIBS_PROPOSAL.md`, `REFACTOR_CLEANUP.md`, this file.

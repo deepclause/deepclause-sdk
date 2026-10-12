@@ -1,7 +1,7 @@
 {
   "name": "deepclause-sdk",
-  "version": "0.1.0",
-  "description": "Neuro-symbolic runtime: a self-modifying DML/Prolog REPL, one-shot runner, and TypeScript SDK", 
+  "version": "0.1.1",
+  "description": "Neuro-symbolic runtime: a self-modifying DML/Prolog REPL, one-shot runner, and TypeScript SDK",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -40,12 +40,13 @@
     "cli": "tsx src/cli/index.ts"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "^1.0.4",
-    "@earendil-works/pi-coding-agent": "^1.0.4",
-    "@earendil-works/pi-tui": "^1.0.4",
     "@ai-sdk/anthropic": "^3.0.35",
     "@ai-sdk/google": "^3.0.60",
     "@ai-sdk/openai": "^3.0.25",
+    "@resvg/resvg-js": "^2.6.2",
+    "@earendil-works/pi-ai": "^1.0.4",
+    "@earendil-works/pi-coding-agent": "^1.0.4",
+    "@earendil-works/pi-tui": "^1.0.4",
     "ai": "^6.0.116",
     "commander": "^12.1.0",
     "deepclause-agentvm": "^0.0.5",
@@ -68,6 +69,7 @@
   },
   "files": [
     "dist",
+    "docs/images",
     "src/prolog-src",
     "vendor/swipl-wasm/dist",
     "vendor/swipl-wasm/package.json",

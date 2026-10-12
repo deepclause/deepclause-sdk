@@ -54,6 +54,9 @@ Commands (slash form; the whole-line dotted form still works):
 | `/compact [notes]` | compact the authoring memory |
 | `/model [provider/id]` | show / set the default model |
 | `/export [file]` | write a self-contained `.dml` harness |
+| `/viz [entry] [--spec]` | draw a diagram of a skill inline (`--graphics=auto\|kitty\|iterm2\|ascii\|off`) |
+| `/show <path>` | display a workspace image inline |
+| `/gen <prompt>` | generate an image and display it |
 | `/freeze` / `/unfreeze` | read-only lock |
 | `/trace` / `/notrace` | toggle verbose logging |
 | `/params` | show session parameters |
@@ -591,9 +594,13 @@ In JSON mode each runtime event is emitted as one JSON object:
 ### Budgets
 
 A prompt turn is bounded by `--max-model-calls` (default 100) and `--depth`
-(default 3 nested frames). When the model-call budget is exhausted the turn
-aborts with `ERROR: model-call budget exhausted for this turn`, the harness is
-left unchanged, and the counter resets on the next prompt.
+(default 3 nested frames). When the model-call budget is exhausted in an
+**interactive** session, the authoring agent asks whether to continue for another
+`maxModelCalls` calls (and reminds you of the setting); answering no — or running
+without an input channel (piped/`--no-ask`) — aborts the turn with an error and
+leaves the harness unchanged, and the counter resets on the next prompt. Raise the
+limit with `"repl": { "maxModelCalls": N }` in `.deepclause/config.json` or
+`--max-model-calls N` (`0` = unlimited).
 
 ```bash
 deepclause repl --max-model-calls 100        # raise it for a turn
