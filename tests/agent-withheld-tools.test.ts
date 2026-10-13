@@ -99,3 +99,55 @@ describe('withheld tools in a nested task', () => {
     expect(await tools.get('extract_authors')!.execute({ arg1: 'x' })).toEqual({ ok: true });
   });
 });
+
+/**
+ * The dispatch-time guard. `buildAgentTools` runs *before* the tool it describes,
+ * so a static list cannot know a tool is running; the check therefore happens
+ * when the model calls the tool. This is the case that matters for the real
+ * harness shape (`foo(A) :- task(...)`), where the list handed to the agent
+ * inside `task/N` still contains `foo`.
+ */
+describe('dispatch-time recursion guard', () => {
+  it('refuses a tool that is already on the call stack', async () => {
+    const runner = newRunner();
+    let executed = false;
+    const view = runner as unknown as {
+      toolCallStack: string[];
+      buildAgentTools: (
+        tools: unknown[],
+        policy: null,
+        exec: (name: string, args: Record<string, unknown>) => Promise<{ result: unknown; outputs: string[] }>,
+        excluded: string[],
+      ) => Map<string, BuiltTool>;
+    };
+    const tools = view.buildAgentTools([authorsTool], null, async () => {
+      executed = true;
+      return { result: { ok: true }, outputs: [] };
+    }, []);
+
+    // Simulate the tool being executed further up the call chain.
+    view.toolCallStack.push('extract_authors');
+    const result = (await tools.get('extract_authors')!.execute({ arg1: 'text' })) as { error?: string };
+
+    expect(executed).toBe(false);
+    expect(result.error).toContain('already running further up the call chain');
+    expect(result.error).toContain('Do not call it again');
+  });
+
+  it('runs the tool once the stack unwinds', async () => {
+    const runner = newRunner();
+    const view = runner as unknown as {
+      toolCallStack: string[];
+      buildAgentTools: (
+        tools: unknown[],
+        policy: null,
+        exec: (name: string, args: Record<string, unknown>) => Promise<{ result: unknown; outputs: string[] }>,
+        excluded: string[],
+      ) => Map<string, BuiltTool>;
+    };
+    const tools = view.buildAgentTools([authorsTool], null, async () => ({ result: { ok: true }, outputs: [] }), []);
+    view.toolCallStack.push('extract_authors');
+    view.toolCallStack.pop();
+    expect(await tools.get('extract_authors')!.execute({ arg1: 'x' })).toEqual({ ok: true });
+  });
+});

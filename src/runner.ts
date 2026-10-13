@@ -227,6 +227,16 @@ interface ToolParamInfo {
 /**
  * User tool info from Prolog
  */
+/**
+ * The error a tool call gets when the tool is already running further up the
+ * call chain. Shared by the runtime guard and the withheld-tool stub.
+ */
+export function unavailableToolError(toolName: string): string {
+  return `Tool '${toolName}' is not available in this task: it is already running further up the `
+    + 'call chain, and calling it again would recurse. Do not call it again; work with the text '
+    + 'you were given, or say what is missing.';
+}
+
 interface UserToolInfo {
   name: string;
   description: string;
@@ -280,6 +290,16 @@ export class DMLRunner {
   private currentMemory: MemoryMessage[] = [];
   private stepCounter = 0;
   private judgeCache = new Map<string, JudgeAnswer[]>();
+  /**
+   * DML tools currently executing, innermost last.
+   *
+   * A tool must not be reachable by any agent it spawns, or `foo(A) :- task(...)`
+   * recurses: the agent inside `task/N` calls `foo`, which spawns another agent,
+   * and so on. The tool list is built *before* the tool runs (so a static list
+   * cannot know), which is why the check is applied when the model calls the
+   * tool rather than when the list is built.
+   */
+  private toolCallStack: string[] = [];
   /**
    * Runner-owned frame table: FrameId -> { frame, engine }.
    * The Prolog session owns the authoritative engine handles
@@ -1698,6 +1718,11 @@ export class DMLRunner {
           required: required.length > 0 ? required : undefined,
         },
         execute: async (args) => {
+          // The list is built before the tool runs, so a tool already on the call
+          // stack is refused here rather than being withheld from the list.
+          if (this.toolCallStack.includes(toolName)) {
+            return { error: unavailableToolError(toolName) };
+          }
           // Execute tool inline via main Prolog engine (shares state with task)
           const { result: toolResult } = await executeToolInline(toolName, args);
           return toolResult;
@@ -1713,11 +1738,7 @@ export class DMLRunner {
       result.set(tool.name, {
         description: `${tool.description || `Tool: ${tool.name}`} (unavailable in this task)`,
         parameters: { type: 'object', properties: {} },
-        execute: async () => ({
-          error: `Tool '${tool.name}' is not available in this task: it is already running further up the `
-            + 'call chain, and calling it again would recurse. Do not call it again; work with the text '
-            + 'you were given, or say what is missing.',
-        }),
+        execute: async () => ({ error: unavailableToolError(tool.name) }),
       });
     }
 
@@ -1744,6 +1765,30 @@ export class DMLRunner {
    * @param onToolCall - Callback to emit tool call events from nested tasks
    */
   private async executeToolIsolated(
+    toolName: string,
+    args: Record<string, unknown>,
+    registeredTools: Map<string, ToolDefinition>,
+    onOutput: (text: string) => void,
+    runContext: RunnerExecutionContext,
+    excludedTools: string[] = [],
+    onToolCall?: (toolName: string, args: Record<string, unknown>) => void,
+    onToolEvent?: (event: DMLEvent) => void,
+  ): Promise<{ result: unknown; outputs: string[] }> {
+    if (this.toolCallStack.includes(toolName)) {
+      return { result: { error: unavailableToolError(toolName) }, outputs: [] };
+    }
+    this.toolCallStack.push(toolName);
+    try {
+      return await this.executeToolIsolatedInner(
+        toolName, args, registeredTools, onOutput, runContext, excludedTools, onToolCall, onToolEvent,
+      );
+    } finally {
+      const index = this.toolCallStack.lastIndexOf(toolName);
+      if (index !== -1) this.toolCallStack.splice(index, 1);
+    }
+  }
+
+  private async executeToolIsolatedInner(
     toolName: string,
     args: Record<string, unknown>,
     registeredTools: Map<string, ToolDefinition>,
