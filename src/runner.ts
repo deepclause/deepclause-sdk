@@ -1740,6 +1740,10 @@ export class DMLRunner {
           required: required.length > 0 ? required : undefined,
         },
         execute: async (args) => {
+          if (process.env.DC_TRACE_TOOLS) {
+            // eslint-disable-next-line no-console
+            console.error('[toolCall] %s executing=[%s] -> %s', toolName, this.toolCallStack.join(','), this.toolCallStack.includes(toolName) ? 'REFUSED' : 'ran');
+          }
           // The list is built before the tool runs, so a tool already on the call
           // stack is refused here rather than being withheld from the list.
           if (this.toolCallStack.includes(toolName)) {
