@@ -1106,6 +1106,32 @@ backtracking reuses an answer instead of re-querying the model.
   always one of your option atoms.
 - Prefer one `judge/2` batch over several one-off calls when you need more than
   one or two judgments.
+### Load-time directives
+
+A `.dml` file may contain directives. These are handled:
+
+```prolog
+:- use_module(library(clpfd)).     % library import
+:- consult("other.dml").           % load another workspace file
+:- param(topic, "the subject").    % declared session parameter
+:- repl_delete(old_skill/2).       % remove a predicate (same as the bare fact form)
+```
+
+`:- repl_delete(Name/Arity).` abolishes a predicate, which `retract/1` cannot do:
+retracting the last clause leaves an empty predicate whose calls fail silently.
+The bare fact form `repl_delete(Name/Arity).` works the same way.
+
+Any other directive does nothing, and the loader now says so — it reports
+`unrecognised directive ignored: …` after the file loads, so a directive that
+never took effect is not mistaken for one that did. `dynamic/1`,
+`discontiguous/1` and `multifile/1` are accepted and ignored silently, since
+session predicates are asserted and already behave that way.
+
+A **predicate with no clauses fails silently** when called — it does not error —
+so an emptied or never-written predicate looks like "no results" at the call site.
+`current_predicate(Name/Arity)` in a `/goal` answers whether it exists, and a
+`doc/2` for a predicate with no clauses is reported at `end_turn`.
+
 ## The DML REPL (`deepclause repl`)
 
 DML skills can also be grown interactively in a persistent **living module**.

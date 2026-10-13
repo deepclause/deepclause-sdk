@@ -316,7 +316,7 @@ export class DMLSession {
   }
 
   /** Parse and load DML source into the living module. */
-  async loadCode(code: string): Promise<{ error?: string }> {
+  async loadCode(code: string): Promise<{ error?: string; warnings?: string[] }> {
     if (this.disposed) {
       return { error: 'Session has been disposed' };
     }
@@ -327,7 +327,21 @@ export class DMLSession {
     if (error === undefined || error === null) {
       return { error: 'Failed to load code' };
     }
-    return error === 'none' ? {} : { error: String(error) };
+    return error === 'none' ? { warnings: this.unhandledDirectives() } : { error: String(error) };
+  }
+
+  /**
+   * Directives the loader recorded because it does not handle them. They did
+   * nothing, which is worth saying: `:- repl_delete(f/1).` silently discarded was
+   * a predicate the author believed they had removed.
+   */
+  private unhandledDirectives(): string[] {
+    const result = this.prologQuery(
+      `deepclause_mi:repl_unhandled_directives('${this.sessionId}', Ds)`,
+    );
+    const raw = plainValue(result?.Ds);
+    if (!Array.isArray(raw)) return [];
+    return raw.map((directive) => `unrecognised directive ignored: ${formatTerm(directive)}`);
   }
 
   /**
@@ -337,7 +351,7 @@ export class DMLSession {
    * `harness.dml`; a single-file `.dml` export materializes any inlined
    * `embedded_file/2` facts back into the workspace.
    */
-  async load(file: string): Promise<{ error?: string }> {
+  async load(file: string): Promise<{ error?: string; warnings?: string[] }> {
     const before = this.predicateList();
     // On a fresh harness the loaded file *is* the baseline, not a version.
     const recordLoad = this.history?.hasCommits ?? false;
@@ -1787,6 +1801,23 @@ export function qualifyWithSession(goal: string, sessionId: string): string {
   if (trimmed.length === 0) return goal;
   if (/^[a-z][A-Za-z0-9_]*\s*:/.test(trimmed)) return goal;
   return `${sessionId}:(${trimmed})`;
+}
+
+/** Render a Prolog value for a warning message. */
+function formatTerm(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value === null || value === undefined) return String(value);
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record).filter((k) => !k.startsWith('$'));
+    if (keys.length === 1) {
+      const inner = record[keys[0]];
+      const args = Array.isArray(inner) && inner.length === 1 && Array.isArray(inner[0]) ? inner[0] : [];
+      return `${keys[0]}(${args.map((a) => formatTerm(a)).join(', ')})`;
+    }
+    try { return JSON.stringify(value); } catch { return String(value); }
+  }
+  return String(value);
 }
 
 /** Quote a JS string as a Prolog double-quoted string. */

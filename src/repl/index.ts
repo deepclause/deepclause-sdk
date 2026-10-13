@@ -96,7 +96,7 @@ export interface HarnessRepl {
   /** Prompt mode (M3): NL -> task -> DML -> commit -> run. */
   prompt(request: string, opts?: RunOpts): AsyncGenerator<ReplEvent>;
   /** Load a DML file into the living module. */
-  load(file: string): Promise<{ error?: string }>;
+  load(file: string): Promise<{ error?: string; warnings?: string[] }>;
   /** Read-only listing of the living module. */
   list(filter?: string): Promise<string>;
   /** Replace the human-in-the-loop channel (used by the CLI's shared readline). */
@@ -142,7 +142,7 @@ class HarnessReplImpl implements HarnessRepl {
     return this.session.prompt(request, opts);
   }
 
-  load(file: string): Promise<{ error?: string }> {
+  load(file: string): Promise<{ error?: string; warnings?: string[] }> {
     return this.session.load(file);
   }
 

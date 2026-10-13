@@ -63,6 +63,7 @@
     repl_edit_touched_clear/1,
     repl_validate_tools/2,
     repl_validate_docs/2,
+    repl_unhandled_directives/2,
     repl_inject_workspace_predicates/1,
     workspace_predicate_name/1,
     repl_set_dml_reference/2,
@@ -120,6 +121,7 @@
 :- dynamic session_repl_memory/2.   % session_repl_memory(SessionId, HarnessMemory) - object/entry memory
 :- dynamic session_meta_memory/2.   % session_meta_memory(SessionId, MetaMemory) - code-writing task memory
 :- dynamic session_repl_mode/2.     % session_repl_mode(SessionId, true/false) - gates format/writeln output shims
+:- dynamic session_unhandled_directive/2. % session_unhandled_directive(SessionId, Directive)
 :- dynamic session_frozen/2.        % session_frozen(SessionId, true/false) - read-only lock
 :- dynamic session_locked/2.        % session_locked(SessionId, true/false) - irreversibly frozen (--locked)
 :- dynamic session_directive/2.     % session_directive(SessionId, Directive) - recorded :- directives for export
@@ -771,7 +773,37 @@ process_directive([File|Files], SessionId) :-
     nb_setval(current_session_id, SessionId),
     process_directive(consult(File), SessionId),
     (Files == [] -> true ; process_directive(Files, SessionId)).
-process_directive(_, _).
+%% `:- repl_delete(Name/Arity).` — the directive form of the fact handled by
+%% process_clause/2 below. It used to fall through to the catch-all and be
+%% discarded, so a predicate the author asked to remove stayed in the module.
+process_directive(repl_delete(Name/Arity), SessionId) :-
+    !,
+    atom(Name),
+    integer(Arity),
+    Arity >= 0,
+    catch(abolish(SessionId:Name/Arity), _, true).
+
+%% Anything else is recorded rather than discarded. An unrecognised directive
+%% (`:- dynamic(f/1).`, a `:- op(...)` without use_module, a typo) does nothing,
+%% and silently doing nothing is how an edit that never took effect goes
+%% unnoticed. The host reports these after a load.
+process_directive(Directive, SessionId) :-
+    (   repl_benign_directive(Directive)
+    ->  true
+    ;   assertz(session_unhandled_directive(SessionId, Directive))
+    ).
+
+%% Directives DML deliberately accepts and ignores (SWI state it manages itself).
+repl_benign_directive(dynamic(_)).
+repl_benign_directive(dynamic(_, _)).
+repl_benign_directive(discontiguous(_)).
+repl_benign_directive(discontiguous(_, _)).
+repl_benign_directive(multifile(_)).
+repl_benign_directive(multifile(_, _)).
+
+%% repl_unhandled_directives(+SessionId, -Directives)
+repl_unhandled_directives(SessionId, Directives) :-
+    findall(D, session_unhandled_directive(SessionId, D), Directives).
 
 %% ============================================================
 %% Engine Management

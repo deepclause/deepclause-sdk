@@ -940,6 +940,9 @@ async function executeLoad(runtime: ReplRuntime, files: string[]): Promise<numbe
       return 1;
     }
     runtime.renderer.writeLine(`loaded ${file}`);
+    for (const warning of result.warnings ?? []) {
+      runtime.renderer.writeErrorLine(`warning: ${warning}`);
+    }
   }
   return 0;
 }
