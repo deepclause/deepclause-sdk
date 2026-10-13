@@ -262,6 +262,23 @@ a message naming the field (so the agent can fix it in the same turn), and an
 undeclared field is kept so a model mistake stays visible. `schema/2` is a fact like
 `doc/2`. Use `schema_fill(author, Raw, Author)` to apply one to a dict by hand.
 
+# Parsing and formatting with one template
+
+`pattern/3` builds a string and parses it with the same template. Literal text
+matches exactly and `$name` is a slot; the direction follows from what is bound:
+
+```prolog
+pattern("Name: $name, age: $age", Text, [name="Ada", age=36]).   % build
+pattern("Name: $name, age: $age", "Name: Ada, age: 36", Bs).     % parse
+```
+
+Bindings are `Name=Value` pairs. A slot consumes up to the next literal, so the
+literals decide the split. `$name:int` converts a numeric slot. `$$` is a literal
+dollar, and a single `{` or `}` is literal text, so a template can carry JSON.
+
+Prefer this to asking a model to reformat text: parse what you can read exactly and
+use a `task/N` only where language understanding is genuinely needed.
+
 # Memory: `task/N` vs `prompt/N`
 
 `task/N` **shares and accumulates** the conversation: it is sent the memory built

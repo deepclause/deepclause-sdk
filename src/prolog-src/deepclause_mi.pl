@@ -4552,6 +4552,7 @@ workspace_predicate_name(json_gets).
 workspace_predicate_name(json_put).
 workspace_predicate_name(json_text).
 workspace_predicate_name(schema_fill).
+workspace_predicate_name(pattern).
 
 %% dict_field(+Dict, +Key, -Value) and dict_field(+Dict, +Key, +Default, -Value)
 %%
@@ -4690,6 +4691,190 @@ json_put_walk(Doc, [Key|Rest], Value, Updated) :-
 %% json_write_dict/3 from library(http/json).
 json_text(Dict, Text) :- atom_json_dict(Text, Dict, []).
 
+%% pattern(+Template, ?Text, ?Bindings)
+%%
+%% One syntax for building a string and for parsing it. Literal text matches
+%% exactly, and `$Name` marks a slot; the direction follows from what is bound:
+%%
+%%   pattern("Name: $Name, age: $Age", Text, [name="Ada", age=36])   % build
+%%   pattern("Name: $Name, age: $Age", "Name: Ada, age: 36", B)      % parse
+%%   pattern("DOI: $Doi:doi", Text, [doi=D])                         % typed slot
+%%
+%% `$` is the marker rather than `{…}` so a template can contain JSON or any other
+%% brace-bearing text verbatim, and so it never collides with the `{Var}`
+%% interpolation used in task/N descriptions. `$$` is a literal dollar.
+%%
+%% A template must be anchored by literal text: two slots separated only by nothing
+%% (`"$A$B"`) is rejected, rather than resolved arbitrarily. On parse a slot
+%% consumes up to the next literal, so the literals decide the split.
+pattern(Template, Text, Bindings) :-
+    pattern_tokens(Template, Tokens),
+    (   var(Text)
+    ->  pattern_build(Tokens, Bindings, Text)
+    ;   pattern_parse(Tokens, Text, Bindings)
+    ).
+
+%% pattern_tokens(+Template, -Tokens): [lit(CharList)|slot(NameChars, TypeChars)]
+pattern_tokens(Template, Tokens) :-
+    (   atom(Template) -> atom_string(Template, Text) ; Text = Template ),
+    string_chars(Text, Chars),
+    pattern_scan(Chars, [], Tokens),
+    pattern_check_anchored(Tokens).
+
+pattern_scan([], Acc, [lit(Text)]) :-
+    !,
+    reverse(Acc, Text).
+pattern_scan(['$', '$' | Rest], Acc, Tokens) :-
+    !,
+    pattern_scan(Rest, ['$' | Acc], Tokens).
+pattern_scan(['$' | Rest], Acc, Tokens) :-
+    !,
+    pattern_take_name(Rest, NameChars, Rest1),
+    NameChars \== [],
+    atom_chars(Name, NameChars),
+    (   Rest1 = [':' | Rest2],
+        pattern_take_name(Rest2, TypeChars, Rest3),
+        TypeChars \== []
+    ->  atom_chars(Type, TypeChars)
+    ;   Rest3 = Rest1, Type = none
+    ),
+    reverse(Acc, Text),
+    Tokens = [lit(Text), slot(Name, Type) | More],
+    pattern_scan(Rest3, [], More).
+pattern_scan([C | Rest], Acc, Tokens) :-
+    pattern_scan(Rest, [C | Acc], Tokens).
+
+%% A slot name is a run of characters that are not a template delimiter. Scanning by
+%% delimiter rather than by `char_type(C, alnum)` avoids depending on a ctypes
+%% predicate that is not guaranteed in this build.
+pattern_take_name([C | Rest], [C | More], Left) :-
+    \+ pattern_delimiter(C),
+    !,
+    pattern_take_name(Rest, More, Left).
+pattern_take_name(Rest, [], Rest).
+
+pattern_delimiter(' ').  pattern_delimiter('\t'). pattern_delimiter('\n').
+pattern_delimiter(':').  pattern_delimiter(',').  pattern_delimiter('.').
+pattern_delimiter(')').  pattern_delimiter(']').  pattern_delimiter('}').
+pattern_delimiter('$').  pattern_delimiter('-').  pattern_delimiter('/').
+pattern_delimiter('=').  pattern_delimiter('\'').
+
+%% Two slots with nothing between them cannot be told apart on parse.
+pattern_check_anchored(Tokens) :-
+    pattern_adjacent_slots(Tokens, A, B),
+    !,
+    format(atom(Msg),
+        'pattern: slots "~w" and "~w" are adjacent with no literal between them, so the split is ambiguous',
+        [A, B]),
+    throw(error(domain_error(pattern_unanchored, Msg), pattern_tokens/2)).
+pattern_check_anchored(_).
+
+pattern_adjacent_slots([slot(A, _), lit([]), slot(B, _) | _], A, B) :- !.
+pattern_adjacent_slots([_ | Rest], A, B) :- pattern_adjacent_slots(Rest, A, B).
+
+%% pattern_build(+Tokens, +Bindings, -Text)
+pattern_build(Tokens, Bindings, Text) :-
+    findall(Chars,
+        (   member(Token, Tokens),
+            pattern_build_token(Token, Bindings, Chars)
+        ),
+        Parts),
+    append(Parts, All),
+    string_chars(Text, All).
+
+pattern_build_token(lit(Chars), _, Chars) :- !.
+pattern_build_token(slot(Name, Type), Bindings, Chars) :-
+    (   member(Name=Value, Bindings)
+    ->  true
+    ;   member(Key=Value, Bindings), pattern_name(Key, Name)
+    ->  true
+    ;   format(atom(Msg), 'pattern: no value bound for slot "~w"', [Name]),
+        throw(error(uninstantiation_error(Msg), pattern/3))
+    ),
+    pattern_render(Type, Value, Chars).
+
+pattern_render(none, Value, Chars) :- !, pattern_text_chars(Value, Chars).
+pattern_render(Type, Value, Chars) :-
+    (   memberchk(Type, [string, text])
+    ->  pattern_text_chars(Value, Chars)
+    ;   memberchk(Type, [int, integer, number])
+    ->  (   number(Value) -> format(string(S), "~w", [Value]) ; S = Value ),
+        string_chars(S, Chars)
+    ;   format(atom(Msg), 'pattern: unknown slot type "~w"', [Type]),
+        throw(error(domain_error(pattern_type, Msg), pattern/3))
+    ).
+
+%% Always a char LIST. Returning the string itself here silently corrupted the
+%% build: the parts list then held a string among char lists, and the final
+%% string_chars/2 failed on a mixed list.
+pattern_text_chars(Value, Chars) :-
+    (   string(Value) -> string_chars(Value, Chars)
+    ;   atom(Value) -> atom_chars(Value, Chars)
+    ;   number(Value) -> format(string(S), "~w", [Value]), string_chars(S, Chars)
+    ;   format(atom(Msg), 'pattern: cannot render ~w as text', [Value]),
+        throw(error(type_error(text, Msg), pattern/3))
+    ).
+
+%% pattern_parse(+Tokens, +Text, -Bindings)
+pattern_parse(Tokens, Text, Bindings) :-
+    % Always a char list: a string here would be one element and the literal
+    % matching below would never line up.
+    (   string(Text) -> string_chars(Text, Chars)
+    ;   atom(Text) -> atom_string(Text, S), string_chars(S, Chars)
+    ;   Chars = Text
+    ),
+    is_list(Chars),
+    pattern_match(Tokens, Chars, Bindings).
+
+pattern_match([], [], []) :- !.
+pattern_match([lit(Lit)], Rest, []) :-
+    !,
+    append(Lit, [], Rest).
+pattern_match([lit(Lit), slot(Name, Type) | More], Chars, [Name=Value | Bindings]) :-
+    append(Lit, Rest0, Chars),
+    !,
+    (   More = [lit(Next) | _], Next \== []
+    ->  append(Taken, After, Rest0),
+        append(Next, _, After)
+    ;   Taken = Rest0,
+        After = []
+    ),
+    pattern_capture(Type, Taken, Value),
+    pattern_match(More, After, Bindings).
+
+pattern_capture(none, Chars, Value) :- !, string_chars(Value, Chars).
+pattern_capture(Type, Chars, Value) :-
+    (   memberchk(Type, [string, text])
+    ->  string_chars(Value, Chars)
+    ;   memberchk(Type, [int, integer])
+    ->  (   catch(number_codes(N, Chars), _, fail), integer(N)
+        ->  Value = N
+        ;   format(atom(Msg), 'pattern: "~s" is not an integer', [Chars]),
+            throw(error(syntax_error(Msg), pattern/3))
+        )
+    ;   memberchk(Type, [number])
+    ->  (   catch(number_codes(N, Chars), _, fail)
+        ->  Value = N
+        ;   format(atom(Msg), 'pattern: "~s" is not a number', [Chars]),
+            throw(error(syntax_error(Msg), pattern/3))
+        )
+    ;   format(atom(Msg), 'pattern: unknown slot type "~w"', [Type]),
+        throw(error(domain_error(pattern_type, Msg), pattern/3))
+    ).
+
+%% pattern_name(+Key, +Name): compare a template slot name with a binding key the
+%% way dict_field does — atom or string, any case, separators ignored.
+pattern_name(Key, Name) :-
+    pattern_normalise(Key, A),
+    pattern_normalise(Name, B),
+    A == B.
+
+pattern_normalise(Value, Normalised) :-
+    (   atom(Value) -> atom_string(Value, Text) ; Text = Value ),
+    string_lower(Text, Lower),
+    split_string(Lower, " _-", "", Parts),
+    atomic_list_concat(Parts, '', Normalised).
+
 %% repl_inject_workspace_predicates(+SessionId)
 %% Idempotent: assertz/1 the same clauses twice is harmless (a duplicate clause
 %% yields the same solution once? no - it yields twice), so clear first.
@@ -4733,6 +4918,7 @@ workspace_predicate_clause(S, (S:json_put(D, P, V, D2) :- deepclause_mi:json_put
 workspace_predicate_clause(S, (S:json_text(D, T) :- deepclause_mi:json_text(D, T))).
 workspace_predicate_clause(S, (S:schema_fill(N, V, F) :-
     deepclause_mi:schema_fields_of(S, N, Fields), deepclause_mi:schema_fill_fields(Fields, V, F))).
+workspace_predicate_clause(S, (S:pattern(T, Text, B) :- deepclause_mi:pattern(T, Text, B))).
 
 workspace_predicate_clause(S, (S:time_file(F, T) :-
     deepclause_mi:resolve_workspace_path(F, P), system:time_file(P, T))).

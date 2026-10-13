@@ -30,6 +30,9 @@ transformation is open-ended (`DML_AUTHORING.md` §0).
 | JSON project | `json_gets(D, "results.*.title", Ts)` / `"a.*.b.*.c"` flattens | list of values |
 | JSON set | `json_put(D, "meta.reviewed", yes, D2)` (keys only, not indices) | updated dict |
 | Parse with a DCG | `string_chars(T, Cs), phrase(grammar(X), Cs)` | binds `X` |
+| Build from a template | `pattern("Name: $name", T, [name="Ada"])` | `"Name: Ada"` |
+| Parse a template | `pattern("Name: $name", "Name: Ada", B)` | `[name="Ada"]` |
+| Parse a typed slot | `pattern("n=$n:int", "n=42", B)` | `[n=42]` |
 
 In `task/`, `output/`, `answer/` description strings, `{Var}` interpolates the
 bound value; in `format/3` use `~w`.

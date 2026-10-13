@@ -865,6 +865,40 @@ agent_main(Topic) :-
 
 ---
 
+## Patterns: one template, build or parse
+
+`pattern/3` is `format/3` and its inverse. Literal text matches exactly and `$name`
+marks a slot, so the same template renders a string or parses it — the direction
+follows from what is bound:
+
+```prolog
+pattern("Name: $name, age: $age", Text, [name="Ada", age=36]).
+% Text = "Name: Ada, age: 36"
+
+pattern("Name: $name, age: $age", "Name: Ada, age: 36", Bindings).
+% Bindings = [name="Ada", age="36"]
+
+pattern("DOI: $doi", Text, [doi=D]).                % build a DOI line
+pattern("n=$n:int", "n=42", B).                     % B = [n=42]   (typed slot)
+```
+
+- Bindings are a list of `Name=Value`, so `member(Name=Value, Bs)` reads them.
+- A slot consumes **up to the next literal**, so the literals decide the split and
+  `"$left - $right"` against `"a - b - c"` gives `left="a"`, `right="b - c"`.
+- `$name:type` converts on parse and validates on build. Types: `string` (default),
+  `int`, `integer`, `number`. A parse that does not match throws, rather than
+  binding the text.
+- Slot names match case- and separator-insensitively, like `dict_field/3`.
+- `$` is the marker rather than `{…}`, so a template can carry JSON or any other
+  brace-bearing text verbatim, and it never collides with the `{Var}`
+  interpolation in `task/N` descriptions. `$$` is a literal dollar.
+- A template must be **anchored by literal text**: `"$a$b"` is rejected as
+  ambiguous rather than resolved arbitrarily.
+
+This is the deterministic alternative to asking the model to reformat text: parse
+the parts you can read exactly, and use a `task/N` only for what genuinely needs
+language understanding.
+
 ## Backtracking
 
 DML supports full Prolog backtracking, **including across LLM calls**. This enables powerful retry logic:
