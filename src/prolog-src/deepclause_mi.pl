@@ -62,6 +62,7 @@
     repl_edit_touched_text/2,
     repl_edit_touched_clear/1,
     repl_validate_tools/2,
+    repl_validate_docs/2,
     repl_inject_workspace_predicates/1,
     workspace_predicate_name/1,
     repl_set_dml_reference/2,
@@ -2126,6 +2127,28 @@ repl_predicate_pure(SessionId, Name, Arity) :-
 repl_validate_tools(SessionId, Warnings) :-
     findall(W, tool_contract_violation(SessionId, W), Raw),
     list_to_set(Raw, Warnings).
+
+%% repl_validate_docs(+SessionId, -Warnings)
+%%
+%% `doc(Name/Arity, Text)` is an annotation: it documents a predicate, it does not
+%% create one. A `doc/2` whose predicate has no clauses therefore names a goal that
+%% fails silently when called — the failure surfaces far away as an empty result,
+%% and the name still appears in the manifest, so the listing looks healthy.
+%% Reported at `end_turn`, where the author can still see what they just wrote.
+repl_validate_docs(SessionId, Warnings) :-
+    findall(W, doc_without_clauses(SessionId, W), Raw),
+    list_to_set(Raw, Warnings).
+
+doc_without_clauses(SessionId, Warning) :-
+    SessionId:doc(Name/Arity, _),
+    (   \+ current_predicate(SessionId:Name/Arity)
+    ;   functor(Head, Name, Arity),
+        \+ clause(SessionId:Head, _)
+    ),
+    !,
+    format(string(Warning),
+        'doc(~w/~w) documents a predicate with no clauses, so calling it fails silently and yields an empty result. Define ~w/~w, or remove the doc/2.',
+        [Name, Arity, Name, Arity]).
 
 tool_contract_violation(SessionId, Warning) :-
     clause(SessionId:tool(Head), Body),
@@ -4376,17 +4399,44 @@ workspace_predicate_name(delete_file).
 workspace_predicate_name(delete_directory).
 workspace_predicate_name(size_file).
 workspace_predicate_name(time_file).
+workspace_predicate_name(dict_field).
+workspace_predicate_name(dict_field_key).
+
+%% dict_field(+Dict, +Key, -Value) and dict_field(+Dict, +Key, +Default, -Value)
+%%
+%% Look up a field of a model-produced dict. SWI dicts have *atom* keys and
+%% `get_dict/3` is strict: `get_dict("affiliation", D)` raises
+%% `type_error(dict-key, affiliation)` rather than failing, and the model varies
+%% the spelling (`Name` / `name` / `full_name`). This matches on a normalised
+%% atom — any of atom/string, any case, `_`/`-`/space ignored — so
+%% `dict_field(D, "affiliation", A)` finds the `affiliation` key.
+dict_field(Dict, Key, Value) :-
+    is_dict(Dict),
+    dict_field_key(Key, Wanted),
+    dict_pairs(Dict, _, Pairs),
+    member(K-V, Pairs),
+    dict_field_key(K, Wanted),
+    Value = V.
+
+dict_field(Dict, Key, Default, Value) :-
+    (   dict_field(Dict, Key, Found)
+    ->  Value = Found
+    ;   Value = Default
+    ).
+
+%% dict_field_key(+Key, -Normalised): lowercase atom with separators removed.
+dict_field_key(Key, Normalised) :-
+    (   atom(Key) -> atom_string(Key, Text) ; Text = Key ),
+    string_lower(Text, Lower),
+    split_string(Lower, " _-", "", Parts),
+    atomic_list_concat(Parts, '', Normalised).
 
 %% repl_inject_workspace_predicates(+SessionId)
 %% Idempotent: assertz/1 the same clauses twice is harmless (a duplicate clause
 %% yields the same solution once? no - it yields twice), so clear first.
 repl_inject_workspace_predicates(SessionId) :-
-    forall(workspace_predicate_name(Name),
-        catch(abolish(SessionId:Name/2), _, true)),
-    forall(workspace_predicate_name(Name),
-        catch(abolish(SessionId:Name/1), _, true)),
-    forall(workspace_predicate_name(Name),
-        catch(abolish(SessionId:Name/3), _, true)),
+    forall(( workspace_predicate_name(Name), between(0, 5, Arity) ),
+        catch(abolish(SessionId:Name/Arity), _, true)),
     forall(workspace_predicate_clause(SessionId, Clause),
         catch(assertz(Clause), _, true)).
 
@@ -4414,6 +4464,9 @@ workspace_predicate_clause(S, (S:delete_directory(D) :-
     deepclause_mi:resolve_workspace_path(D, P), system:delete_directory(P))).
 workspace_predicate_clause(S, (S:size_file(F, Sz) :-
     deepclause_mi:resolve_workspace_path(F, P), system:size_file(P, Sz))).
+workspace_predicate_clause(S, (S:dict_field(D, K, V) :- deepclause_mi:dict_field(D, K, V))).
+workspace_predicate_clause(S, (S:dict_field(D, K, Def, V) :- deepclause_mi:dict_field(D, K, Def, V))).
+workspace_predicate_clause(S, (S:dict_field_key(K, N) :- deepclause_mi:dict_field_key(K, N))).
 workspace_predicate_clause(S, (S:time_file(F, T) :-
     deepclause_mi:resolve_workspace_path(F, P), system:time_file(P, T))).
 

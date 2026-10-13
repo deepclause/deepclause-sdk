@@ -949,6 +949,23 @@ exact_max(X, Y) :-
 ```
 
 ### Dictionaries (SWI-Prolog)
+
+**Keys are atoms.** `get_dict/3` is strict about the key type and *throws* rather
+than failing: `get_dict("affiliation", D)` raises `type_error(dict-key,
+affiliation)`, so no guard sees it as a "no". A string is not even valid dict
+literal syntax (`x{"a":1}` is a syntax error).
+
+Model output makes this worse, because the field name varies — `Name`, `name`,
+`full_name`. Use `dict_field/3,4`, which matches an atom **or** a string key,
+ignoring case and `_`/`-`/space:
+
+```prolog
+dict_field(Dict, "affiliation", Affiliation),          % fails if absent
+dict_field(Dict, full_name, "unknown", Name),          % with a default
+```
+
+The rest of this section is plain SWI dict access, for keys you control:
+
 ```prolog
 agent_main :-
     D = point{x: 10, y: 20},

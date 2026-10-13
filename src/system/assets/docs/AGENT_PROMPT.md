@@ -289,6 +289,14 @@ They apply to the `task/N` they wrap, however it was reached.
 Logic placed only inside `tool/2` is **not** reachable from `execute`/`listing`;
 keep the `tool/2` body a one-line delegation.
 
+# Dictionaries from model output
+
+Dict keys are **atoms** and `get_dict/3` throws on a string key
+(`get_dict("name", D)` → `type_error(dict-key, name)`), while the model varies the
+spelling (`Name`/`name`/`full_name`). Read model fields with `dict_field/3,4`:
+`dict_field(D, "affiliation", A)`, or `dict_field(D, country, "", C)` for a
+default. Reserve `get_dict/3` for keys you control.
+
 # File I/O
 
 Prefer `bash` (`exec(bash(command: ...), Result)`) for reading, writing, copying,

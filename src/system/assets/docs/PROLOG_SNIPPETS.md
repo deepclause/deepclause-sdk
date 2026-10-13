@@ -87,6 +87,8 @@ the value in each `Key-Value`), not a sort mode.
 | Task | Snippet |
 |---|---|
 | Read a field | `D = point{x:1,y:2}, get_dict(x, D, X)` |
+| Model field, any key form | `dict_field(D, "affiliation", A)` — atom or string key, any case, `_`/`-`/space ignored; fails if absent |
+| Model field with default | `dict_field(D, country, "unstated", C)` |
 | Keys | `dict_keys(a{x:1,y:2}, K)` → `[x,y]` |
 | Add/replace a field | `put_dict(score, a{name:"n"}, 9, D2)` |
 
@@ -106,6 +108,9 @@ the value in each `Key-Value`), not a sort mode.
   to collect all matches.
 - `re_match/3` takes an options list; use `re_matchsub/4` for capture groups.
 - `sort/4`'s first argument is the argument position, not a mode.
+- Dict keys must be **atoms**: `get_dict("name", D)` raises
+  `type_error(dict-key, name)` rather than failing, and `x{"a":1}` is a syntax
+  error. Use `dict_field/3,4` for model-produced dicts, whose key spelling varies.
 - A top-level `:- use_module(library(clpfd)).` is required before `#=`/`ins`.
 - Untrusted data (URLs, file contents, user text) goes through files/stdin,
   never interpolated into a shell command.

@@ -1328,6 +1328,7 @@ export class DMLSession {
       for (const entry of changed) if (entry.startsWith('+')) candidates.add(entry.slice(1));
       warnings = await this.probeNondeterminism([...candidates]);
       warnings.push(...this.probeToolContracts());
+      warnings.push(...this.probeDocContracts());
     }
     return { committed: true, changed, warnings };
   }
@@ -1342,6 +1343,25 @@ export class DMLSession {
     try {
       const result = this.prologQuery(
         `deepclause_mi:repl_validate_tools('${this.sessionId}', Warnings)`,
+      );
+      const raw = plainValue(result?.Warnings);
+      if (!Array.isArray(raw)) return [];
+      return raw.map((entry) => String(entry)).filter(Boolean);
+    } catch {
+      // A validation failure must never fail the commit.
+      return [];
+    }
+  }
+
+  /**
+   * Warn about `doc/2` facts that document a predicate with no clauses. Such a
+   * predicate fails silently when called, and its name still appears in the
+   * manifest, so the harness looks fine and returns empty results.
+   */
+  private probeDocContracts(): string[] {
+    try {
+      const result = this.prologQuery(
+        `deepclause_mi:repl_validate_docs('${this.sessionId}', Warnings)`,
       );
       const raw = plainValue(result?.Warnings);
       if (!Array.isArray(raw)) return [];
