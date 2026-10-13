@@ -1693,16 +1693,14 @@ export class DMLRunner {
   ): Map<string, ToolDefinition> {
     const result = new Map<string, ToolDefinition>();
     if (process.env.DC_TRACE_TOOLS) {
-      // Diagnostic: DC_TRACE_TOOLS=1 prints, for every agent tool list built,
-      // which tools are executing and which are withheld. Use it to check that a
-      // tool whose body calls task/N does not appear in the nested agent's list.
-      // eslint-disable-next-line no-console
-      console.error(
-        '[buildAgentTools] executing=%s withheld=%s offered=%s',
-        JSON.stringify(this.toolCallStack),
-        JSON.stringify(excludedTools),
-        JSON.stringify(userTools.map((t) => t.name)),
-      );
+      // Append to a file: inside the TUI, stderr is not visible.
+      try {
+        const { appendFileSync } = require('fs') as typeof import('fs');
+        appendFileSync(
+          process.env.DC_TRACE_TOOLS,
+          `executing=${JSON.stringify(this.toolCallStack)} withheld=${JSON.stringify(excludedTools)} offered=${JSON.stringify(userTools.map((t) => t.name))}\n`,
+        );
+      } catch { /* diagnostics must not break a run */ }
     }
 
     // Add user-defined tools from DML file with schema info
@@ -2101,8 +2099,13 @@ export class DMLRunner {
               }
             }
             
-            // Build the call stack exclusion list (current tool + previously excluded)
-            const nestedExcludedTools = [...excludedTools, toolName];
+            // Withhold every tool that is executing at this point, not just this one
+            // and whatever was passed in: a tool reached by a longer chain (tool →
+            // tool → task/N) must not be offered to the agent at the end of it
+            // either. `this.toolCallStack` is the authoritative stack.
+            const nestedExcludedTools = [
+              ...new Set([...excludedTools, ...this.toolCallStack, toolName]),
+            ];
             
             // Manual scope (with_tools/without_tools). Call-stack exclusion is
             // applied inside buildAgentTools, which needs the withheld names so
