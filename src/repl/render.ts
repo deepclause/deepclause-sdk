@@ -96,19 +96,57 @@ function boundOutput(text: string, max = OUTPUT_LINES): string[] {
   ];
 }
 
-/** Pull a few output lines from a tool result (bash stdout/stderr). */
-function extractToolOutput(result: unknown): string[] {
-  if (!result || typeof result !== 'object') return [];
+/** Captured output of a tool result (bash stdout, else stderr). */
+function toolResultText(result: unknown): string {
+  if (!result || typeof result !== 'object') return '';
   const r = result as Record<string, unknown>;
-  const text = typeof r.stdout === 'string' && r.stdout.trim()
-    ? r.stdout
-    : (typeof r.stderr === 'string' ? r.stderr : '');
+  const stdout = typeof r.stdout === 'string' ? r.stdout : '';
+  const stderr = typeof r.stderr === 'string' ? r.stderr : '';
+  return stdout.trim() ? stdout : stderr;
+}
+
+/** True when the result has no usable stdout, so the text shown is stderr. */
+function isStderrOnly(result: unknown): boolean {
+  if (!result || typeof result !== 'object') return false;
+  const r = result as Record<string, unknown>;
+  const stdout = typeof r.stdout === 'string' ? r.stdout : '';
+  const stderr = typeof r.stderr === 'string' ? r.stderr : '';
+  return !stdout.trim() && Boolean(stderr.trim());
+}
+
+/** The lines of a tool result, normalised for display. */
+function extractToolOutput(result: unknown): string[] {
+  const text = toolResultText(result);
   if (!text.trim()) return [];
   return text
     .replace(/\r\n?/g, '\n')
     .split('\n')
     .map((line) => line.replace(/\t/g, '    ').trimEnd())
     .filter((line) => line.trim() !== '');
+}
+
+/**
+ * A one-line description of captured output: how much there is, and whether it
+ * looks like structured data. Prefer this over dumping raw lines, whose only
+ * readable part would be an arbitrary tail of a JSON payload.
+ */
+function describeToolOutput(result: unknown): string | undefined {
+  const text = toolResultText(result);
+  if (!text.trim()) return undefined;
+  const lines = extractToolOutput(result);
+  const bytes = Buffer.byteLength(text, 'utf8');
+  const head = text.trimStart();
+  const shape = head.startsWith('{') || head.startsWith('[')
+    ? 'JSON'
+    : /^<[!a-zA-Z]/.test(head)
+      ? 'HTML'
+      : undefined;
+  const parts = [
+    `${lines.length} line${lines.length === 1 ? '' : 's'}`,
+    bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} kB`,
+  ];
+  if (shape) parts.push(shape);
+  return parts.join(' · ');
 }
 
 /** Word-wrap a single line to `width`, hard-breaking tokens that are longer. */
@@ -604,10 +642,13 @@ export class ReplRenderer {
 
     if (state === 'completed') {
       const duration = typeof event.toolDurationMs === 'number' ? ` · ${formatDuration(event.toolDurationMs)}` : '';
+      const exit = typeof event.toolExitCode === 'number' && event.toolExitCode !== 0 ? ` · exit ${event.toolExitCode}` : '';
       const summary = event.toolSummary ? ` — ${truncate(event.toolSummary, 80)}` : '';
       this.lastToolDetail = undefined;
-      this.writeLine(this.toolPanel(`${prefix}  ✔ ${name}${args}${duration}${summary}`, tone));
-      // A short tail of the captured output (bash). Full output is --verbose.
+      this.writeLine(this.toolPanel(`${prefix}  ✔ ${name}${args}${duration}${exit}${summary}`, tone));
+      // The output size, not a raw tail: the last few lines of a JSON payload are
+      // never the useful part. `--verbose` prints the full output, and a DML
+      // `execute` result already shows what the goal bound.
       if (!this.verbose) {
         for (const line of this.toolOutputLines(prefix, tone, event.toolResult)) {
           this.writeLine(line);
@@ -647,7 +688,14 @@ export class ReplRenderer {
     this.ensureToolSpinner(prefix, `${name}${pidSuffix} running…`);
   }
 
-  /** Up to TOOL_OUTPUT_LINES captured output lines, as tinted panel lines. */
+  /**
+   * A summary line for the captured output, plus a few of its lines.
+   *
+   * Which lines depends on where the useful end is: stdout is shown from the
+   * *head* (for structured output the head carries the shape — `{`, a first
+   * record — while the tail is arbitrary fragments), and stderr from the *tail*,
+   * where the diagnostic normally is. Full output is `--verbose`.
+   */
   private toolOutputLines(prefix: string, tone: ToolTone, result: unknown): string[] {
     const lines = extractToolOutput(result);
     if (lines.length === 0) {
@@ -655,14 +703,22 @@ export class ReplRenderer {
     }
     const indent = '    ';
     const avail = Math.max(20, this.width - stripAnsi(prefix).length - indent.length);
-    const shown = lines.slice(-TOOL_OUTPUT_LINES);
-    const omitted = lines.length - shown.length;
     const out: string[] = [];
-    if (omitted > 0) {
-      out.push(this.toolPanel(`${prefix}${indent}… (+${omitted} more line${omitted === 1 ? '' : 's'})`, tone));
+    const description = describeToolOutput(result);
+    if (description && lines.length > TOOL_OUTPUT_LINES) {
+      out.push(this.toolPanel(`${prefix}${indent}${description} — --verbose for all`, tone));
+    }
+    const fromTail = !toolResultText(result).trim().startsWith('{') && isStderrOnly(result);
+    const shown = fromTail ? lines.slice(-TOOL_OUTPUT_LINES) : lines.slice(0, TOOL_OUTPUT_LINES);
+    const omitted = lines.length - shown.length;
+    if (fromTail && omitted > 0) {
+      out.push(this.toolPanel(`${prefix}${indent}… (+${omitted} earlier line${omitted === 1 ? '' : 's'})`, tone));
     }
     for (const line of shown) {
       out.push(this.toolPanel(`${prefix}${indent}${line.length > avail ? `${line.slice(0, avail - 1)}…` : line}`, tone));
+    }
+    if (!fromTail && omitted > 0) {
+      out.push(this.toolPanel(`${prefix}${indent}… (+${omitted} more line${omitted === 1 ? '' : 's'})`, tone));
     }
     return out;
   }

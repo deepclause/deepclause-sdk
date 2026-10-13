@@ -181,7 +181,8 @@ describe('ReplRenderer', () => {
     expect(joined).toContain('what_is_in("images", "*.png", File, Text), output(File), output(Text)');
   });
 
-  it('previews a few tail lines of tool output on completion', () => {
+  it('previews the head of stdout on completion', () => {
+    // The head carries the shape of structured output; the tail is fragments.
     const { lines, renderer } = capture('rich', true, 80);
     const command = 'ls -la';
     renderer.render({ type: 'tool_call', toolName: 'bash', toolState: 'starting', toolArgs: { command } } as DMLEvent);
@@ -197,8 +198,25 @@ describe('ReplRenderer', () => {
     const ansi = /\u001b\[[0-9;]*m/g;
     const text = lines.map((line) => line.replace(ansi, '').replace(/\n$/, '')).join('\n');
     expect(text).toMatch(/\+2 more lines/);
-    for (const kept of ['l3', 'l4', 'l5']) expect(text).toContain(kept);
-    for (const dropped of ['l1', 'l2']) expect(text).not.toContain(dropped);
+    expect(text).toContain('5 lines');
+    for (const kept of ['l1', 'l2', 'l3']) expect(text).toContain(kept);
+    for (const dropped of ['l4', 'l5']) expect(text).not.toContain(dropped);
+  });
+
+  it('previews the tail of stderr, where the diagnostic is', () => {
+    const { lines, renderer } = capture('rich', true, 80);
+    renderer.render({ type: 'tool_call', toolName: 'bash', toolState: 'starting', toolArgs: { command: 'x' } } as DMLEvent);
+    renderer.render({
+      type: 'tool_call',
+      toolName: 'bash',
+      toolState: 'completed',
+      toolArgs: { command: 'x' },
+      toolResult: { success: false, exitCode: 1, stdout: '', stderr: 'trace l1\ntrace l2\nError: the real problem\n' },
+    } as DMLEvent);
+
+    const ansi = /\u001b\[[0-9;]*m/g;
+    const text = lines.map((line) => line.replace(ansi, '').replace(/\n$/, '')).join('\n');
+    expect(text).toContain('Error: the real problem');
   });
 
   it('verbose mode shows no output preview (the full logs are already streamed)', () => {
