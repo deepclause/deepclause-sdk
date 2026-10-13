@@ -289,6 +289,9 @@ extract_authors(Text, Authors) :-
 - A field of the wrong type fails the same way. Types are `string`, `integer`,
   `number`, `boolean`, `object`, `array`.
 - An **undeclared** field is kept, not dropped: a model mistake stays visible
+- The field list is **described to the model** in the step's own instructions, and a
+  missing required or wrong-typed field is reported by name inside the same turn,
+  so the agent usually fixes it before the step ends
   rather than disappearing.
 - `schema/2` is a fact, like `doc/2` — it appears in the listing and travels with
   `export`.

@@ -3441,7 +3441,7 @@ mi_call_prompt_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     add_trace_entry(SessionId, llm_call, prompt, [InterpDesc], Depth),
     % prompt/N is a simple LLM call - no tools, no tool scope
     get_model_spec(StateIn, ModelSpec),
-    engine_yield(request_agent_loop(InterpDesc, VarNames, [], [], none, ModelSpec)),
+    engine_yield(request_agent_loop(InterpDesc, ResolvedVarNames, [], [], none, ModelSpec)),
     % Wait for agent_done (no tool calls expected since no tools provided)
     handle_agent_signals(SessionId, StateIn, StateOut),
     session_agent_result(SessionId, Result),
@@ -3722,7 +3722,8 @@ mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     get_reasoning_effort(StateIn, ReasoningEffort),
     get_recipe_context(StateIn, RecipeContext),
     get_model_spec(StateIn, ModelSpec),
-    engine_yield(request_agent_loop(InterpDesc, VarNames, UserTools, Memory, ToolScope, ReasoningEffort, RecipeContext, ModelSpec)),
+    resolve_schema_fields(SessionId, VarNames, ResolvedVarNames),
+    engine_yield(request_agent_loop(InterpDesc, ResolvedVarNames, UserTools, Memory, ToolScope, ReasoningEffort, RecipeContext, ModelSpec)),
     % Handle signals (tool calls) until agent_done
     handle_agent_signals(SessionId, StateIn, StateAfterAgent),
     session_agent_result(SessionId, Result),
@@ -3856,6 +3857,36 @@ schema_fields_of(SessionId, Name, Fields) :-
     ;   format(atom(Msg), 'schema "~w" is not declared', [Name]),
         throw(error(schema_error(Msg), schema_fields_of/3))
     ).
+
+%% resolve_schema_fields(+SessionId, +VarNames, -Resolved)
+%%
+%% Attach a schema's field list to the descriptor for each output variable that
+%% names one, so the agent building the prompt can tell the model the shape to
+%% produce. Done here rather than in extract_var_info/4 (which runs at load time)
+%% because the `schema/2` fact is only certainly present once everything is loaded.
+resolve_schema_fields(SessionId, VarNames, Resolved) :-
+    maplist(resolve_schema_field(SessionId), VarNames, Resolved).
+
+resolve_schema_field(SessionId, VarName, Resolved) :-
+    (   is_dict(VarName), get_dict(schema, VarName, SchemaName)
+    ->  (   schema_field_dicts(SessionId, SchemaName, Fields)
+        ->  put_dict(fields, VarName, Fields, Resolved)
+        ;   Resolved = VarName
+        )
+    ;   Resolved = VarName
+    ).
+
+%% Field descriptors as dicts, so they cross the bridge without a decoder.
+%% `required` is 1/0 rather than an atom: the atom `false` arrives as the string
+%% "false", which is truthy in JavaScript.
+schema_field_dicts(SessionId, SchemaName, Dicts) :-
+    catch(clause(SessionId:schema(SchemaName, Fields), true), _, fail),
+    findall(x{name: Field, type: Type, required: Required, default: Default},
+        (   member(field(Field, Type, Option), Fields),
+            (   Option == required -> Required = 1 ; Required = 0 ),
+            (   Option = default(D) -> Default = D ; Default = no_default )
+        ),
+        Dicts).
 
 schema_filled(Fields, Raw, Filled) :-
     (   is_dict(Raw) -> schema_fill_fields(Fields, Raw, Filled) ; Filled = Raw ).

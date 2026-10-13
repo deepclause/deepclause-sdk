@@ -164,3 +164,40 @@ describe('schema applied to a real task result', () => {
   });
 });
 });
+
+describe('schema fields reach the agent-prompt builder', () => {
+  beforeEach(async () => {
+    await repl.session.loadCode(SCHEMA);
+  });
+
+  it('attaches the declared fields to an output descriptor', () => {
+    const sid = (repl.session as unknown as { sessionId: string }).sessionId;
+    const rendered = String(
+      val(
+        `deepclause_mi:resolve_schema_fields('${sid}', `
+        + '[typed_var{name:"Authors", type:object, schema:author}], R), '
+        + 'format(string(S), "~w", [R])',
+        'S',
+      ),
+    );
+    // The descriptor now carries the field list, which is what the agent-prompt
+    // builder turns into the `set_result` description.
+    expect(rendered).toContain('name:name');
+    expect(rendered).toContain('required:1');
+    expect(rendered).toContain('affiliation');
+    expect(rendered).toContain('not stated');
+  });
+
+  it('leaves a descriptor without a schema untouched', () => {
+    const sid = (repl.session as unknown as { sessionId: string }).sessionId;
+    const rendered = String(
+      val(
+        `deepclause_mi:resolve_schema_fields('${sid}', `
+        + '[typed_var{name:"Text", type:string}], R), format(string(S), "~w", [R])',
+        'S',
+      ),
+    );
+    expect(rendered).toContain('name:Text');
+    expect(rendered).not.toContain('fields');
+  });
+});

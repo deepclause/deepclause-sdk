@@ -444,6 +444,68 @@ async function resolveResponseMessagesWithTimeout(
   };
 }
 
+/**
+ * Describe a declared schema's fields for the model, so `set_result` asks for the
+ * right keys rather than leaving it to guess (`{}` was the whole instruction
+ * before). Returns undefined when the output names no schema.
+ */
+function describeSchemaFields(typedVar: TypedVar): string | undefined {
+  const fields = typedVar.fields;
+  if (!fields || fields.length === 0) return undefined;
+  return fields
+    .map((field) => {
+      const notes = [field.type];
+      if (field.required) notes.push('required');
+      else if (field.default !== undefined) notes.push(`default ${JSON.stringify(field.default)}`);
+      return `${field.name} (${notes.join(', ')})`;
+    })
+    .join(', ');
+}
+
+/**
+ * A declared schema is checked here as well as in the runtime, so the agent is
+ * told which field is wrong *inside* the `set_result` loop and can correct it in
+ * the same turn. The runtime remains the authority — it fills defaults and
+ * re-checks when the value binds — but by then the turn is over.
+ */
+function validateSchemaFields(typedVar: TypedVar, value: unknown): string | null {
+  const fields = typedVar.fields;
+  if (!fields || fields.length === 0) return null;
+  if (!isPlainObject(value)) return 'Expected an object value';
+  const record = value as Record<string, unknown>;
+  for (const field of fields) {
+    const present = Object.prototype.hasOwnProperty.call(record, field.name)
+      || Object.keys(record).some((key) => normaliseFieldKey(key) === normaliseFieldKey(field.name));
+    if (!present) {
+      if (field.required) return `Missing required field "${field.name}"`;
+      continue;
+    }
+    const found = record[field.name] ?? Object.entries(record)
+      .find(([key]) => normaliseFieldKey(key) === normaliseFieldKey(field.name))?.[1];
+    if (!fieldTypeAccepts(field.type, found)) {
+      return `Field "${field.name}" should be ${field.type}`;
+    }
+  }
+  return null;
+}
+
+/** Field names are compared the way dict_field does: case and separators ignored. */
+function normaliseFieldKey(key: string): string {
+  return key.toLowerCase().replace(/[ _-]/g, '');
+}
+
+function fieldTypeAccepts(type: string, value: unknown): boolean {
+  switch (type) {
+    case 'string': return typeof value === 'string';
+    case 'integer': return typeof value === 'number' && Number.isInteger(value);
+    case 'number': return typeof value === 'number';
+    case 'boolean': return typeof value === 'boolean';
+    case 'array': return Array.isArray(value);
+    case 'object': return isPlainObject(value);
+    default: return true;
+  }
+}
+
 function validateTypedResultValue(typedVar: TypedVar, value: unknown): string | null {
   switch (typedVar.type) {
     case 'string':
@@ -458,6 +520,13 @@ function validateTypedResultValue(typedVar: TypedVar, value: unknown): string | 
       if (!Array.isArray(value)) {
         return 'Expected an array value';
       }
+      if (typedVar.fields?.length) {
+        for (const item of value) {
+          const itemError = validateSchemaFields(typedVar, item);
+          if (itemError) return itemError;
+        }
+        return null;
+      }
       if (!typedVar.itemType) {
         return null;
       }
@@ -469,7 +538,9 @@ function validateTypedResultValue(typedVar: TypedVar, value: unknown): string | 
       }
       return null;
     case 'object':
-      return isPlainObject(value) ? null : 'Expected an object value';
+      if (!isPlainObject(value)) return 'Expected an object value';
+      if (typedVar.fields?.length) return validateSchemaFields(typedVar, value);
+      return null;
     default:
       return null;
   }
@@ -878,7 +949,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     const varNames = normalizedOutputVars.map(v => v.name);
     const typeSummary = normalizedOutputVars.map(v => {
       const renderedType = v.type === 'array' && v.itemType ? `array<${v.itemType}>` : v.type;
-      return `${v.name}: ${renderedType}`;
+      const fields = describeSchemaFields(v);
+      return fields ? `${v.name}: array of objects, each ${fields}` : `${v.name}: ${renderedType}`;
     }).join(', ');
     const variableSchema = varNames.length === 1
       ? z.literal(varNames[0])

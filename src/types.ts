@@ -469,10 +469,22 @@ export type FrameKind = 'query' | 'nested' | 'object';
 /**
  * Variable with type information for type-safe LLM outputs
  */
+export interface SchemaField {
+  name: string;
+  type: string;
+  required: boolean;
+  /** Absent when the field declares no default. */
+  default?: unknown;
+}
+
 export interface TypedVar {
   name: string;
   type: 'string' | 'number' | 'integer' | 'boolean' | 'array' | 'object' | 'media';
   itemType?: TypedVar['type']; // For arrays
+  /** Name of the declared `schema/2`, when the output names one. */
+  schema?: string;
+  /** The schema's fields, resolved at run time (see `decodeAgentOutputVars`). */
+  fields?: SchemaField[];
 }
 
 /**

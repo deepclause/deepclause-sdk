@@ -626,3 +626,68 @@ describe('runAgentLoop', () => {
     expect(result.success).toBe(false);
   });
 });
+
+describe('declared output schema, described to the model', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const schemaVar = {
+    name: 'Authors',
+    type: 'array' as const,
+    itemType: 'object' as const,
+    schema: 'author',
+    fields: [
+      { name: 'name', type: 'string', required: true },
+      { name: 'affiliation', type: 'string', required: false, default: 'not stated' },
+    ],
+  };
+
+  it('names the fields in the set_result schema, and reports a missing required one', async () => {
+    let missingFieldError: unknown;
+    let valueDescription = '';
+    let accepted = false;
+
+    aiMocks.generateText.mockImplementation(async ({ tools }: {
+      tools: Record<string, {
+        description?: string;
+        inputSchema: { shape: { value: { description?: string } } };
+        execute: (input: unknown) => Promise<unknown>;
+      }>;
+    }) => {
+      valueDescription = String(tools.set_result.inputSchema.shape.value.description ?? '');
+      // The model omits a required field: it must be told which one.
+      missingFieldError = await tools.set_result.execute({
+        variable: 'Authors',
+        value: [{ affiliation: 'MIT' }],
+      });
+      // And a complete value must be accepted.
+      const ok = await tools.set_result.execute({
+        variable: 'Authors',
+        value: [{ name: 'Ada', affiliation: 'MIT' }],
+      });
+      accepted = (ok as { success?: boolean }).success === true;
+      return { text: 'done', finishReason: 'stop', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } };
+    });
+
+    await runAgentLoop({
+      taskDescription: 'Extract authors',
+      outputVars: [schemaVar],
+      memory: [],
+      tools: new Map(),
+      modelOptions: { model: 'mock-model', provider: 'openai', temperature: 0, maxOutputTokens: 1024 },
+      onOutput: vi.fn(),
+      onStream: vi.fn(),
+      onAskUser: vi.fn(),
+      selfReportingTools: new Set<string>(),
+    });
+
+    // The model is told the shape rather than left to guess `{}`.
+    expect(valueDescription).toContain('name (string, required)');
+    expect(valueDescription).toContain('affiliation');
+    expect(valueDescription).toContain('not stated');
+    // And a missing required field is reported by name, inside the same loop.
+    expect(JSON.stringify(missingFieldError)).toContain('name');
+    expect(accepted).toBe(true);
+  });
+});

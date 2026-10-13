@@ -145,7 +145,24 @@ export function decodeAgentOutputVars(rawOutputVars: unknown): (string | TypedVa
       && typeof (value as Record<string, unknown>).name === 'string'
       && typeof (value as Record<string, unknown>).type === 'string'
     ) {
-      return value as TypedVar;
+      const record = value as Record<string, unknown>;
+      const typed = value as TypedVar;
+      if (Array.isArray(record.fields)) {
+        typed.fields = record.fields
+          .map((raw) => {
+            const field = toJsValue(raw);
+            if (!field || typeof field !== 'object') return undefined;
+            const f = field as Record<string, unknown>;
+            const name = f.name === undefined ? undefined : String(toJsValue(f.name));
+            if (!name) return undefined;
+            const required = Number(toJsValue(f.required)) === 1;
+            const rawDefault = toJsValue(f.default);
+            const hasDefault = rawDefault !== undefined && rawDefault !== 'no_default';
+            return { name, type: String(toJsValue(f.type) ?? 'string'), required, ...(hasDefault ? { default: rawDefault } : {}) };
+          })
+          .filter((field): field is NonNullable<typeof field> => field !== undefined);
+      }
+      return typed;
     }
     return String(value);
   });

@@ -259,7 +259,8 @@ extract_authors(Text, Authors) :-
 
 Defaults are filled, an absent `required` field or a wrong type fails the step with
 a message naming the field (so the agent can fix it in the same turn), and an
-undeclared field is kept so a model mistake stays visible. `schema/2` is a fact like
+undeclared field is kept so a model mistake stays visible; the field list is described
+to the model in the step's own instructions. `schema/2` is a fact like
 `doc/2`. Use `schema_fill(author, Raw, Author)` to apply one to a dict by hand.
 
 # Parsing and formatting with one template
