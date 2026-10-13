@@ -105,7 +105,27 @@ agent_main :-
 
 ### Task Predicates
 
+Both `task/N` and `prompt/N` run an LLM step and bind typed outputs. They differ in
+**what conversation the model sees**, which is the single most important thing to
+know about them.
+
+| | `task/N` | `prompt/N` |
+|---|---|---|
+| Memory | the accumulated conversation, **and it is written back** | **fresh** — empty; does not read or write it |
+| Tools | the harness's `tool/2` predicates | **none** (plain text completion) |
+| Use for | a step in a multi-step flow that should know what came before | classification, extraction, transformation, or a bounded question that must not be swayed by the conversation |
+
 #### `task(+Description)`
+
+Invoke an LLM to perform a task. The description is sent to the model.
+
+```prolog
+agent_main :-
+    system("You are a coding assistant."),
+    task("Write a function to calculate factorial in Python."),
+    answer("Code generated!").
+```
+
 
 Invoke an LLM to perform a task. The description is sent to the model.
 
@@ -158,6 +178,63 @@ Bind up to three variables.
 > `format(string(C), "Answer: ~w", [Question]), task_named(C, [Answer], ...)`.
 > `listing` and `export` reverse this, so you always read/write `task/N` and
 > `prompt/N` — never author `task_named/3` yourself.
+
+### Memory: what the model sees, and how it grows
+
+A `task/N` call is **not** a fresh conversation. It is sent the memory the session
+has accumulated, and the agent's full resulting memory is written back — so each
+`task/N` sees every earlier one, plus its own prompt and reply:
+
+```prolog
+step(Text, Summary, Tags) :-
+    task("Summarise: {Text}", Summary),     % sees: nothing yet
+    task("Tag this summary: {Summary}", Tags).   % sees: the first task's prompt and reply
+```
+
+`system/1` and `user/1` add to that same memory, and **they are backtrackable** —
+a `system/1` inside a branch that is later undone stops contributing:
+
+```prolog
+brief(Text, Out) :-
+    system("Answer in one sentence."),
+    task("Summarise: {Text}", Out).
+```
+
+Two consequences worth planning for:
+
+- **Memory grows with every task.** A loop of `task/N` calls sends an ever longer
+  conversation, which costs tokens and eventually dilutes the instruction. Pass
+  values as explicit arguments rather than relying on the model to remember, and
+  start a fresh step when the history is no longer relevant.
+- **A `task/N` inside a `tool/2` starts with empty memory.** Tool bodies run in
+  their own engine, which is created with no memory of the caller, so a nested
+  agent sees only what the *tool arguments* carry. Put the context in the argument,
+  or add it inside the tool body with `system/1`:
+
+  ```prolog
+  summarise(Text, Summary) :-
+      task("Summarise this text in two sentences: {Text}", Summary).
+
+  tool(summarise(Text, Summary), "Summarise a passage.") :-
+      summarise(Text, Summary).
+  ```
+
+**A fresh context: `prompt/N`.** `prompt/N` takes the same arguments as `task/N` but
+sends **no memory and no tools**, and leaves the memory untouched. Use it when the
+step must answer from its own prompt alone — a classifier, an extractor, a
+translation — or when a long history has started to interfere:
+
+```prolog
+route(Message, Team) :-
+    prompt("Classify as billing, orders or account: {Message}", Team).
+
+% The conversation so far cannot leak into the classification, and the
+% classification cannot leak into it.
+```
+
+Because `prompt/N` has no tools, a step that must read a file or search an index
+has to be a `task/N`. Choose by what the step needs: the harness's capabilities
+(`task/N`) or an uncontaminated answer (`prompt/N`).
 
 ### Type-Safe Output Variables
 

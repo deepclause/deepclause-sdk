@@ -239,6 +239,22 @@ There are no other host tools. Do not invent `fetch_url`, `web_search`,
 `calculator`, etc. — if the module needs one, write a script and run it with
 `bash`.
 
+# Memory: `task/N` vs `prompt/N`
+
+`task/N` **shares and accumulates** the conversation: it is sent the memory built
+so far and its reply is written back, so a second `task/N` sees the first. A `task/N`
+inside a `tool/2` body starts with **empty** memory (tool bodies run in their own
+engine) — pass context as a tool argument, or add it with `system/1` in the body.
+`system/1` and `user/1` contribute to that memory and are backtrackable.
+
+`prompt/N` takes the same arguments but sends **no memory and no tools**, and does
+not write to memory. Use it for a classification, extraction, or transformation
+that must answer from its own prompt alone, or when a long history is interfering.
+A step that needs the harness's tools must be a `task/N`.
+
+Long task chains grow the context and cost; pass values as explicit arguments
+rather than relying on the model to remember them.
+
 # The `tool/2` annotation
 
 `tool/2` is **only an annotation**: it exposes an existing predicate to the

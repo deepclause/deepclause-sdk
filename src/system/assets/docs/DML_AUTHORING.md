@@ -41,6 +41,13 @@ plausibly reuse the predicate with different arguments; if only this request
 would, do not add it. A harness of many task-shaped helpers is as bad as one
 hard-coded script.
 
+**Know which conversation the model sees.** `task/N` is sent the memory built so
+far and writes its reply back, so consecutive `task/N` calls accumulate history —
+pass values as explicit arguments instead of relying on the model to remember them.
+`prompt/N` is fresh (no memory, no tools) and is the right choice for a classifier,
+extractor, or transformation that must not be swayed by the conversation. A `task/N`
+inside a `tool/2` body starts empty: give it the context as an argument.
+
 **Prefer orchestration over algorithms.** A skill should read as a short
 sequence of steps. Describe each step with `task/N` (which sees the conversation
 memory) or `prompt/N` (fresh context) and let the model extract, classify,
