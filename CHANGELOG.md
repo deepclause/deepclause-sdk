@@ -1,5 +1,61 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`pattern/3` — one template that builds a string or parses it.** `format/3` had
+  no inverse; `pattern("Name: $name, age: $age", Text, [name="Ada"])` renders, and
+  the same template with `Text` bound parses to `[name="Ada", age="36"]`. Slots are
+  `$name` (so a template can carry JSON verbatim and cannot collide with the
+  `{Var}` interpolation in `task/N`), `$name:int` converts, a slot consumes up to
+  the next literal, and an unanchored `"$a$b"` is rejected rather than guessed.
+- **`schema/2` — declared shapes for structured model output.**
+  `task(…, list(schema(author, Authors)))` fills defaults, reports a missing
+  `required` field or a wrong-typed field against the field name, and keeps an
+  undeclared field visible instead of dropping it.
+- **JSON paths:** `json_get/3,4` (`"results.0.authors.1.name"` or a list),
+  `json_gets/3` (`*` collects and flattens), `json_put/4`, `json_text/2`. A missing
+  path fails, never throws and never yields `""`.
+- **`with_fresh_memory/1`** scopes a group of steps to an empty conversation that
+  accumulates within the scope and is discarded on exit — `prompt/N` for several
+  calls. `prompt/N` itself was undocumented and now has a section.
+- **`exec(bash(argv: [...]))`** takes the command and arguments as a list and quotes
+  every element, so an argument containing a space, a quote, `$` or `;` is inert.
+- **`dict_field/3,4`** reads a model-produced dict field with an atom or string key,
+  any case, ignoring `_`/`-`/space.
+
+### Fixed
+
+- **`--harness` was inert.** The REPL action handler never forwarded it, so the
+  harness always resolved to `main` and no named slot was ever created.
+- **A tool that failed by returning an error rendered as a tick.** Only
+  `success: false` counted as a failure, so the runtime's own "already running
+  further up the call chain" refusal — and any `{ error: "…" }` — was reported as a
+  completed call. Re-entrant tool calls are now refused at dispatch and rendered as
+  failures with the reason.
+- **`:- repl_delete(a/1).` silently did nothing**, and so did every other
+  unrecognised directive: the loader's directive catch-all discarded them. The
+  directive now removes the predicate, and an unknown directive is reported after
+  the load.
+- **`doc(Name/Arity, …)` with no clauses is reported at `end_turn`.** Such a
+  predicate fails silently when called and its name still appears in the manifest.
+- **Tool contract violations are reported at `end_turn`** — a `tool/2` whose body
+  calls a different arity, calls itself, or names a predicate that does not exist
+  failed only inside a nested agent, where it burned the model-call budget.
+- **`read_file/2` had no definition**, so it worked from DML and raised
+  `existence_error` from a host query. The workspace file predicates are real
+  session clauses now, reachable from DML and from a host query alike. Host queries
+  run in the session module. `open/3`, `close/1`, `read_string/3` and `write/2`
+  cannot be shadowed and stay stream-only.
+- **Tool output printed the last three lines of its captured output** — for JSON,
+  the one part with no information. The panel now reports the size and kind and
+  shows the head (stderr's tail), and a non-zero exit appears in the header.
+- **The docs taught self-delegating tools** and never mentioned that `doc/2` creates
+  nothing, that `prompt/N` exists, or that `atom_json_dict/3` writes JSON and DCGs
+  work — but `phrase/2` needs `string_chars/2` first.
+
+
 ## 0.1.1 - 2026-10-12
 
 ### Fixed
