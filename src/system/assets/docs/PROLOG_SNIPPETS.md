@@ -17,6 +17,7 @@ transformation is open-ended (`DML_AUTHORING.md` §0).
 | Atom case | `downcase_atom('ABC', L)` / `upcase_atom('abc', U)` | `abc` / `ABC` |
 | Collapse whitespace | `normalize_space(string(T), "  a   b  ")` | `a b` |
 | Build a string | `format(string(S), "~w/~w", [A, B])` | `a/b` |
+| Run a command with data | `exec(bash(argv: ["python3", Script, Text]), R)` | args quoted by the runtime |
 | Number <-> string | `number_string(42, S)` / `atom_number("42", N)` | `"42"` / `42` |
 | Substring test | `sub_string(S, _, _, _, "needle")` | true |
 | Substring test (atom) | `sub_atom(A, _, _, _, needle)` | true |

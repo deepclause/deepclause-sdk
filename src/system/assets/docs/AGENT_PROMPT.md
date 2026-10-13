@@ -374,7 +374,19 @@ implements. Never nest code inside code.
   doubles a single quote (`'it''s'`).
 - Prefer `~q`/`~s` over `~w` whenever the value is not a controlled atom.
 
-## Shell: pass data, never splice code
+## Shell: pass data as a list
+
+`exec(bash(argv: [...], timeoutMs: N), R)` takes the command and its arguments as
+a **list**. The runtime quotes every element, so an argument containing a space, a
+quote, `$`, a backtick or `;` is data and cannot escape:
+
+```prolog
+exec(bash(argv: ["python3", Script, Text]), R), get_dict(stdout, R, Text).
+```
+
+Use `argv` whenever any argument is not a literal you wrote yourself — a path from
+a file, model output, user input. Use `command` only for pipelines and redirection,
+where every interpolated value must still go through a file or stdin.
 
 Do not interpolate data into a command string — quoting differs and injection is
 easy:

@@ -325,6 +325,7 @@ wall-clock duration as `timeMs`:
 
 ```prolog
 exec(bash(command: "sleep 30", timeoutMs: 5000), R),
+exec(bash(argv: ["python3", Script, Query]), R),      % no quoting to write
 get_dict(timeMs, R, Took),
 (   get_dict(exitCode, R, 124)
 ->  format(string(Msg), "timed out after ~w ms", [Took])
@@ -663,6 +664,20 @@ Memory stores `media{path, mime}` — never the image bytes. Judgments
 (`choose`/`rate`/`verify`/`probability`) stay text-only.
 
 ---
+
+#### Running a command with data in it
+
+`argv` takes the command and its arguments as a **list**, and the runtime quotes
+each element. Pass values here and you never write a quote, so an argument
+containing a space, a quote, `$`, a backtick or `;` is inert:
+
+```prolog
+exec(bash(argv: ["python3", Script, UserText]), R), get_dict(stdout, R, Text).
+```
+
+It is the same shell underneath (and the same sandbox), so pipelines and redirection
+still work with `command`; `argv` is the way to pass *data*. Prefer it whenever an
+argument comes from a file, a model, or the user.
 
 ### File I/O and paths — prefer the shell
 

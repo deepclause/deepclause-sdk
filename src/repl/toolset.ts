@@ -48,6 +48,21 @@ export function buildToolCatalog(tools: Map<string, ToolDefinition>): string {
   return lines.join('\n');
 }
 
+/**
+ * Join an argv list into a shell command, quoting every element.
+ *
+ * This is what makes `exec(bash(argv: [...]))` worth having: the author passes
+ * values as a list and never writes a quote, so data containing spaces, quotes,
+ * `$`, backticks, `;` or newlines cannot escape into the command. It still runs
+ * through the same launch plan, so the sandbox and wrapper are unchanged.
+ *
+ * POSIX single-quote quoting: wrap in `'`, and end/restart the quote around any
+ * embedded `'` (`'\''`).
+ */
+export function quoteArgv(argv: readonly string[]): string {
+  return argv.map((item) => `'${item.replace(/'/g, `'\\''`)}'`).join(' ');
+}
+
 export async function createReplToolset(options: ReplToolsetOptions): Promise<ReplToolset> {
   const requested = options.toolNames === null
     ? []
@@ -70,15 +85,24 @@ export async function createReplToolset(options: ReplToolsetOptions): Promise<Re
         type: 'object',
         properties: {
           command: { type: 'string', description: 'Shell command to execute.' },
+          argv: {
+            type: 'array',
+            description: 'Command and arguments as a list, quoted by the runtime. '
+              + 'Prefer this over `command` when any argument is data.',
+          },
           timeoutMs: {
             type: 'integer',
             description: 'Wall-clock timeout in milliseconds (optional; overrides DC_HOST_SHELL_TIMEOUT_MS).',
           },
         },
-        required: ['command'],
       },
       execute: async (args, context) => {
-        const command = String(args.command ?? args.arg1 ?? '');
+        const argv = Array.isArray(args.argv)
+          ? args.argv.map((item) => String(item))
+          : undefined;
+        const command = argv && argv.length > 0
+          ? quoteArgv(argv)
+          : String(args.command ?? args.arg1 ?? '');
         const timeoutMs = typeof args.timeoutMs === 'number' && Number.isFinite(args.timeoutMs) && args.timeoutMs > 0
           ? args.timeoutMs
           : undefined;
