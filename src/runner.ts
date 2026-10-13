@@ -1692,6 +1692,18 @@ export class DMLRunner {
     excludedTools: string[] = []
   ): Map<string, ToolDefinition> {
     const result = new Map<string, ToolDefinition>();
+    if (process.env.DC_TRACE_TOOLS) {
+      // Diagnostic: DC_TRACE_TOOLS=1 prints, for every agent tool list built,
+      // which tools are executing and which are withheld. Use it to check that a
+      // tool whose body calls task/N does not appear in the nested agent's list.
+      // eslint-disable-next-line no-console
+      console.error(
+        '[buildAgentTools] executing=%s withheld=%s offered=%s',
+        JSON.stringify(this.toolCallStack),
+        JSON.stringify(excludedTools),
+        JSON.stringify(userTools.map((t) => t.name)),
+      );
+    }
 
     // Add user-defined tools from DML file with schema info
     // These are the ONLY tools the LLM can call during task()
