@@ -95,4 +95,30 @@ describe('task/N memory', () => {
     expect(first.some((m) => m.content.includes('SYS-MARKER'))).toBe(true);
     expect(first.some((m) => m.content.includes('USR-MARKER'))).toBe(true);
   });
+
+  it('with_fresh_memory isolates a whole Goal, and does not leak back', async () => {
+    const { backend } = await run(
+      'go(A) :- system("SYS-MARKER"), with_fresh_memory(task("FRESH-TASK", A)).',
+      'go(_)',
+      ['one'],
+    );
+    const fresh = backend.seen.find((call) => call.some((m) => m.content.includes('FRESH-TASK')));
+    expect(fresh).toBeDefined();
+    expect(fresh!.some((m) => m.content.includes('SYS-MARKER'))).toBe(false);
+  });
+
+  it('discards what the fresh scope accumulates', async () => {
+    const { backend } = await run(
+      'go(N1, N2) :- system("SYS-MARKER"), get_memory(M1), length(M1, N1),'
+      + ' with_fresh_memory((system("INNER"), task("FRESH-TASK", A))),'
+      + ' get_memory(M2), length(M2, N2).',
+      'go(N1, N2)',
+      ['one'],
+    );
+    // The inner system/1 and the task's turns are discarded: the caller's memory
+    // is exactly what it was before the scope.
+    const fresh = backend.seen.find((call) => call.some((m) => m.content.includes('FRESH-TASK')));
+    expect(fresh!.some((m) => m.content.includes('INNER'))).toBe(true);
+    expect(fresh!.some((m) => m.content.includes('SYS-MARKER'))).toBe(false);
+  });
 });

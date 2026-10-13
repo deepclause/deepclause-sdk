@@ -219,10 +219,11 @@ Two consequences worth planning for:
       summarise(Text, Summary).
   ```
 
-**A fresh context: `prompt/N`.** `prompt/N` takes the same arguments as `task/N` but
-sends **no memory and no tools**, and leaves the memory untouched. Use it when the
-step must answer from its own prompt alone — a classifier, an extractor, a
-translation — or when a long history has started to interfere:
+**A fresh context: `prompt/N`, or `with_fresh_memory/2`.** `prompt/N` takes the same
+arguments as `task/N` but sends **no memory and no tools**, and leaves the memory
+untouched. Use it when the step must answer from its own prompt alone — a
+classifier, an extractor, a translation — or when a long history has started to
+interfere:
 
 ```prolog
 route(Message, Team) :-
@@ -235,6 +236,31 @@ route(Message, Team) :-
 Because `prompt/N` has no tools, a step that must read a file or search an index
 has to be a `task/N`. Choose by what the step needs: the harness's capabilities
 (`task/N`) or an uncontaminated answer (`prompt/N`).
+
+`prompt/N` isolates **one call**. To isolate a **group** of steps — several
+`task/N` calls that share a fresh context with each other but nothing with the
+caller — wrap them in `with_fresh_memory/1`:
+
+```prolog
+describe(Paper, Report) :-
+    with_fresh_memory((
+        task("Summarise the method of: {Paper}", Method),
+        task("Summarise the results of: {Paper}", Results),
+        task("Write a two-sentence abstract from {Method} and {Results}", Report)
+    )).
+% The three steps see each other's turns, because they accumulate within the
+% scope. Nothing the caller accumulated reaches them, and nothing they
+% accumulate reaches the caller — the memory is restored on exit.
+```
+
+With `with_tools/2` / `without_tools/2` it composes into a scope that controls both
+the conversation and the capabilities:
+
+```prolog
+audit(App, Finding) :-
+    with_fresh_memory(without_tools([apply_fix],
+        task("Review {App} against the checklist and report one finding.", Finding))).
+```
 
 ### Type-Safe Output Variables
 

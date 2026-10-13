@@ -252,6 +252,20 @@ not write to memory. Use it for a classification, extraction, or transformation
 that must answer from its own prompt alone, or when a long history is interfering.
 A step that needs the harness's tools must be a `task/N`.
 
+`with_fresh_memory(Goal)` does the same for a **group** of steps: inside it the
+memory starts empty and accumulates normally between the steps, and it is restored
+on exit, so nothing crosses in either direction. Wrap a multi-step sub-computation
+whose internal back-and-forth is irrelevant to the caller:
+
+```prolog
+explain(Paper, Report) :-
+    with_fresh_memory((
+        task("Summarise the method of: {Paper}", Method),
+        task("Summarise the results of: {Paper}", Results),
+        task("Write an abstract from {Method} and {Results}", Report)
+    )).
+```
+
 Long task chains grow the context and cost; pass values as explicit arguments
 rather than relying on the model to remember them.
 

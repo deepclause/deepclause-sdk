@@ -45,8 +45,10 @@ hard-coded script.
 far and writes its reply back, so consecutive `task/N` calls accumulate history —
 pass values as explicit arguments instead of relying on the model to remember them.
 `prompt/N` is fresh (no memory, no tools) and is the right choice for a classifier,
-extractor, or transformation that must not be swayed by the conversation. A `task/N`
-inside a `tool/2` body starts empty: give it the context as an argument.
+extractor, or transformation that must not be swayed by the conversation;
+`with_fresh_memory(Goal)` does the same for a group of steps, and restores the
+caller's memory on exit. A `task/N` inside a `tool/2` body starts empty: give it the
+context as an argument.
 
 **Prefer orchestration over algorithms.** A skill should read as a short
 sequence of steps. Describe each step with `task/N` (which sees the conversation

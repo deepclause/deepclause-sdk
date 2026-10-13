@@ -438,6 +438,9 @@ clean_atomic(with_tools(Tools, Goal), with_tools(Tools, CleanGoal)) :-
 clean_atomic(without_tools(Tools, Goal), without_tools(Tools, CleanGoal)) :-
     !,
     clean_clause_body(Goal, CleanGoal).
+clean_atomic(with_fresh_memory(Goal), with_fresh_memory(CleanGoal)) :-
+    !,
+    clean_clause_body(Goal, CleanGoal).
 clean_atomic(with_judgment(Backend, Goal), with_judgment(Backend, CleanGoal)) :-
     !,
     clean_clause_body(Goal, CleanGoal).
@@ -3805,6 +3808,19 @@ mi_call(with_tools(ToolList, Goal), StateIn, StateOut) :-
     mi_call(Goal, ScopedState, StateWithScope),
     clear_tool_scope(StateWithScope, StateOut).
 
+%% mi_call(with_fresh_memory(Goal), +StateIn, -StateOut)
+%% Run Goal with an empty memory, and discard whatever it accumulates. The steps
+%% inside see nothing from the caller, and the caller sees nothing from them.
+%% Use it to scope a group of task/N calls that must not be influenced by the
+%% conversation so far, or to keep a long history from growing through a
+%% sub-computation. `prompt/N` is the single-call equivalent.
+mi_call(with_fresh_memory(Goal), StateIn, StateOut) :-
+    !,
+    get_memory(StateIn, SavedMemory),
+    set_memory(StateIn, [], FreshState),
+    mi_call(Goal, FreshState, AfterGoal),
+    set_memory(AfterGoal, SavedMemory, StateOut).
+
 %% mi_call(without_tools(ToolList, Goal), +StateIn, -StateOut)
 %% Run Goal with the specified tools excluded from nested tasks
 mi_call(without_tools(ToolList, Goal), StateIn, StateOut) :-
@@ -4839,6 +4855,7 @@ is_mi_special_predicate(prompt_named(_,_,_)). %% Transformed form of prompt/N
 is_mi_special_predicate(llm(_,_)).
 %% Tool scoping predicates
 is_mi_special_predicate(with_tools(_,_)).
+is_mi_special_predicate(with_fresh_memory(_)).
 is_mi_special_predicate(without_tools(_,_)).
 %% Reasoning effort scoping
 is_mi_special_predicate(with_reasoning(_,_)).
