@@ -4449,6 +4449,10 @@ workspace_predicate_name(size_file).
 workspace_predicate_name(time_file).
 workspace_predicate_name(dict_field).
 workspace_predicate_name(dict_field_key).
+workspace_predicate_name(json_get).
+workspace_predicate_name(json_gets).
+workspace_predicate_name(json_put).
+workspace_predicate_name(json_text).
 
 %% dict_field(+Dict, +Key, -Value) and dict_field(+Dict, +Key, +Default, -Value)
 %%
@@ -4478,6 +4482,114 @@ dict_field_key(Key, Normalised) :-
     string_lower(Text, Lower),
     split_string(Lower, " _-", "", Parts),
     atomic_list_concat(Parts, '', Normalised).
+
+%% json_get/3,4, json_gets/3, json_put/4, json_text/2
+%%
+%% Path access into a model-produced structure, so a nested lookup is one call
+%% rather than a chain of dict_field/3. A path is a list of keys and indices, or a
+%% string/atom with `.` separators (`"results.0.authors.1.name"`), which is how a
+%% JSON path is normally written.
+%%
+%% A missing path **fails** — it does not throw and does not yield "" — so absence
+%% is visible at the call site; json_get/4 supplies a default instead. Key matching
+%% is the same tolerant match as dict_field/3 (atom or string, any case,
+%% `_`/`-`/space ignored).
+json_path_segments(Path, Segments) :-
+    (   is_list(Path)
+    ->  Segments = Path
+    ;   (   atom(Path) -> atom_string(Path, Text) ; Text = Path ),
+        split_string(Text, ".", "", RawParts),
+        exclude(==(""), RawParts, Parts),
+        maplist(json_path_segment, Parts, Segments)
+    ).
+
+json_path_segment("*", star) :- !.
+json_path_segment(Part, Index) :-
+    catch(number_string(N, Part), _, fail),
+    integer(N),
+    !,
+    Index = N.
+json_path_segment(Part, Part).
+
+%% json_walk(+Value, +Segments, -Found)
+json_walk(Value, [], Value) :- !.
+json_walk(Doc, [Index|Rest], Found) :-
+    integer(Index),
+    is_list(Doc),
+    !,
+    nth0(Index, Doc, Next),
+    json_walk(Next, Rest, Found).
+json_walk(Doc, [Key|Rest], Found) :-
+    is_dict(Doc),
+    dict_field_key(Key, Wanted),
+    dict_pairs(Doc, _, Pairs),
+    member(K-V, Pairs),
+    dict_field_key(K, Wanted),
+    json_walk(V, Rest, Found).
+
+json_get(Doc, Path, Value) :-
+    json_path_segments(Path, Segments),
+    \+ member(star, Segments),
+    json_walk(Doc, Segments, Value).
+
+json_get(Doc, Path, Default, Value) :-
+    (   json_get(Doc, Path, Found)
+    ->  Value = Found
+    ;   Value = Default
+    ).
+
+%% json_gets/3: `*` maps over a list, collecting the remainder for every element.
+%% Nested `*`s flatten, so "results.*.authors.*.name" is a flat list of names.
+json_gets(Doc, Path, Values) :-
+    json_path_segments(Path, Segments),
+    json_collect(Doc, Segments, Values).
+
+json_collect(Value, [], [Value]) :- !.
+json_collect(Doc, [star|Rest], Values) :-
+    is_list(Doc),
+    findall(Collected,
+        ( member(Item, Doc), json_collect(Item, Rest, Collected) ),
+        Nested),
+    append(Nested, Values).
+json_collect(Doc, [Seg|Rest], Values) :-
+    json_walk_1(Doc, Seg, Next),
+    json_collect(Next, Rest, Values).
+
+%% One step of a walk, for the collector (where `star` is handled by the caller).
+json_walk_1(Doc, Index, Value) :- integer(Index), is_list(Doc), !, nth0(Index, Doc, Value).
+json_walk_1(Doc, Key, Value) :-
+    is_dict(Doc),
+    dict_field_key(Key, Wanted),
+    dict_pairs(Doc, _, Pairs),
+    member(K-V, Pairs),
+    dict_field_key(K, Wanted),
+    Value = V.
+
+%% json_put/4: set a key path. Lists are read-only here — an index path is
+%% rejected, because building output is about setting fields, not splicing lists.
+json_put(Doc, Path, Value, Updated) :-
+    json_path_segments(Path, Segments),
+    Segments \== [],
+    \+ member(star, Segments),
+    % NB: `\+ ( member(S, Segments), integer(S) )`. Writing this as
+    % `\+ member(S, Segments), integer(S)` binds S inside the negation, so the
+    % whole guard fails for any non-empty path.
+    \+ ( member(Seg, Segments), integer(Seg) ),
+    json_put_walk(Doc, Segments, Value, Updated).
+
+json_put_walk(_Doc, [], Value, Value) :- !.
+json_put_walk(Doc, [Key|Rest], Value, Updated) :-
+    is_dict(Doc),
+    (   json_walk_1(Doc, Key, Old)
+    ->  json_put_walk(Old, Rest, Value, NewValue)
+    ;   json_put_walk(_{}, Rest, Value, NewValue)
+    ),
+    dict_field_key(Key, Key0),
+    put_dict(Key0, Doc, NewValue, Updated).
+
+%% json_text(+Dict, -Text): compact JSON. For layout or streaming use
+%% json_write_dict/3 from library(http/json).
+json_text(Dict, Text) :- atom_json_dict(Text, Dict, []).
 
 %% repl_inject_workspace_predicates(+SessionId)
 %% Idempotent: assertz/1 the same clauses twice is harmless (a duplicate clause
@@ -4515,6 +4627,12 @@ workspace_predicate_clause(S, (S:size_file(F, Sz) :-
 workspace_predicate_clause(S, (S:dict_field(D, K, V) :- deepclause_mi:dict_field(D, K, V))).
 workspace_predicate_clause(S, (S:dict_field(D, K, Def, V) :- deepclause_mi:dict_field(D, K, Def, V))).
 workspace_predicate_clause(S, (S:dict_field_key(K, N) :- deepclause_mi:dict_field_key(K, N))).
+workspace_predicate_clause(S, (S:json_get(D, P, V) :- deepclause_mi:json_get(D, P, V))).
+workspace_predicate_clause(S, (S:json_get(D, P, Def, V) :- deepclause_mi:json_get(D, P, Def, V))).
+workspace_predicate_clause(S, (S:json_gets(D, P, Vs) :- deepclause_mi:json_gets(D, P, Vs))).
+workspace_predicate_clause(S, (S:json_put(D, P, V, D2) :- deepclause_mi:json_put(D, P, V, D2))).
+workspace_predicate_clause(S, (S:json_text(D, T) :- deepclause_mi:json_text(D, T))).
+
 workspace_predicate_clause(S, (S:time_file(F, T) :-
     deepclause_mi:resolve_workspace_path(F, P), system:time_file(P, T))).
 

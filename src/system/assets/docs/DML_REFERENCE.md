@@ -1067,6 +1067,54 @@ dict_field(Dict, "affiliation", Affiliation),          % fails if absent
 dict_field(Dict, full_name, "unknown", Name),          % with a default
 ```
 
+**JSON.** `atom_json_dict/3` works in both directions, which is the whole story —
+reading and writing:
+
+```prolog
+atom_json_dict(Text, Dict, []),          % JSON text -> dict  (Text bound)
+atom_json_dict(Text, Dict, []),          % dict -> JSON text  (Text unbound)
+```
+
+Reading a nested value is one call with a path rather than a chain of lookups:
+
+```prolog
+json_get(Doc, "results.0.authors.1.name", Name),        % dotted path
+json_get(Doc, [results, 0, authors, 1, name], Name),    % or a list
+json_get(Doc, "results.0.year", "unknown", Year),       % with a default
+json_gets(Doc, "results.*.title", Titles),              % project: collect `*`
+json_gets(Doc, "results.*.authors.*.name", Names),      % nested `*` flattens
+json_put(Doc, "meta.reviewed", yes, Updated),           % set a key path
+json_text(Doc, Text),                                   % compact JSON
+```
+
+A missing path **fails**; it does not throw and does not give `""`, so absence is
+visible. Key matching is the same tolerant match as `dict_field/3` (atom or string,
+any case, `_`/`-`/space ignored). `json_put/4` sets keys and creates intermediate
+dicts; it rejects an index path, so lists are read-only. For layout or streaming,
+`json_write_dict/3` from `library(http/json)` is available.
+
+**Parsing text with a grammar.** DCGs work — the loader runs `expand_term/2`, so
+`-->` compiles, and `library(dcg/basics)` imports:
+
+```prolog
+:- use_module(library(dcg/basics)).
+
+key_value(K, V) --> string_without(":", K), ":", string(V).
+
+parse_kv(Text, Pairs) :-
+    string_chars(Text, Chars),          % phrase/2 wants a LIST, not a string
+    phrase(lines(Pairs), Chars).
+
+lines([K-V|Rest]) --> key_value(K, V), "\n", !, lines(Rest).
+lines([K-V]) --> key_value(K, V).
+```
+
+`phrase/2,3` takes a **code or char list**, so `string_chars/2` (or
+`string_codes/2`) comes first — passing a string raises `type_error(list, …)`.
+Also useful here: `number_codes/2`, `read_term_from_atom/3`,
+`split_string/4`. DCGs give you a documented, testable parser instead of a chain of
+regex calls, and the same grammar can generate text as well as accept it.
+
 The rest of this section is plain SWI dict access, for keys you control:
 
 ```prolog

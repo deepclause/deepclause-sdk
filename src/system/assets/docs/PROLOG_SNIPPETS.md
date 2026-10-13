@@ -23,6 +23,12 @@ transformation is open-ended (`DML_AUTHORING.md` §0).
 | Concat | `string_concat("a", "b", S)` | `ab` |
 | Char list | `string_chars("abc", L)` | `[a,b,c]` |
 | JSON string -> dict | `atom_json_dict('{"a":[1,2]}', D, []), get_dict(a, D, A)` | `[1,2]` |
+| dict -> JSON string | `atom_json_dict(S, x{a:1}, [])` (`atom_json_dict/3` is bidirectional) | `"{\"a\":1}"` |
+| JSON path | `json_get(D, "results.0.title", T)` / `[results,0,title]` | the nested value |
+| JSON with default | `json_get(D, "results.0.year", "unknown", T)` | default when absent |
+| JSON project | `json_gets(D, "results.*.title", Ts)` / `"a.*.b.*.c"` flattens | list of values |
+| JSON set | `json_put(D, "meta.reviewed", yes, D2)` (keys only, not indices) | updated dict |
+| Parse with a DCG | `string_chars(T, Cs), phrase(grammar(X), Cs)` | binds `X` |
 
 In `task/`, `output/`, `answer/` description strings, `{Var}` interpolates the
 bound value; in `format/3` use `~w`.
@@ -111,6 +117,9 @@ the value in each `Key-Value`), not a sort mode.
 - Dict keys must be **atoms**: `get_dict("name", D)` raises
   `type_error(dict-key, name)` rather than failing, and `x{"a":1}` is a syntax
   error. Use `dict_field/3,4` for model-produced dicts, whose key spelling varies.
+- `phrase/2` takes a **list**: `phrase(g(X), "text")` raises
+  `type_error(list, "text")`. Convert first with `string_chars/2`.
+- A missing `json_get/3` path **fails**; use `json_get/4` for a default.
 - A top-level `:- use_module(library(clpfd)).` is required before `#=`/`ins`.
 - Untrusted data (URLs, file contents, user text) goes through files/stdin,
   never interpolated into a shell command.
