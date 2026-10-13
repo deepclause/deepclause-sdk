@@ -61,6 +61,9 @@
     repl_edit_touched/2,
     repl_edit_touched_text/2,
     repl_edit_touched_clear/1,
+    repl_validate_tools/2,
+    repl_inject_workspace_predicates/1,
+    workspace_predicate_name/1,
     repl_set_dml_reference/2,
     repl_set_authoring_examples/2,
     repl_manifest/2,
@@ -153,7 +156,8 @@
 parse_dml(FilePath, SessionId, _MemoryId, Params, Error) :-
     catch(
         (
-            read_file_to_string(FilePath, Code, []),
+            % FilePath is an absolute host temp path, not workspace-relative.
+            system:read_file_to_string(FilePath, Code, []),
             assert_params(SessionId, Params),
             parse_dml_string(Code, SessionId),
             Error = none
@@ -743,7 +747,7 @@ process_directive(consult(File), SessionId) :-
     % Set session ID for get_session_id to find, then call our custom consult
     nb_setval(current_session_id, SessionId),
     resolve_workspace_path(File, FullPath),
-    readutil:read_file_to_string(FullPath, Code, []),
+    system:read_file_to_string(FullPath, Code, []),
     consult_string(Code, SessionId).
 %% Handle use_module directive
 process_directive(use_module(Module), SessionId) :-
@@ -919,7 +923,8 @@ create_session(SessionId, Params, HarnessMemory, MetaMemory) :-
     retractall(session_frozen(SessionId, _)),
     assertz(session_frozen(SessionId, false)),
     retractall(session_locked(SessionId, _)),
-    assertz(session_locked(SessionId, false)).
+    assertz(session_locked(SessionId, false)),
+    repl_inject_workspace_predicates(SessionId).
 
 %% repl_abolish_user_predicates(+SessionId)
 %% Removes only the harness's own predicates; imported builtins are untouched.
@@ -1238,6 +1243,7 @@ internal_session_predicate(param).
 internal_session_predicate(param_decl).
 internal_session_predicate(tool_source).
 internal_session_predicate('__session__').
+internal_session_predicate(Name) :- workspace_predicate_name(Name).
 
 %% history_predicate(+Name)
 %% Runtime-owned harness-history facts. Excluded from the user predicate set (so
@@ -2102,6 +2108,58 @@ repl_body_impure(_:Goal) :- repl_body_impure(Goal).
 repl_predicate_pure(SessionId, Name, Arity) :-
     functor(Head, Name, Arity),
     \+ ( clause(SessionId:Head, Body), repl_body_impure(Body) ).
+
+%% ============================================================
+%% Tool contract validation (end_turn advisory)
+%% ============================================================
+%%
+%% A tool head is what the nested agent calls; the tool body is what runs. So a
+%% well-formed tool is `tool(foo(A,B), "…") :- foo(A,B)` with foo/2 defined
+%% separately. The declared head arrives structurally through `clause/2` (its
+%% body is NOT executed), so a declared-but-undefined tool is caught here rather
+%% than at call time deep inside a nested agent.
+%%
+%% Known limitation: a module-qualified skill delegate (e.g. `other:solve(A,B)`)
+%% is not a session predicate and is reported; use `with_tools/2` for those.
+
+%% repl_validate_tools(+SessionId, -Warnings)
+repl_validate_tools(SessionId, Warnings) :-
+    findall(W, tool_contract_violation(SessionId, W), Raw),
+    list_to_set(Raw, Warnings).
+
+tool_contract_violation(SessionId, Warning) :-
+    clause(SessionId:tool(Head), Body),
+    compound(Head),
+    Head =.. [Name|HeadArgs],
+    length(HeadArgs, Arity),
+    tool_body_goal(Body, Call),
+    Call =.. [Callee|Args],
+    length(Args, CalleeArity),
+    (   Callee == Name, CalleeArity == Arity, \+ repl_user_predicate(SessionId, Name, Arity)
+    ->  format(string(Warning),
+            'tool ~w/~w calls the tool itself, so a nested agent recurses forever. Define ~w/~w separately and delegate to it: tool(~w(A,B), "…") :- ~w(A,B).',
+            [Name, Arity, Name, Name, Name, Name])
+    ;   Callee == Name, CalleeArity \== Arity
+    ->  format(string(Warning),
+            'tool ~w/~w declares a different arity than its body calls (~w/~w). A tool head and its delegate must match, with the output argument last.',
+            [Name, Arity, Callee, CalleeArity])
+    ;   \+ ( SessionId:current_predicate(Callee/CalleeArity) )
+    ->  format(string(Warning),
+            'tool ~w/~w calls ~w/~w, which is not defined, so a nested agent gets "Tool not found". Define ~w/~w and delegate to it.',
+            [Name, Arity, Callee, CalleeArity, Callee, CalleeArity])
+    ).
+
+%% tool_body_goal(+Body, -FirstCall): a tool body must reach a call, not be empty.
+tool_body_goal(Body, Call) :-
+    Body \== true,
+    tool_first_goal(Body, Call),
+    compound(Call),
+    functor(Call, F, _),
+    F \== (',').
+
+%% tool_first_goal(+Body, -Call): the first call in a conjunction body.
+tool_first_goal((A, _), Call) :- !, tool_first_goal(A, Call).
+tool_first_goal(Call, Call).
 
 %% True when the predicate has at least one clause with a real body (not a fact).
 repl_predicate_has_rule(SessionId, Name, Arity) :-
@@ -4284,6 +4342,82 @@ mi_foldl(Goal, [H|T], V0, V, StateIn, StateOut) :-
     mi_foldl(Goal, T, V1, V, State1, StateOut).
 
 %% ============================================================
+%% Workspace predicates (one definition, every surface)
+%% ============================================================
+%%
+%% These are **real clauses in the session module**, not only meta-interpreter
+%% handlers. `read_file/2` in particular has no other definition in this build:
+%% without these clauses it exists only as an `mi_call/3` body, so it works from
+%% DML but fails from a host query. Installing them makes a host query, `execute`,
+%% `/goal` and a nested `task/N` resolve the same predicate.
+%%
+%% The file-stream primitives live in `system:` (NOT `readutil`, which has no
+%% `read_file_to_string/3`). They are module-qualified so a wrapper cannot
+%% recurse into itself.
+%%
+%% Deliberately not here: `open/3`, `close/1`, `read_string/3`, `write/2`. They
+%% are imported builtins in the session module and SWI refuses to shadow an
+%% imported private predicate, so a workspace-resolving version cannot be
+%% installed. `read_file/2` and `write_file/2` are the whole-file API instead.
+%%
+%% `workspace_predicate_name/1` is the single source of truth; it also keeps the
+%% set out of `listing` / `export` / history.
+
+workspace_predicate_name(read_file).
+workspace_predicate_name(read_file_to_string).
+workspace_predicate_name(write_file).
+workspace_predicate_name(append_file).
+workspace_predicate_name(exists_file).
+workspace_predicate_name(exists_directory).
+workspace_predicate_name(directory_files).
+workspace_predicate_name(make_directory).
+workspace_predicate_name(make_directory_path).
+workspace_predicate_name(delete_file).
+workspace_predicate_name(delete_directory).
+workspace_predicate_name(size_file).
+workspace_predicate_name(time_file).
+
+%% repl_inject_workspace_predicates(+SessionId)
+%% Idempotent: assertz/1 the same clauses twice is harmless (a duplicate clause
+%% yields the same solution once? no - it yields twice), so clear first.
+repl_inject_workspace_predicates(SessionId) :-
+    forall(workspace_predicate_name(Name),
+        catch(abolish(SessionId:Name/2), _, true)),
+    forall(workspace_predicate_name(Name),
+        catch(abolish(SessionId:Name/1), _, true)),
+    forall(workspace_predicate_name(Name),
+        catch(abolish(SessionId:Name/3), _, true)),
+    forall(workspace_predicate_clause(SessionId, Clause),
+        catch(assertz(Clause), _, true)).
+
+workspace_predicate_clause(S, (S:read_file(F, C) :-
+    deepclause_mi:resolve_workspace_path(F, P), system:read_file_to_string(P, C, []))).
+workspace_predicate_clause(S, (S:read_file_to_string(F, C, O) :-
+    deepclause_mi:resolve_workspace_path(F, P), system:read_file_to_string(P, C, O))).
+workspace_predicate_clause(S, (S:write_file(F, C) :-
+    deepclause_mi:resolve_workspace_path(F, P), system:open(P, write, St), system:write(St, C), system:close(St))).
+workspace_predicate_clause(S, (S:append_file(F, C) :-
+    deepclause_mi:resolve_workspace_path(F, P), system:open(P, append, St), system:write(St, C), system:close(St))).
+workspace_predicate_clause(S, (S:exists_file(F) :-
+    deepclause_mi:resolve_workspace_path(F, P), system:exists_file(P))).
+workspace_predicate_clause(S, (S:exists_directory(D) :-
+    deepclause_mi:resolve_workspace_path(D, P), system:exists_directory(P))).
+workspace_predicate_clause(S, (S:directory_files(D, L) :-
+    deepclause_mi:resolve_workspace_path(D, P), system:directory_files(P, L))).
+workspace_predicate_clause(S, (S:make_directory(D) :-
+    deepclause_mi:resolve_workspace_path(D, P), system:make_directory(P))).
+workspace_predicate_clause(S, (S:make_directory_path(D) :-
+    deepclause_mi:resolve_workspace_path(D, P), system:make_directory_path(P))).
+workspace_predicate_clause(S, (S:delete_file(F) :-
+    deepclause_mi:resolve_workspace_path(F, P), system:delete_file(P))).
+workspace_predicate_clause(S, (S:delete_directory(D) :-
+    deepclause_mi:resolve_workspace_path(D, P), system:delete_directory(P))).
+workspace_predicate_clause(S, (S:size_file(F, Sz) :-
+    deepclause_mi:resolve_workspace_path(F, P), system:size_file(P, Sz))).
+workspace_predicate_clause(S, (S:time_file(F, T) :-
+    deepclause_mi:resolve_workspace_path(F, P), system:time_file(P, T))).
+
+%% ============================================================
 %% File I/O - All paths relative to /workspace
 %% ============================================================
 
@@ -4315,7 +4449,7 @@ mi_call(consult(File), StateIn, StateIn) :-
     get_session_id(SessionId),
     guard_not_frozen(SessionId),
     resolve_workspace_path(File, FullPath),
-    readutil:read_file_to_string(FullPath, Code, []),
+    system:read_file_to_string(FullPath, Code, []),
     consult_string(Code, SessionId).
 
 mi_call(use_module(Module), StateIn, StateIn) :-
@@ -4414,14 +4548,14 @@ consult_process_term(Head, SessionId) :-
 mi_call(read_file_to_string(File, Content, Options), StateIn, StateIn) :-
     !,
     resolve_workspace_path(File, FullPath),
-    readutil:read_file_to_string(FullPath, Content, Options).
+    system:read_file_to_string(FullPath, Content, Options).
 
 %% mi_call(read_file(File, Content), +StateIn, -StateOut)
 %% Simplified version without options
 mi_call(read_file(File, Content), StateIn, StateIn) :-
     !,
     resolve_workspace_path(File, FullPath),
-    readutil:read_file_to_string(FullPath, Content, []).
+    system:read_file_to_string(FullPath, Content, []).
 
 %% mi_call(write_file(File, Content), +StateIn, -StateOut)
 %% Write string content to a file
@@ -4452,11 +4586,6 @@ mi_call(open(File, Mode, Stream), StateIn, StateIn) :-
 mi_call(close(Stream), StateIn, StateIn) :-
     !,
     close(Stream).
-
-%% mi_call(read_string(Stream, Length, Content), +StateIn, -StateOut)
-mi_call(read_string(Stream, Length, Content), StateIn, StateIn) :-
-    !,
-    read_string(Stream, Length, Content).
 
 %% mi_call(write(Stream, Content), +StateIn, -StateOut)
 mi_call(write(Stream, Content), StateIn, StateIn) :-
@@ -4856,6 +4985,14 @@ consume_gas(StateIn, StateOut) :-
 %% mi_call_dispatch(+Goal, +StateIn, -StateOut)
 %% Dispatch user-defined vs built-in predicates
 %% Uses separate clauses instead of if-then-else to preserve backtracking
+mi_call_dispatch(Goal, StateIn, StateIn) :-
+    get_session_id(SessionId),
+    callable(Goal),
+    predicate_property(SessionId:Goal, defined),
+    predicate_property(Goal, built_in),
+    !,
+    call(SessionId:Goal).
+
 mi_call_dispatch(Goal, StateIn, StateIn) :-
     predicate_property(Goal, built_in),
     !,  % Commit: it's built-in, no backtracking needed

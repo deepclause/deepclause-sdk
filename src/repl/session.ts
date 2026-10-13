@@ -1327,8 +1327,29 @@ export class DMLSession {
       for (const entry of touched) candidates.add(entry.trim());
       for (const entry of changed) if (entry.startsWith('+')) candidates.add(entry.slice(1));
       warnings = await this.probeNondeterminism([...candidates]);
+      warnings.push(...this.probeToolContracts());
     }
     return { committed: true, changed, warnings };
+  }
+
+  /**
+   * Check every registered `tool/2` annotation: the nested agent inside `task/N`
+   * calls the tool body, so it must reach real logic with the same name and
+   * arity. Violations only surface when a nested agent calls the tool, which may
+   * be long after the commit — report them here instead.
+   */
+  private probeToolContracts(): string[] {
+    try {
+      const result = this.prologQuery(
+        `deepclause_mi:repl_validate_tools('${this.sessionId}', Warnings)`,
+      );
+      const raw = plainValue(result?.Warnings);
+      if (!Array.isArray(raw)) return [];
+      return raw.map((entry) => String(entry)).filter(Boolean);
+    } catch {
+      // A validation failure must never fail the commit.
+      return [];
+    }
   }
 
   /**
@@ -1715,7 +1736,7 @@ export class DMLSession {
 
   private prologQuery(goal: string): Record<string, unknown> | null {
     try {
-      const result = this.swipl.prolog.query(goal).once();
+      const result = this.swipl.prolog.query(qualifyWithSession(goal, this.sessionId)).once();
       return (result ?? null) as Record<string, unknown> | null;
     } catch (error) {
       if (process.env.DEBUG_REPL) {
@@ -1730,6 +1751,22 @@ export class DMLSession {
       .map((message) => `message{role: ${message.role}, content: ${quoteString(message.content)}}`)
       .join(', ');
   }
+}
+
+/**
+ * Qualify a goal with the session module unless it already names one.
+ *
+ * DML code resolves unqualified goals in the session module, which is where the
+ * harness and the workspace predicates live. A host query would otherwise
+ * resolve them in `user`, so `read_file("f.txt", C)` failed from here while
+ * working from `execute` or `/goal`. Goals that already carry a qualifier
+ * (`deepclause_mi:…`) are left alone.
+ */
+export function qualifyWithSession(goal: string, sessionId: string): string {
+  const trimmed = goal.trim();
+  if (trimmed.length === 0) return goal;
+  if (/^[a-z][A-Za-z0-9_]*\s*:/.test(trimmed)) return goal;
+  return `${sessionId}:(${trimmed})`;
 }
 
 /** Quote a JS string as a Prolog double-quoted string. */

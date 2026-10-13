@@ -254,6 +254,25 @@ tool(count_words(File, Count), "Count words in a workspace file.") :-
     count_words(File, Count).
 ```
 
+The head and its delegate must have the **same name and the same arity**. The
+tool body is what runs when the nested agent calls the tool, so a body that
+calls a different arity either calls nothing (`existence_error`) or calls the
+tool again and recurses forever:
+
+```prolog
+% WRONG: declares /2 but calls /3, so the tool fails when a nested agent uses it.
+tool(bibliography(Query, Max), "…") :-
+    bibliography(Query, Max, Entries).
+
+% WRONG: calls itself; a nested agent recurses until the budget is gone.
+tool(citations(Text, Citations), "…") :-
+    citations(Text, Citations).
+```
+
+Nothing is checked when the clause is loaded, so both mistakes look fine until a
+nested agent calls the tool. `end_turn` reports them as contract warnings; treat
+them as errors, not style notes.
+
 A predicate defined *only* inside a `tool/2` clause is invisible to
 `execute` / `/goal` — the loader asserts it as `tool(Head)`, never as `Head`. Split
 the two so one implementation is reachable from both surfaces:
@@ -262,6 +281,12 @@ the two so one implementation is reachable from both surfaces:
 /goal count_words("report.txt", C).          % authoring agent
 task("Count the words in report.txt.", N).   % nested agent calls the tool
 ```
+
+The only tools a nested agent can call are the harness's `tool/2` predicates;
+registered host tools (for example `bash`) are reachable from DML code through
+`exec/2`, not as tools by name. So a task description that says "use the
+`fs_read` tool" works only if the module itself defines `fs_read/2` **and**
+annotates it.
 
 The tool head's **last argument is the output**; the description is shown to the
 nested agent. Keep the `tool/2` body a single delegation — put no logic in it.
@@ -304,7 +329,7 @@ tool(format_data(Data, FormattedOutput), "Format data nicely using LLM.") :-
 
 **Memory Isolation:** When `task()` or `prompt()` runs inside a tool, the nested agent starts with **fresh memory**. It does NOT inherit the parent's accumulated memory from `system()`, `user()`, or previous `task()` calls. If you need context in a nested task, pass it explicitly as a tool argument or add it with `system()` inside the tool body.
 
-**Tool Access:** The nested agent has access to all DML tools **except** the tool that is currently executing (automatic call stack exclusion to prevent infinite recursion). You can further control tool access using `with_tools/2` and `without_tools/2`.
+**Tool Access:** The nested agent has access to all DML tools **except** the tool that is currently executing (automatic call stack exclusion to prevent infinite recursion). You can further control tool access using `with_tools/2` and `without_tools/2`. A nested agent's only callable tools are the harness's `tool/2` predicates: host tools such as `bash` are reachable from DML code via `exec/2`, never by name from a task description.
 
 ```prolog
 % Example: passing context explicitly.
@@ -327,15 +352,19 @@ You can control which tools are available to nested `task()` calls using `with_t
 
 #### `with_tools(+ToolList, +Goal)`
 
-Run Goal with only the specified tools available to nested tasks:
+Run Goal with only the specified tools available to nested tasks. `ToolList`
+holds tool *names* (atoms), not predicates:
 
 ```prolog
-% Only allow tool_a and tool_b in the nested task
-tool(restricted_task(Input, Output), "Runs with limited tools") :-
-    with_tools([tool_a, tool_b], (
-        format(string(Desc), "Process '~w' using available tools", [Input]),
+% The implementation defines what the tool does; the annotation exposes it.
+restricted_work(Input, Output) :-
+    with_tools([search_papers, read_paper], (
+        format(string(Desc), "Process '~w' using the available tools", [Input]),
         task(Desc, Output)
     )).
+
+tool(restricted_task(Input, Output), "Runs with limited tools") :-
+    restricted_work(Input, Output).
 ```
 
 #### `without_tools(+ToolList, +Goal)`
@@ -343,12 +372,14 @@ tool(restricted_task(Input, Output), "Runs with limited tools") :-
 Run Goal with the specified tools excluded from nested tasks:
 
 ```prolog
-% Exclude expensive_tool from the nested task
-tool(cheap_task(Input, Output), "Runs without expensive tools") :-
+cheap_work(Input, Output) :-
     without_tools([expensive_tool], (
         format(string(Desc), "Process '~w' cheaply", [Input]),
         task(Desc, Output)
     )).
+
+tool(cheap_task(Input, Output), "Runs without expensive tools") :-
+    cheap_work(Input, Output).
 ```
 
 #### Using Tool Scoping in `agent_main`
@@ -492,6 +523,17 @@ time_file("images/a.png", Modified).
 directory), so build a path with `atom_concat('images/', Name, Path)` when you
 need one. `bash` runs with a wider view of the sandbox than DML has; convert
 anything from the shell to a workspace-relative path before handing it to DML.
+
+These predicates are **real clauses in the session module**, not only
+interpreter handlers, so DML code, a nested `task/N`, and a direct host query
+(the SDK's `runDML`, or `deepclause repl`) all resolve the same definition and
+the same workspace-relative path. `read_file/2` in particular has no other
+definition, which is why it once worked from DML and failed from a host query.
+
+`open/3`, `close/1`, `read_string/3` and `write/2` are the exception. They are SWI
+builtins and cannot be shadowed with a workspace-resolving version, so they stay
+**stream-only** and take an absolute path. Use `read_file/2` and `write_file/2`
+for whole-file I/O — they resolve the relative path and close their own streams.
 
 ---
 

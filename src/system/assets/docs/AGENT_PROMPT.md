@@ -251,6 +251,15 @@ tool(count_words(File, Count), "Count words in a file.") :-
     count_words(File, Count).
 ```
 
+The head and its delegate must have the **same name and arity**; the output is
+the last argument. The tool body is what runs when a nested agent calls the tool,
+so `tool(bibliography(Q, N), "…") :- bibliography(Q, N, E)` (different arity) or
+`tool(citations(T, C), "…") :- citations(T, C)` (calls itself) fails only at call
+time. `end_turn` reports both as tool-contract warnings — fix them, don't ship
+them. The only tools a nested agent can call are the harness's `tool/2`
+predicates; a host tool like `bash` is reachable from DML through `exec/2`, so a
+task description may only name a tool the module itself defines and annotates.
+
 Logic placed only inside `tool/2` is **not** reachable from `execute`/`listing`;
 keep the `tool/2` body a one-line delegation.
 
@@ -261,6 +270,11 @@ and converting files. Use the DML file predicates (`read_file/2`, `write_file/2`
 `make_directory_path/1`, `directory_files/2`, ...) only when the content must be
 bound and reasoned over inside Prolog. Every path is workspace-relative and
 confined to the workspace.
+
+These predicates are real session clauses, so they resolve identically from DML
+and from a host query. `open/3`, `close/1`, `read_string/3` and `write/2` cannot
+be made workspace-resolving (SWI will not shadow an imported builtin) — use
+`read_file/2` and `write_file/2` for whole-file I/O.
 
 # Mixing languages: interpolation, quoting, escaping
 

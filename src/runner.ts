@@ -346,6 +346,10 @@ export class DMLRunner {
         return;
       }
 
+      // Now that the session module exists, install the workspace predicates so
+      // an SDK run resolves `read_file/2` and friends exactly like the REPL.
+      this.query(`deepclause_mi:repl_inject_workspace_predicates('${this.sessionId}')`);
+
       const frame = this.defaultFrameId ? this.frames.get(this.defaultFrameId)?.frame : undefined;
       if (!frame) {
         yield { type: 'error', content: 'Failed to register default query frame' };
