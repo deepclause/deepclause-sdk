@@ -1658,7 +1658,8 @@ export class DMLRunner {
   private buildAgentTools(
     userTools: UserToolInfo[],
     _policy: ToolPolicy | null,
-    executeToolInline: (toolName: string, args: Record<string, unknown>) => Promise<{ result: unknown; outputs: string[] }>
+    executeToolInline: (toolName: string, args: Record<string, unknown>) => Promise<{ result: unknown; outputs: string[] }>,
+    excludedTools: string[] = []
   ): Map<string, ToolDefinition> {
     const result = new Map<string, ToolDefinition>();
 
@@ -1668,6 +1669,9 @@ export class DMLRunner {
     // nested exec/2 calls pass through handleExec/executeToolIsolated, where
     // the policy still restricts actual host capabilities.
     for (const tool of userTools) {
+      // A withheld tool keeps its place in the list (so a call gets the reason),
+      // but carries no schema and a refusing implementation.
+      if (excludedTools.includes(tool.name)) continue;
       // Build JSON Schema properties from inputs
       const properties: Record<string, { type: string; description?: string }> = {};
       const required: string[] = [];
@@ -1698,6 +1702,22 @@ export class DMLRunner {
           const { result: toolResult } = await executeToolInline(toolName, args);
           return toolResult;
         },
+      });
+    }
+
+    // Withheld tools are still declared, but their implementation refuses with
+    // the reason. Dropping them entirely makes a call look like a missing tool,
+    // which reads as a broken harness and invites a retry loop.
+    for (const tool of userTools) {
+      if (!excludedTools.includes(tool.name)) continue;
+      result.set(tool.name, {
+        description: `${tool.description || `Tool: ${tool.name}`} (unavailable in this task)`,
+        parameters: { type: 'object', properties: {} },
+        execute: async () => ({
+          error: `Tool '${tool.name}' is not available in this task: it is already running further up the `
+            + 'call chain, and calling it again would recurse. Do not call it again; work with the text '
+            + 'you were given, or say what is missing.',
+        }),
       });
     }
 
@@ -2013,17 +2033,16 @@ export class DMLRunner {
             // Build the call stack exclusion list (current tool + previously excluded)
             const nestedExcludedTools = [...excludedTools, toolName];
             
-            // Filter tools based on:
-            // 1. Call stack exclusion (prevent recursion)
-            // 2. Manual scope (if specified via with_tools/without_tools)
-            let filteredTools = userTools.filter(t => !nestedExcludedTools.includes(t.name));
-            
+            // Manual scope (with_tools/without_tools). Call-stack exclusion is
+            // applied inside buildAgentTools, which needs the withheld names so
+            // it can declare them and refuse them with the reason.
+            let scopedTools = userTools;
             if (toolScopeType === 'whitelist') {
               // Only include tools in the whitelist
-              filteredTools = filteredTools.filter(t => toolScopeList.includes(t.name));
+              scopedTools = scopedTools.filter(t => toolScopeList.includes(t.name));
             } else if (toolScopeType === 'blacklist') {
               // Exclude tools in the blacklist
-              filteredTools = filteredTools.filter(t => !toolScopeList.includes(t.name));
+              scopedTools = scopedTools.filter(t => !toolScopeList.includes(t.name));
             }
             
             // Extract memory
@@ -2060,7 +2079,7 @@ export class DMLRunner {
               console.log('[RUNNER] Tool agent outputVars:', outputVars);
               console.log('[RUNNER] Call stack excluded tools:', nestedExcludedTools);
               console.log('[RUNNER] Tool scope:', toolScopeType, toolScopeList);
-              console.log('[RUNNER] Available tools for nested agent:', filteredTools.map(t => t.name));
+              console.log('[RUNNER] Available tools for nested agent:', scopedTools.map(t => t.name));
               console.log('[RUNNER] Memory passed to nested agent:', memory.length, 'messages');
               if (memory.length > 0) {
                 console.log('[RUNNER] Memory contents:', JSON.stringify(memory, null, 2));
@@ -2082,9 +2101,10 @@ export class DMLRunner {
             };
             
             const availableTools = this.buildAgentTools(
-              filteredTools,
+              scopedTools,
               null, // No policy override for nested
-              nestedToolCallback
+              nestedToolCallback,
+              nestedExcludedTools
             );
             
             const nestedStepId = `step_${this.stepCounter++}`;
@@ -2097,6 +2117,9 @@ export class DMLRunner {
                 outputVars,
                 memory: nestedEffectiveMemory,
                 tools: availableTools,
+                // Withheld to break a call cycle; declared to the model so a
+                // call can be answered with the reason rather than "not found".
+                excludedTools: nestedExcludedTools,
                 modelOptions: {
                   model: this.options.model,
                   provider: this.options.provider,

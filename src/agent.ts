@@ -65,6 +65,11 @@ export interface AgentLoopOptions {
   outputVars: (string | TypedVar)[];
   memory: MemoryMessage[];
   tools: Map<string, ToolDefinition>;
+  /**
+   * Tool names withheld from this loop to break a call cycle. Reported with the
+   * reason when called, so a working harness is not mistaken for a broken one.
+   */
+  excludedTools?: string[];
   workspacePath?: string;
   modelOptions: {
     model: string;
@@ -752,7 +757,14 @@ async function runInjectedAgentLoop(
       } else {
         const tool = options.tools.get(call.name);
         if (!tool) {
-          result = { error: `Tool not found: ${call.name}` };
+          const excluded = options.excludedTools?.includes(call.name) ?? false;
+          result = {
+            error: excluded
+              ? `Tool '${call.name}' is not available in this task: it is already running further up `
+                + 'the call chain, and calling it again would recurse. Do not call it again; work with '
+                + 'the text you were given, or say what is missing.'
+              : `Tool not found: ${call.name}`,
+          };
         } else {
           try {
             result = cleanPrologMarkers(await tool.execute(call.arguments, { signal: options.signal }));

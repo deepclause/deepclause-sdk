@@ -23,6 +23,8 @@ import { formatModelCatalogEntry, type ModelCatalogEntry } from './model-resolve
 
 export interface HarnessAgentOptions {
   tools: Map<string, ToolDefinition>;
+  /** Tool names withheld to break a call cycle (see `excludedTools`). */
+  excludedTools?: string[];
   llmBackend: LLMBackend;
   model: string;
   temperature?: number;
@@ -54,6 +56,23 @@ export interface HarnessAgentRunOptions {
 const MAX_TOOL_RESULT_CHARS = 8000;
 
 /** Generate the `TOOLS` section of the system prompt from the tool schemas. */
+/**
+ * The message a nested agent sees for a tool it may not call.
+ *
+ * Two different situations share this path, and they need different advice:
+ * a name that was never a tool (a hallucinated or misspelled call), and a real
+ * tool withheld to break a call cycle. Saying only "Tool not found" for the
+ * second makes a working harness look broken, and the agent retries it.
+ */
+function unavailableToolMessage(name: string, excluded: Set<string>): string {
+  if (excluded.has(name)) {
+    return `Tool '${name}' is not available in this task: it is already running further up the call `
+      + 'chain, and would recurse. Do not call it again. Work with the text you were given, or '
+      + 'state what is missing.';
+  }
+  return `Tool not found: ${name}`;
+}
+
 export function describeTools(tools: Map<string, ToolDefinition>): string {
   const lines: string[] = [];
   for (const [name, tool] of tools) {
@@ -164,6 +183,12 @@ function toolResultFailure(result: unknown): string | undefined {
  */
 export class HarnessAgent {
   readonly tools: Map<string, ToolDefinition>;
+  /**
+   * Tool names withheld from this agent to break a call cycle. They are still
+   * declared to the model, so a call to one can be answered with the reason
+   * instead of looking like a missing tool.
+   */
+  readonly excludedTools: Set<string>;
   private readonly options: HarnessAgentOptions;
   private messages: LLMBackendMessage[];
   /** User messages delivered while a turn is running (pi-style steering). */
@@ -174,6 +199,7 @@ export class HarnessAgent {
   constructor(options: HarnessAgentOptions) {
     this.options = options;
     this.tools = options.tools;
+    this.excludedTools = new Set(options.excludedTools ?? []);
     this.messages = options.knownMessages
       ? options.knownMessages
           // Defensively drop any older host nudge persisted as a user message.
@@ -415,7 +441,7 @@ export class HarnessAgent {
         }
         const tool = tools.get(call.name);
         if (!tool) {
-          const message = `Tool not found: ${call.name}`;
+          const message = unavailableToolMessage(call.name, this.excludedTools);
           yield { type: 'tool_call', toolName: call.name, toolState: 'failed', toolError: message };
           this.messages.push({ role: 'tool', content: JSON.stringify({ error: message }), toolCallId: call.id, toolName: call.name });
           continue;
