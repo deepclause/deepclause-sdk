@@ -130,12 +130,15 @@ export function createShellToolEventBridge(options: {
   };
 }
 
-function inferToolLifecycleFields(toolResult: unknown): Pick<DMLEvent, 'toolState' | 'toolPid' | 'toolBackend' | 'toolExitCode' | 'toolSummary' | 'toolDurationMs'> {
+function inferToolLifecycleFields(
+  toolResult: unknown,
+): Pick<DMLEvent, 'toolState' | 'toolPid' | 'toolBackend' | 'toolExitCode' | 'toolSummary' | 'toolError' | 'toolDurationMs'> {
   let toolState: DMLEvent['toolState'] = 'completed';
   let toolPid: number | undefined;
   let toolBackend: 'host' | 'sandbox' | undefined;
   let toolExitCode: number | undefined;
   let toolSummary: string | undefined;
+  let toolError: string | undefined;
   let toolDurationMs: number | undefined;
 
   if (toolResult && typeof toolResult === 'object') {
@@ -143,6 +146,18 @@ function inferToolLifecycleFields(toolResult: unknown): Pick<DMLEvent, 'toolStat
 
     if (result.success === false) {
       toolState = 'failed';
+    }
+
+    // A tool that refuses, or fails, by returning an error rather than throwing.
+    // This was missing, so `{ error: "…" }` — including the runtime's own
+    // "already running further up the call chain" refusal — was reported as a
+    // completed call, and the transcript showed a tick for something that did not
+    // happen. Only a non-empty string (or `{ message }`) counts, so a successful
+    // result that carries `error: ""` or `error: null` is not mislabelled.
+    const errorText = readErrorText(result.error);
+    if (errorText) {
+      toolState = 'failed';
+      toolError = errorText;
     }
     if (typeof result.pid === 'number') {
       toolPid = result.pid;
@@ -166,9 +181,20 @@ function inferToolLifecycleFields(toolResult: unknown): Pick<DMLEvent, 'toolStat
     toolPid,
     toolBackend,
     toolExitCode,
-    toolSummary,
+    toolSummary: toolSummary ?? toolError,
+    toolError,
     toolDurationMs,
   };
+}
+
+/** A non-empty error string from `error: "…"` or `error: { message: "…" }`. */
+function readErrorText(value: unknown): string | undefined {
+  if (typeof value === 'string') return value.trim() ? value : undefined;
+  if (value && typeof value === 'object') {
+    const message = (value as Record<string, unknown>).message;
+    if (typeof message === 'string' && message.trim()) return message;
+  }
+  return undefined;
 }
 
 function formatShellStreamLine(

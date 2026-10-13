@@ -63,4 +63,23 @@ describe('tool result framing', () => {
     const lines = renderEvents([bash({ exitCode: 0, stdout: `{"a": "${'x'.repeat(300)}"}`, stderr: '' })], 80);
     for (const line of lines) expect(line.length).toBeLessThanOrEqual(80);
   });
+
+  it('renders a refused tool call as a failure, with the reason', () => {
+    // A refusal reaches the model correctly and used to render as a tick, which is
+    // why a working guard read as "the tool ran again".
+    const lines = renderEvents([
+      {
+        type: 'tool_call',
+        toolName: 'extract_authors',
+        toolState: 'failed',
+        toolArgs: { arg1: 'x' },
+        toolError: "Tool 'extract_authors' is not available in this task: it is already running further up the call chain.",
+        toolDurationMs: 12,
+      },
+    ]);
+    const text = lines.join('\n');
+    expect(text).toContain('✖');
+    expect(text).not.toContain('✔');
+    expect(text).toContain('already running further up the call chain');
+  });
 });
