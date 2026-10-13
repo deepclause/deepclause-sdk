@@ -1016,10 +1016,19 @@ export class DMLRunner {
     // Build available tools for the agent: the harness's DML tool/2 predicates
     // plus registered TS tools (reachable via exec/2).
     const selfReportingTools = undefined;
+    // Tools already executing further up the call chain are NOT offered to this
+    // agent. This is the `task/N` inside a tool: the tool that spawned this agent
+    // is on the stack, and offering it would invite the model to call the thing
+    // that is already running. A withheld tool is still declared (with the reason
+    // in its description) so a stray call gets an explanation, but it cannot run.
+    const withheld = [...this.toolCallStack];
     const availableTools = this.buildAgentTools(
       userTools,
       options.toolPolicy,
       async (toolName: string, args: Record<string, unknown>) => {
+        if (this.toolCallStack.includes(toolName)) {
+          return { result: { error: unavailableToolError(toolName) }, outputs: [] };
+        }
         return this.executeToolIsolated(
           toolName,
           args,
@@ -1031,11 +1040,12 @@ export class DMLRunner {
             toolPolicy: options.toolPolicy,
             onModelCall: options.onModelCall,
           },
-          [],
+          withheld,
           emitToolCall,
           emitToolEvent,
         );
       },
+      withheld,
     );
 
     // Run agent loop with streaming support

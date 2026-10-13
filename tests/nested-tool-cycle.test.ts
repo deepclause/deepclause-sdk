@@ -83,10 +83,10 @@ describe('a tool that calls task/N', () => {
     const tasks = events.filter((e) => e.type === 'task_activity' && e.taskState === 'started');
     expect(tasks.length).toBe(1);
 
-    // It is still declared to the agent inside task/N, so a call can be answered
-    // with the reason rather than looking like a missing tool.
-    const nestedRequest = backend.calls[1];
-    const declared = (nestedRequest?.tools ?? []).find((tool) => tool.name === 'extract_authors');
-    expect(declared).toBeDefined();
+    // NOTE: which tool list the *nested* model receives is asserted in
+    // tests/agent-withheld-tools.test.ts, which calls buildAgentTools directly.
+    // It cannot be asserted here: this scripted backend does not reliably drive a
+    // nested task/N through to its model call, so the requests recorded are not
+    // reliably the nested ones.
   });
 });
