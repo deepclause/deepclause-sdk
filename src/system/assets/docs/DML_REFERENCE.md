@@ -530,13 +530,21 @@ is usually why it exists) while removing it from this one.
 
 **Tool Access:** A nested agent's only callable tools are the harness's `tool/2`
 predicates; host tools such as `bash` are reachable from DML code via `exec/2`,
-never by name from a task description. A tool that is **already executing** is
-withheld from the agent inside it, and a re-entrant call is refused, so a tool
-cannot recurse into itself.
+never by name from a task description. A tool that is **already executing** cannot
+be re-entered: a call to it from inside itself is refused with an explanation, so a
+tool cannot recurse into itself. The refusal is deliberate and visible — the tool is
+declared to the agent with the reason on its description, so the call comes back as
+"already running further up the call chain" rather than as a missing tool, which
+would invite a retry.
 
-That exclusion is keyed on *tool* execution, which has a consequence worth knowing:
-a predicate that is also a tool does **not** count as "executing" when it is called
-as a predicate (`/goal`, `execute`, or from another predicate). So for
+> The withholding is keyed on *tool* execution, and only that is guaranteed. Whether a
+> running tool is also *removed* from the tool list presented to the agent inside it
+> is not something the current test suite covers; the refusal above is what stops the
+> recursion. Do not rely on the tool being absent from `task/N`'s tool list.
+
+That keying has a consequence worth knowing: a predicate that is also a tool does
+**not** count as "executing" when it is called as a predicate (`/goal`, `execute`,
+or from another predicate). So for
 
 ```prolog
 extract_authors(Text, Authors) :- task("…", list(object(Authors))).

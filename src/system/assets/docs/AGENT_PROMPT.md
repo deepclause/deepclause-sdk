@@ -689,7 +689,27 @@ agent_main :-
 
 ### Task Predicates
 
+Both `task/N` and `prompt/N` run an LLM step and bind typed outputs. They differ in
+**what conversation the model sees**, which is the single most important thing to
+know about them.
+
+| | `task/N` | `prompt/N` |
+|---|---|---|
+| Memory | the accumulated conversation, **and it is written back** | **fresh** — empty; does not read or write it |
+| Tools | the harness's `tool/2` predicates | **none** (plain text completion) |
+| Use for | a step in a multi-step flow that should know what came before | classification, extraction, transformation, or a bounded question that must not be swayed by the conversation |
+
 #### `task(+Description)`
+
+Invoke an LLM to perform a task. The description is sent to the model.
+
+```prolog
+agent_main :-
+    system("You are a coding assistant."),
+    task("Write a function to calculate factorial in Python."),
+    answer("Code generated!").
+```
+
 
 Invoke an LLM to perform a task. The description is sent to the model.
 
@@ -742,6 +762,132 @@ Bind up to three variables.
 > `format(string(C), "Answer: ~w", [Question]), task_named(C, [Answer], ...)`.
 > `listing` and `export` reverse this, so you always read/write `task/N` and
 > `prompt/N` — never author `task_named/3` yourself.
+
+### Memory: what the model sees, and how it grows
+
+A `task/N` call is **not** a fresh conversation. It is sent the memory the session
+has accumulated, and the agent's full resulting memory is written back — so each
+`task/N` sees every earlier one, plus its own prompt and reply:
+
+```prolog
+step(Text, Summary, Tags) :-
+    task("Summarise: {Text}", Summary),     % sees: nothing yet
+    task("Tag this summary: {Summary}", Tags).   % sees: the first task's prompt and reply
+```
+
+`system/1` and `user/1` add to that same memory, and **they are backtrackable** —
+a `system/1` inside a branch that is later undone stops contributing:
+
+```prolog
+brief(Text, Out) :-
+    system("Answer in one sentence."),
+    task("Summarise: {Text}", Out).
+```
+
+Two consequences worth planning for:
+
+- **Memory grows with every task.** A loop of `task/N` calls sends an ever longer
+  conversation, which costs tokens and eventually dilutes the instruction. Pass
+  values as explicit arguments rather than relying on the model to remember, and
+  start a fresh step when the history is no longer relevant.
+- **A `task/N` inside a `tool/2` starts with empty memory.** Tool bodies run in
+  their own engine, which is created with no memory of the caller, so a nested
+  agent sees only what the *tool arguments* carry. Put the context in the argument,
+  or add it inside the tool body with `system/1`:
+
+  ```prolog
+  summarise(Text, Summary) :-
+      task("Summarise this text in two sentences: {Text}", Summary).
+
+  tool(summarise(Text, Summary), "Summarise a passage.") :-
+      summarise(Text, Summary).
+  ```
+
+**A fresh context: `prompt/N`, or `with_fresh_memory/2`.** `prompt/N` takes the same
+arguments as `task/N` but sends **no memory and no tools**, and leaves the memory
+untouched. Use it when the step must answer from its own prompt alone — a
+classifier, an extractor, a translation — or when a long history has started to
+interfere:
+
+```prolog
+route(Message, Team) :-
+    prompt("Classify as billing, orders or account: {Message}", Team).
+
+% The conversation so far cannot leak into the classification, and the
+% classification cannot leak into it.
+```
+
+Because `prompt/N` has no tools, a step that must read a file or search an index
+has to be a `task/N`. Choose by what the step needs: the harness's capabilities
+(`task/N`) or an uncontaminated answer (`prompt/N`).
+
+`prompt/N` isolates **one call**. To isolate a **group** of steps — several
+`task/N` calls that share a fresh context with each other but nothing with the
+caller — wrap them in `with_fresh_memory/1`:
+
+```prolog
+describe(Paper, Report) :-
+    with_fresh_memory((
+        task("Summarise the method of: {Paper}", Method),
+        task("Summarise the results of: {Paper}", Results),
+        task("Write a two-sentence abstract from {Method} and {Results}", Report)
+    )).
+% The three steps see each other's turns, because they accumulate within the
+% scope. Nothing the caller accumulated reaches them, and nothing they
+% accumulate reaches the caller — the memory is restored on exit.
+```
+
+With `with_tools/2` / `without_tools/2` it composes into a scope that controls both
+the conversation and the capabilities:
+
+```prolog
+audit(App, Finding) :-
+    with_fresh_memory(without_tools([apply_fix],
+        task("Review {App} against the checklist and report one finding.", Finding))).
+```
+
+### Declared Output Shapes: `schema/2`
+
+A type says "a list of dicts"; a schema says what is *in* them. Declare the shape
+once, name it in the `task/N` output, and every step gets a value that matches it —
+defaults filled, and a missing required field or a wrong-typed field failing the
+step instead of quietly yielding an empty result:
+
+```prolog
+schema(author, [
+    field(name,        string, required),
+    field(affiliation, string, default("not stated")),
+    field(email,       string, default("")),
+    field(country,     string, default(""))
+]).
+
+extract_authors(Text, Authors) :-
+    task("From the front matter extract every author: {Text}",
+         list(schema(author, Authors))).
+% Authors = [author{name:"Ashish Vaswani", affiliation:"Google Brain", email:"", country:""} …]
+```
+
+- An absent field with a `default(Value)` is filled.
+- An absent `required` field **fails the step** with a message naming the field, so
+  the agent can correct it in the same turn.
+- A field of the wrong type fails the same way. Types are `string`, `integer`,
+  `number`, `boolean`, `object`, `array`.
+- An **undeclared** field is kept, not dropped: a model mistake stays visible
+- The field list is **described to the model** in the step's own instructions, and a
+  missing required or wrong-typed field is reported by name inside the same turn,
+  so the agent usually fixes it before the step ends
+  rather than disappearing.
+- `schema/2` is a fact, like `doc/2` — it appears in the listing and travels with
+  `export`.
+
+For a single object rather than a list, use `schema(author, Author)` (no `list/1`).
+You can also apply a schema by hand to any dict:
+
+```prolog
+schema_fill(author, Raw, Author),        % fills defaults, validates
+```
+
+`end_turn` reports a `task/N` that names a schema which was never declared.
 
 ### Type-Safe Output Variables
 
@@ -806,6 +952,7 @@ wall-clock duration as `timeMs`:
 
 ```prolog
 exec(bash(command: "sleep 30", timeoutMs: 5000), R),
+exec(bash(argv: ["python3", Script, Query]), R),      % no quoting to write
 get_dict(timeMs, R, Took),
 (   get_dict(exitCode, R, 124)
 ->  format(string(Msg), "timed out after ~w ms", [Took])
@@ -838,6 +985,25 @@ tool(count_words(File, Count), "Count words in a workspace file.") :-
     count_words(File, Count).
 ```
 
+The head and its delegate must have the **same name and the same arity**. The
+tool body is what runs when the nested agent calls the tool, so a body that
+calls a different arity either calls nothing (`existence_error`) or calls the
+tool again and recurses forever:
+
+```prolog
+% WRONG: declares /2 but calls /3, so the tool fails when a nested agent uses it.
+tool(bibliography(Query, Max), "…") :-
+    bibliography(Query, Max, Entries).
+
+% WRONG: calls itself; a nested agent recurses until the budget is gone.
+tool(citations(Text, Citations), "…") :-
+    citations(Text, Citations).
+```
+
+Nothing is checked when the clause is loaded, so both mistakes look fine until a
+nested agent calls the tool. `end_turn` reports them as contract warnings; treat
+them as errors, not style notes.
+
 A predicate defined *only* inside a `tool/2` clause is invisible to
 `execute` / `/goal` — the loader asserts it as `tool(Head)`, never as `Head`. Split
 the two so one implementation is reachable from both surfaces:
@@ -846,6 +1012,12 @@ the two so one implementation is reachable from both surfaces:
 /goal count_words("report.txt", C).          % authoring agent
 task("Count the words in report.txt.", N).   % nested agent calls the tool
 ```
+
+The only tools a nested agent can call are the harness's `tool/2` predicates;
+registered host tools (for example `bash`) are reachable from DML code through
+`exec/2`, not as tools by name. So a task description that says "use the
+`fs_read` tool" works only if the module itself defines `fs_read/2` **and**
+annotates it.
 
 The tool head's **last argument is the output**; the description is shown to the
 nested agent. Keep the `tool/2` body a single delegation — put no logic in it.
@@ -869,26 +1041,103 @@ Tools can use `task()` and `prompt()` internally to combine Prolog logic with LL
 
 ```prolog
 % A predicate that computes then explains.
+% The nested task is told to work from the given figures — it has no tools it
+% needs, so it cannot try to re-enter this predicate.
 explain_calculation(A, B, Explanation) :-
     Sum is A + B,  % Prolog computation
-    format(string(Desc), "Explain ~w + ~w = ~w to a child", [A, B, Sum]),
-    task(Desc, Explanation).  % LLM explanation
+    format(string(Desc),
+           "Explain ~w + ~w = ~w to a child, using only these figures.",
+           [A, B, Sum]),
+    task(Desc, Explanation).
 
 tool(explain_calculation(A, B, Explanation), "Calculate and explain the result.") :-
     explain_calculation(A, B, Explanation).
-
-% A predicate that uses the LLM for formatting.
-format_data(Data, FormattedOutput) :-
-    format(string(Desc), "Format this data nicely: ~w", [Data]),
-    task(Desc, FormattedOutput).
-
-tool(format_data(Data, FormattedOutput), "Format data nicely using LLM.") :-
-    format_data(Data, FormattedOutput).
 ```
+
+**Do not wrap an LLM step in a `tool/2` that advertises the same job.** The tool
+is declared to the agent running *inside* that same `task/N`, so the description
+invites the agent to do the very thing it was asked, by calling the tool:
+
+```prolog
+% WARNING: this shape self-delegates.
+extract_authors(Text, Authors) :-
+    task("Extract every author and their affiliation(s) from: {Text}", list(object(Authors))).
+
+tool(extract_authors(Text, Authors), "Extract every author and their affiliation(s).") :-
+    extract_authors(Text, Authors).
+```
+
+Called as a predicate (`/goal extract_authors(…, A)`, `execute`, or from another
+predicate), `extract_authors` runs its `task/N`, and that agent is offered
+`extract_authors` — a tool described as doing exactly its job. The runtime refuses
+the re-entrant call (a tool whose predicate is already running is withheld, and a
+call that slips through is refused with a reason), so it cannot recurse forever.
+But the agent still spends a turn on it, is told the tool failed, and then does
+the work by hand — a confusing transcript and a wasted call.
+
+Two ways to avoid it, in order of preference:
+
+**Keep the LLM step a skill, and give `tool/2` only to capabilities.** A skill is
+called from DML (`/goal`, `execute`, another predicate) and does not need to be a
+tool. Annotate the operations a nested agent should *use* — deterministic or
+side-effecting work such as reading a PDF, searching an index, or shelling out:
+
+```prolog
+% Skill: an LLM step. Call it from DML; no tool/2.
+extract_authors(Text, Authors) :-
+    task("Extract every author and their affiliation(s) from: {Text}", list(object(Authors))).
+
+% Tools: capabilities for nested agents. No task/N, so no self-reference.
+read_pdf(Path, Text) :-
+    script_file(pdf_to_text, Script),
+    format(atom(Cmd), "python3 '~w' '~w'", [Script, Path]),
+    exec(bash(command: Cmd), R), get_dict(stdout, R, Text).
+
+tool(read_pdf(Path, Text), "Convert a workspace PDF to text.") :- read_pdf(Path, Text).
+```
+
+**Or scope the nested task's tools so the tool cannot be reached.** If a `task/N`
+inside a predicate must not use a tool, say so with `without_tools/2` (or list
+exactly what it may use with `with_tools/2`):
+
+```prolog
+extract_authors(Text, Authors) :-
+    without_tools([extract_authors],
+        task("Extract every author and their affiliation(s) from: {Text}",
+             list(object(Authors)))).
+```
+
+Scoping is the narrower fix: it keeps the tool advertised to *other* agents (which
+is usually why it exists) while removing it from this one.
 
 **Memory Isolation:** When `task()` or `prompt()` runs inside a tool, the nested agent starts with **fresh memory**. It does NOT inherit the parent's accumulated memory from `system()`, `user()`, or previous `task()` calls. If you need context in a nested task, pass it explicitly as a tool argument or add it with `system()` inside the tool body.
 
-**Tool Access:** The nested agent has access to all DML tools **except** the tool that is currently executing (automatic call stack exclusion to prevent infinite recursion). You can further control tool access using `with_tools/2` and `without_tools/2`.
+**Tool Access:** A nested agent's only callable tools are the harness's `tool/2`
+predicates; host tools such as `bash` are reachable from DML code via `exec/2`,
+never by name from a task description. A tool that is **already executing** cannot
+be re-entered: a call to it from inside itself is refused with an explanation, so a
+tool cannot recurse into itself. The refusal is deliberate and visible — the tool is
+declared to the agent with the reason on its description, so the call comes back as
+"already running further up the call chain" rather than as a missing tool, which
+would invite a retry.
+
+> The withholding is keyed on *tool* execution, and only that is guaranteed. Whether a
+> running tool is also *removed* from the tool list presented to the agent inside it
+> is not something the current test suite covers; the refusal above is what stops the
+> recursion. Do not rely on the tool being absent from `task/N`'s tool list.
+
+That keying has a consequence worth knowing: a predicate that is also a tool does
+**not** count as "executing" when it is called as a predicate (`/goal`, `execute`,
+or from another predicate). So for
+
+```prolog
+extract_authors(Text, Authors) :- task("…", list(object(Authors))).
+tool(extract_authors(Text, Authors), "…") :- extract_authors(Text, Authors).
+```
+
+`/goal extract_authors(Text, A)` still offers `extract_authors` to the agent inside
+`task/N`. Use `with_tools/2` / `without_tools/2` to scope it, or keep the LLM step
+out of the tool set entirely (see **Using `task()` Inside Tools** above).
 
 ```prolog
 % Example: passing context explicitly.
@@ -911,15 +1160,19 @@ You can control which tools are available to nested `task()` calls using `with_t
 
 #### `with_tools(+ToolList, +Goal)`
 
-Run Goal with only the specified tools available to nested tasks:
+Run Goal with only the specified tools available to nested tasks. `ToolList`
+holds tool *names* (atoms), not predicates:
 
 ```prolog
-% Only allow tool_a and tool_b in the nested task
-tool(restricted_task(Input, Output), "Runs with limited tools") :-
-    with_tools([tool_a, tool_b], (
-        format(string(Desc), "Process '~w' using available tools", [Input]),
+% The implementation defines what the tool does; the annotation exposes it.
+restricted_work(Input, Output) :-
+    with_tools([search_papers, read_paper], (
+        format(string(Desc), "Process '~w' using the available tools", [Input]),
         task(Desc, Output)
     )).
+
+tool(restricted_task(Input, Output), "Runs with limited tools") :-
+    restricted_work(Input, Output).
 ```
 
 #### `without_tools(+ToolList, +Goal)`
@@ -927,12 +1180,14 @@ tool(restricted_task(Input, Output), "Runs with limited tools") :-
 Run Goal with the specified tools excluded from nested tasks:
 
 ```prolog
-% Exclude expensive_tool from the nested task
-tool(cheap_task(Input, Output), "Runs without expensive tools") :-
+cheap_work(Input, Output) :-
     without_tools([expensive_tool], (
         format(string(Desc), "Process '~w' cheaply", [Input]),
         task(Desc, Output)
     )).
+
+tool(cheap_task(Input, Output), "Runs without expensive tools") :-
+    cheap_work(Input, Output).
 ```
 
 #### Using Tool Scoping in `agent_main`
@@ -1045,6 +1300,20 @@ Memory stores `media{path, mime}` — never the image bytes. Judgments
 
 ---
 
+#### Running a command with data in it
+
+`argv` takes the command and its arguments as a **list**, and the runtime quotes
+each element. Pass values here and you never write a quote, so an argument
+containing a space, a quote, `$`, a backtick or `;` is inert:
+
+```prolog
+exec(bash(argv: ["python3", Script, UserText]), R), get_dict(stdout, R, Text).
+```
+
+It is the same shell underneath (and the same sandbox), so pipelines and redirection
+still work with `command`; `argv` is the way to pass *data*. Prefer it whenever an
+argument comes from a file, a model, or the user.
+
 ### File I/O and paths — prefer the shell
 
 **Prefer `exec(bash(...))` for file operations.**
@@ -1076,6 +1345,17 @@ time_file("images/a.png", Modified).
 directory), so build a path with `atom_concat('images/', Name, Path)` when you
 need one. `bash` runs with a wider view of the sandbox than DML has; convert
 anything from the shell to a workspace-relative path before handing it to DML.
+
+These predicates are **real clauses in the session module**, not only
+interpreter handlers, so DML code, a nested `task/N`, and a direct host query
+(the SDK's `runDML`, or `deepclause repl`) all resolve the same definition and
+the same workspace-relative path. `read_file/2` in particular has no other
+definition, which is why it once worked from DML and failed from a host query.
+
+`open/3`, `close/1`, `read_string/3` and `write/2` are the exception. They are SWI
+builtins and cannot be shadowed with a workspace-resolving version, so they stay
+**stream-only** and take an absolute path. Use `read_file/2` and `write_file/2`
+for whole-file I/O — they resolve the relative path and close their own streams.
 
 ---
 
@@ -1179,6 +1459,40 @@ agent_main(Topic) :-
 ```
 
 ---
+
+## Patterns: one template, build or parse
+
+`pattern/3` is `format/3` and its inverse. Literal text matches exactly and `$name`
+marks a slot, so the same template renders a string or parses it — the direction
+follows from what is bound:
+
+```prolog
+pattern("Name: $name, age: $age", Text, [name="Ada", age=36]).
+% Text = "Name: Ada, age: 36"
+
+pattern("Name: $name, age: $age", "Name: Ada, age: 36", Bindings).
+% Bindings = [name="Ada", age="36"]
+
+pattern("DOI: $doi", Text, [doi=D]).                % build a DOI line
+pattern("n=$n:int", "n=42", B).                     % B = [n=42]   (typed slot)
+```
+
+- Bindings are a list of `Name=Value`, so `member(Name=Value, Bs)` reads them.
+- A slot consumes **up to the next literal**, so the literals decide the split and
+  `"$left - $right"` against `"a - b - c"` gives `left="a"`, `right="b - c"`.
+- `$name:type` converts on parse and validates on build. Types: `string` (default),
+  `int`, `integer`, `number`. A parse that does not match throws, rather than
+  binding the text.
+- Slot names match case- and separator-insensitively, like `dict_field/3`.
+- `$` is the marker rather than `{…}`, so a template can carry JSON or any other
+  brace-bearing text verbatim, and it never collides with the `{Var}`
+  interpolation in `task/N` descriptions. `$$` is a literal dollar.
+- A template must be **anchored by literal text**: `"$a$b"` is rejected as
+  ambiguous rather than resolved arbitrarily.
+
+This is the deterministic alternative to asking the model to reformat text: parse
+the parts you can read exactly, and use a `task/N` only for what genuinely needs
+language understanding.
 
 ## Backtracking
 
@@ -1422,6 +1736,71 @@ exact_max(X, Y) :-
 ```
 
 ### Dictionaries (SWI-Prolog)
+
+**Keys are atoms.** `get_dict/3` is strict about the key type and *throws* rather
+than failing: `get_dict("affiliation", D)` raises `type_error(dict-key,
+affiliation)`, so no guard sees it as a "no". A string is not even valid dict
+literal syntax (`x{"a":1}` is a syntax error).
+
+Model output makes this worse, because the field name varies — `Name`, `name`,
+`full_name`. Use `dict_field/3,4`, which matches an atom **or** a string key,
+ignoring case and `_`/`-`/space:
+
+```prolog
+dict_field(Dict, "affiliation", Affiliation),          % fails if absent
+dict_field(Dict, full_name, "unknown", Name),          % with a default
+```
+
+**JSON.** `atom_json_dict/3` works in both directions, which is the whole story —
+reading and writing:
+
+```prolog
+atom_json_dict(Text, Dict, []),          % JSON text -> dict  (Text bound)
+atom_json_dict(Text, Dict, []),          % dict -> JSON text  (Text unbound)
+```
+
+Reading a nested value is one call with a path rather than a chain of lookups:
+
+```prolog
+json_get(Doc, "results.0.authors.1.name", Name),        % dotted path
+json_get(Doc, [results, 0, authors, 1, name], Name),    % or a list
+json_get(Doc, "results.0.year", "unknown", Year),       % with a default
+json_gets(Doc, "results.*.title", Titles),              % project: collect `*`
+json_gets(Doc, "results.*.authors.*.name", Names),      % nested `*` flattens
+json_put(Doc, "meta.reviewed", yes, Updated),           % set a key path
+json_text(Doc, Text),                                   % compact JSON
+```
+
+A missing path **fails**; it does not throw and does not give `""`, so absence is
+visible. Key matching is the same tolerant match as `dict_field/3` (atom or string,
+any case, `_`/`-`/space ignored). `json_put/4` sets keys and creates intermediate
+dicts; it rejects an index path, so lists are read-only. For layout or streaming,
+`json_write_dict/3` from `library(http/json)` is available.
+
+**Parsing text with a grammar.** DCGs work — the loader runs `expand_term/2`, so
+`-->` compiles, and `library(dcg/basics)` imports:
+
+```prolog
+:- use_module(library(dcg/basics)).
+
+key_value(K, V) --> string_without(":", K), ":", string(V).
+
+parse_kv(Text, Pairs) :-
+    string_chars(Text, Chars),          % phrase/2 wants a LIST, not a string
+    phrase(lines(Pairs), Chars).
+
+lines([K-V|Rest]) --> key_value(K, V), "\n", !, lines(Rest).
+lines([K-V]) --> key_value(K, V).
+```
+
+`phrase/2,3` takes a **code or char list**, so `string_chars/2` (or
+`string_codes/2`) comes first — passing a string raises `type_error(list, …)`.
+Also useful here: `number_codes/2`, `read_term_from_atom/3`,
+`split_string/4`. DCGs give you a documented, testable parser instead of a chain of
+regex calls, and the same grammar can generate text as well as accept it.
+
+The rest of this section is plain SWI dict access, for keys you control:
+
 ```prolog
 agent_main :-
     D = point{x: 10, y: 20},
@@ -1562,6 +1941,32 @@ backtracking reuses an answer instead of re-querying the model.
   always one of your option atoms.
 - Prefer one `judge/2` batch over several one-off calls when you need more than
   one or two judgments.
+### Load-time directives
+
+A `.dml` file may contain directives. These are handled:
+
+```prolog
+:- use_module(library(clpfd)).     % library import
+:- consult("other.dml").           % load another workspace file
+:- param(topic, "the subject").    % declared session parameter
+:- repl_delete(old_skill/2).       % remove a predicate (same as the bare fact form)
+```
+
+`:- repl_delete(Name/Arity).` abolishes a predicate, which `retract/1` cannot do:
+retracting the last clause leaves an empty predicate whose calls fail silently.
+The bare fact form `repl_delete(Name/Arity).` works the same way.
+
+Any other directive does nothing, and the loader now says so — it reports
+`unrecognised directive ignored: …` after the file loads, so a directive that
+never took effect is not mistaken for one that did. `dynamic/1`,
+`discontiguous/1` and `multifile/1` are accepted and ignored silently, since
+session predicates are asserted and already behave that way.
+
+A **predicate with no clauses fails silently** when called — it does not error —
+so an emptied or never-written predicate looks like "no results" at the call site.
+`current_predicate(Name/Arity)` in a `/goal` answers whether it exists, and a
+`doc/2` for a predicate with no clauses is reported at `end_turn`.
+
 ## The DML REPL (`deepclause repl`)
 
 DML skills can also be grown interactively in a persistent **living module**.
