@@ -237,6 +237,31 @@ export function unavailableToolError(toolName: string): string {
     + 'you were given, or say what is missing.';
 }
 
+/**
+ * Parse the `toolScope` a `task/N` carries from `with_tools/2` / `without_tools/2`.
+ *
+ * Shape: `{$t:'t', whitelist:[[Names]]}` / `blacklist:[[Names]]`, or the atom
+ * `none`. The extra list nesting comes from the term's argument list.
+ */
+export function parseToolScope(raw: unknown): {
+  type: 'none' | 'whitelist' | 'blacklist';
+  list: string[];
+} {
+  const value = toJsValue(raw);
+  if (!value || typeof value !== 'object' || !('$t' in (value as Record<string, unknown>))) {
+    return { type: 'none', list: [] };
+  }
+  const compound = value as Record<string, unknown>;
+  const kind = 'whitelist' in compound ? 'whitelist' : 'blacklist' in compound ? 'blacklist' : null;
+  if (!kind) return { type: 'none', list: [] };
+  const args = toJsValue(compound[kind]);
+  if (!Array.isArray(args) || args.length === 0) return { type: kind, list: [] };
+  const inner = toJsValue(args[0]);
+  if (!Array.isArray(inner) || inner.length === 0) return { type: kind, list: [] };
+  const names = toJsValue(inner[0]);
+  return { type: kind, list: Array.isArray(names) ? names.map((n) => String(n)) : [] };
+}
+
 interface UserToolInfo {
   name: string;
   description: string;
@@ -1022,8 +1047,17 @@ export class DMLRunner {
     // that is already running. A withheld tool is still declared (with the reason
     // in its description) so a stray call gets an explanation, but it cannot run.
     const withheld = [...this.toolCallStack];
+    // `with_tools/2` / `without_tools/2` on this `task/N` narrow the list further.
+    // This path used to ignore the scope, so scoping a `task/N` inside a predicate
+    // silently did nothing.
+    const scope = parseToolScope(rawPayload.toolScope);
+    const scopedUserTools = scope.type === 'whitelist'
+      ? userTools.filter((t) => scope.list.includes(t.name))
+      : scope.type === 'blacklist'
+        ? userTools.filter((t) => !scope.list.includes(t.name))
+        : userTools;
     const availableTools = this.buildAgentTools(
-      userTools,
+      scopedUserTools,
       options.toolPolicy,
       async (toolName: string, args: Record<string, unknown>) => {
         if (this.toolCallStack.includes(toolName)) {

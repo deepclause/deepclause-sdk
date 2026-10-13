@@ -131,6 +131,12 @@ doc(tally/2, "Count occurrences of each item. tally(+List, -Counts) yields Key-N
   same predicate is callable from `execute` / `/goal` **and** from `task/N`. Logic
   placed only inside `tool/2` is unreachable from `execute` (the loader asserts
   `tool(Head)`, never `Head`).
+  - Annotate **capabilities** (file I/O, search, a script) that a nested agent
+    should use — not the LLM steps themselves. A `tool/2` whose implementation
+    calls `task/N` and advertises the same job is offered to the agent inside that
+    `task/N`, which then calls it. Absent the tool call stack, wrapper predicates
+    are the same job twice; keep the step a skill, or scope the task with
+    `without_tools([Head], task(…))`.
 - `doc(Name/Arity, Text)` — one fact per skill, helper, or tool; terse, with
   arguments (`+in` / `-out`) and an example goal.
 

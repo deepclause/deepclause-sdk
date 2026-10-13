@@ -260,6 +260,32 @@ them. The only tools a nested agent can call are the harness's `tool/2`
 predicates; a host tool like `bash` is reachable from DML through `exec/2`, so a
 task description may only name a tool the module itself defines and annotates.
 
+**Do not annotate an LLM step with a `tool/2` that advertises the same job.** The
+tool is declared to the agent inside that same `task/N`, so the description invites
+it to call the tool to do what it was already asked. The runtime refuses the
+re-entrant call, but the agent wastes a turn, is told the tool failed, and does the
+work by hand:
+
+```prolog
+% BAD: extract_authors is offered to the agent inside extract_authors's task/N.
+extract_authors(Text, Authors) :- task("Extract every author from: {Text}", list(object(Authors))).
+tool(extract_authors(Text, Authors), "Extract every author.") :- extract_authors(Text, Authors).
+```
+
+`tool/2` is for **capabilities** a nested agent should use — reading a PDF,
+searching an index, shelling out — not for the LLM steps themselves. Keep a
+`task/N`-backed predicate a skill (call it with `/goal`, `execute`, or from another
+predicate). If the tool must stay, scope the nested task:
+
+```prolog
+extract_authors(Text, Authors) :-
+    without_tools([extract_authors],
+        task("Extract every author from: {Text}", list(object(Authors)))).
+```
+
+`with_tools([…], Goal)` narrows to a list; `without_tools([…], Goal)` removes one.
+They apply to the `task/N` they wrap, however it was reached.
+
 Logic placed only inside `tool/2` is **not** reachable from `execute`/`listing`;
 keep the `tool/2` body a one-line delegation.
 

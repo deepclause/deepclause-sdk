@@ -310,26 +310,95 @@ Tools can use `task()` and `prompt()` internally to combine Prolog logic with LL
 
 ```prolog
 % A predicate that computes then explains.
+% The nested task is told to work from the given figures — it has no tools it
+% needs, so it cannot try to re-enter this predicate.
 explain_calculation(A, B, Explanation) :-
     Sum is A + B,  % Prolog computation
-    format(string(Desc), "Explain ~w + ~w = ~w to a child", [A, B, Sum]),
-    task(Desc, Explanation).  % LLM explanation
+    format(string(Desc),
+           "Explain ~w + ~w = ~w to a child, using only these figures.",
+           [A, B, Sum]),
+    task(Desc, Explanation).
 
 tool(explain_calculation(A, B, Explanation), "Calculate and explain the result.") :-
     explain_calculation(A, B, Explanation).
-
-% A predicate that uses the LLM for formatting.
-format_data(Data, FormattedOutput) :-
-    format(string(Desc), "Format this data nicely: ~w", [Data]),
-    task(Desc, FormattedOutput).
-
-tool(format_data(Data, FormattedOutput), "Format data nicely using LLM.") :-
-    format_data(Data, FormattedOutput).
 ```
+
+**Do not wrap an LLM step in a `tool/2` that advertises the same job.** The tool
+is declared to the agent running *inside* that same `task/N`, so the description
+invites the agent to do the very thing it was asked, by calling the tool:
+
+```prolog
+% WARNING: this shape self-delegates.
+extract_authors(Text, Authors) :-
+    task("Extract every author and their affiliation(s) from: {Text}", list(object(Authors))).
+
+tool(extract_authors(Text, Authors), "Extract every author and their affiliation(s).") :-
+    extract_authors(Text, Authors).
+```
+
+Called as a predicate (`/goal extract_authors(…, A)`, `execute`, or from another
+predicate), `extract_authors` runs its `task/N`, and that agent is offered
+`extract_authors` — a tool described as doing exactly its job. The runtime refuses
+the re-entrant call (a tool whose predicate is already running is withheld, and a
+call that slips through is refused with a reason), so it cannot recurse forever.
+But the agent still spends a turn on it, is told the tool failed, and then does
+the work by hand — a confusing transcript and a wasted call.
+
+Two ways to avoid it, in order of preference:
+
+**Keep the LLM step a skill, and give `tool/2` only to capabilities.** A skill is
+called from DML (`/goal`, `execute`, another predicate) and does not need to be a
+tool. Annotate the operations a nested agent should *use* — deterministic or
+side-effecting work such as reading a PDF, searching an index, or shelling out:
+
+```prolog
+% Skill: an LLM step. Call it from DML; no tool/2.
+extract_authors(Text, Authors) :-
+    task("Extract every author and their affiliation(s) from: {Text}", list(object(Authors))).
+
+% Tools: capabilities for nested agents. No task/N, so no self-reference.
+read_pdf(Path, Text) :-
+    script_file(pdf_to_text, Script),
+    format(atom(Cmd), "python3 '~w' '~w'", [Script, Path]),
+    exec(bash(command: Cmd), R), get_dict(stdout, R, Text).
+
+tool(read_pdf(Path, Text), "Convert a workspace PDF to text.") :- read_pdf(Path, Text).
+```
+
+**Or scope the nested task's tools so the tool cannot be reached.** If a `task/N`
+inside a predicate must not use a tool, say so with `without_tools/2` (or list
+exactly what it may use with `with_tools/2`):
+
+```prolog
+extract_authors(Text, Authors) :-
+    without_tools([extract_authors],
+        task("Extract every author and their affiliation(s) from: {Text}",
+             list(object(Authors)))).
+```
+
+Scoping is the narrower fix: it keeps the tool advertised to *other* agents (which
+is usually why it exists) while removing it from this one.
 
 **Memory Isolation:** When `task()` or `prompt()` runs inside a tool, the nested agent starts with **fresh memory**. It does NOT inherit the parent's accumulated memory from `system()`, `user()`, or previous `task()` calls. If you need context in a nested task, pass it explicitly as a tool argument or add it with `system()` inside the tool body.
 
-**Tool Access:** The nested agent has access to all DML tools **except** the tool that is currently executing (automatic call stack exclusion to prevent infinite recursion). You can further control tool access using `with_tools/2` and `without_tools/2`. A nested agent's only callable tools are the harness's `tool/2` predicates: host tools such as `bash` are reachable from DML code via `exec/2`, never by name from a task description.
+**Tool Access:** A nested agent's only callable tools are the harness's `tool/2`
+predicates; host tools such as `bash` are reachable from DML code via `exec/2`,
+never by name from a task description. A tool that is **already executing** is
+withheld from the agent inside it, and a re-entrant call is refused, so a tool
+cannot recurse into itself.
+
+That exclusion is keyed on *tool* execution, which has a consequence worth knowing:
+a predicate that is also a tool does **not** count as "executing" when it is called
+as a predicate (`/goal`, `execute`, or from another predicate). So for
+
+```prolog
+extract_authors(Text, Authors) :- task("…", list(object(Authors))).
+tool(extract_authors(Text, Authors), "…") :- extract_authors(Text, Authors).
+```
+
+`/goal extract_authors(Text, A)` still offers `extract_authors` to the agent inside
+`task/N`. Use `with_tools/2` / `without_tools/2` to scope it, or keep the LLM step
+out of the tool set entirely (see **Using `task()` Inside Tools** above).
 
 ```prolog
 % Example: passing context explicitly.
