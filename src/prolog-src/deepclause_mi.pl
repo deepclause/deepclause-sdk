@@ -63,6 +63,8 @@
     repl_edit_touched_clear/1,
     repl_validate_tools/2,
     repl_validate_docs/2,
+    schema_fill_fields/3,
+    schema_fields_of/3,
     repl_unhandled_directives/2,
     repl_inject_workspace_predicates/1,
     workspace_predicate_name/1,
@@ -317,6 +319,11 @@ extract_var_info(Bindings, Term, BareVar, Info) :-
         BareVar = Term,
         var_to_name(Bindings, Term, Name),
         Info = typed_var{name: Name, type: string}
+    ;   compound(Term), Term =.. [schema, SchemaName, Inner], var(Inner)
+    ->  % A declared shape: schema(name, Var)
+        BareVar = Inner,
+        var_to_name(Bindings, Inner, Name),
+        Info = typed_var{name: Name, type: object, schema: SchemaName}
     ;   compound(Term), Term =.. [Wrapper, Inner]
     ->  % Wrapped variable
         (   wrapper_type(Wrapper, Type)
@@ -324,6 +331,11 @@ extract_var_info(Bindings, Term, BareVar, Info) :-
             ->  BareVar = Inner,
                 var_to_name(Bindings, Inner, Name),
                 Info = typed_var{name: Name, type: Type}
+            ;   compound(Inner), Inner =.. [schema, SchemaName, InnerVar], var(InnerVar), Wrapper == list
+            ->  % List of declared shapes: list(schema(name, X))
+                BareVar = InnerVar,
+                var_to_name(Bindings, InnerVar, Name),
+                Info = typed_var{name: Name, type: array, itemType: object, schema: SchemaName}
             ;   compound(Inner), Inner =.. [InnerWrapper, InnerVar], var(InnerVar), Wrapper == list
             ->  % List of typed items: list(string(X))
                 BareVar = InnerVar,
@@ -3447,7 +3459,7 @@ mi_call_prompt_n(Desc, Vars, VarNames, StateIn, StateOut) :-
         engine_yield(output(WarnMsg)),
         fail
     ),
-    bind_task_variables(Result.variables, VarNames, Vars).
+    bind_task_variables(SessionId, Result.variables, VarNames, Vars).
     % Don't modify memory - but state may have changed from tool calls
 
 mi_call_sample_token(Desc, Allowed, Token, StateIn, StateOut) :-
@@ -3727,7 +3739,7 @@ mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
         engine_yield(output(WarnMsg)),
         fail
     ),
-    bind_task_variables(Result.variables, VarNames, Vars),
+    bind_task_variables(SessionId, Result.variables, VarNames, Vars),
     % Use full memory from agent loop result when available
     (   get_dict(full_memory, Result, FullMemory), is_list(FullMemory)
     ->  set_memory(StateAfterAgent, FullMemory, StateOut),
@@ -3749,18 +3761,104 @@ mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
         )
     ).
 
+%% ---------------------------------------------------------------
+%% Output schemas: schema(Name, [field(Field, Type, Option), ...])
+%%
+%% `list(object(B))` says "a list of dicts" but not what is in them, so every
+%% harness re-derives defaults and tolerates missing fields by hand. A schema
+%% declares the shape once, and `schema_fill/3` makes the value match it: absent
+%% fields with a default are filled, unknown fields are kept (so a model mistake
+%% stays visible rather than disappearing), and a `required` field that is absent
+%% or a field of the wrong type **fails the step** rather than yielding an empty
+%% result.
+%%
+%%   schema(author, [
+%%       field(name,        string, required),
+%%       field(affiliation, string, default("not stated")),
+%%       field(email,       string, default(""))
+%%   ]).
+%%
+%%   task("From the front matter extract every author: {Text}",
+%%        list(schema(author, Authors))).
+%% schema_fill(+Fields, +Value, -Filled): the pure part, so it is testable and
+%% usable without a session. The session predicate schema_fill/3 looks the fields
+%% up from `schema/2`.
+schema_fill_fields(Fields, Value, Filled) :-
+    is_dict(Value),
+    (   member(field(Field, Type, required), Fields),
+        \+ dict_field(Value, Field, _),
+        !,
+        format(atom(Msg), 'schema: required field "~w" is missing', [Field]),
+        throw(error(schema_error(Msg), schema_fill/3))
+    ;   true
+    ),
+    (   member(field(Field, Type, _), Fields),
+        dict_field(Value, Field, Found),
+        \+ schema_value_ok(Type, Found),
+        !,
+        format(atom(Msg), 'schema: field "~w" is not ~w (~w)', [Field, Type, Found]),
+        throw(error(schema_error(Msg), schema_fill/3))
+    ;   true
+    ),
+    dict_pairs(Value, _, Pairs),
+    findall(Key-NewValue,
+        (   member(Key-Old, Pairs),
+            (   member(field(Key, _, Option), Fields)
+            ->  (   Option = default(Default), Old == "" -> NewValue = Default
+                ;   NewValue = Old
+                )
+            ;   NewValue = Old          % undeclared: kept, so it stays visible
+            )
+        ),
+        Updated),
+    findall(Field-Default,
+        (   member(field(Field, _, default(Default)), Fields),
+            \+ dict_field(Value, Field, _)
+        ),
+        Missing),
+    append(Updated, Missing, All),
+    dict_pairs(Filled, _, All).
+
+%% A declared type accepts its own shape; anything coarser (a number for a string
+%% field, for instance) fails, because silently coercing hides the model's error.
+schema_value_ok(string, V) :- ( string(V) ; atom(V) ), !.
+schema_value_ok(integer, V) :- integer(V), !.
+schema_value_ok(number, V) :- number(V), !.
+schema_value_ok(boolean, V) :- ( V == true ; V == false ; V == yes ; V == no ), !.
+schema_value_ok(object, V) :- is_dict(V), !.
+schema_value_ok(array, V) :- is_list(V), !.
+schema_value_ok(_, _) :- fail.
+
 %% bind_task_variables(+VarsDict, +Names, -Values)
-bind_task_variables(_, [], []) :- !.
-bind_task_variables(VarsDict, [N|Names], [Value|Values]) :-
+bind_task_variables(_, _, [], []) :- !.
+bind_task_variables(SessionId, VarsDict, [N|Names], [Value|Values]) :-
     (   is_dict(N)
     ->  Key = N.name
     ;   Key = N
     ),
-    (   get_dict(Key, VarsDict, Value)
+    (   get_dict(Key, VarsDict, Raw)
     ->  true
-    ;   true
+    ;   Raw = _Missing
     ),
-    bind_task_variables(VarsDict, Names, Values).
+    (   is_dict(N), get_dict(schema, N, SchemaName), nonvar(Raw)
+    ->  schema_fields_of(SessionId, SchemaName, Fields),
+        (   is_list(Raw)
+        ->  maplist(schema_filled(Fields), Raw, Value)
+        ;   schema_fill_fields(Fields, Raw, Value)
+        )
+    ;   Value = Raw
+    ),
+    bind_task_variables(SessionId, VarsDict, Names, Values).
+
+schema_fields_of(SessionId, Name, Fields) :-
+    (   catch(clause(SessionId:schema(Name, Fields), true), _, fail)
+    ->  true
+    ;   format(atom(Msg), 'schema "~w" is not declared', [Name]),
+        throw(error(schema_error(Msg), schema_fields_of/3))
+    ).
+
+schema_filled(Fields, Raw, Filled) :-
+    (   is_dict(Raw) -> schema_fill_fields(Fields, Raw, Filled) ; Filled = Raw ).
 
 %% ============================================================
 %% Exec Handling
@@ -4453,6 +4551,7 @@ workspace_predicate_name(json_get).
 workspace_predicate_name(json_gets).
 workspace_predicate_name(json_put).
 workspace_predicate_name(json_text).
+workspace_predicate_name(schema_fill).
 
 %% dict_field(+Dict, +Key, -Value) and dict_field(+Dict, +Key, +Default, -Value)
 %%
@@ -4632,6 +4731,8 @@ workspace_predicate_clause(S, (S:json_get(D, P, Def, V) :- deepclause_mi:json_ge
 workspace_predicate_clause(S, (S:json_gets(D, P, Vs) :- deepclause_mi:json_gets(D, P, Vs))).
 workspace_predicate_clause(S, (S:json_put(D, P, V, D2) :- deepclause_mi:json_put(D, P, V, D2))).
 workspace_predicate_clause(S, (S:json_text(D, T) :- deepclause_mi:json_text(D, T))).
+workspace_predicate_clause(S, (S:schema_fill(N, V, F) :-
+    deepclause_mi:schema_fields_of(S, N, Fields), deepclause_mi:schema_fill_fields(Fields, V, F))).
 
 workspace_predicate_clause(S, (S:time_file(F, T) :-
     deepclause_mi:resolve_workspace_path(F, P), system:time_file(P, T))).

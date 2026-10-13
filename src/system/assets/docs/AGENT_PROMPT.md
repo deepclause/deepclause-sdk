@@ -239,6 +239,29 @@ There are no other host tools. Do not invent `fetch_url`, `web_search`,
 `calculator`, etc. — if the module needs one, write a script and run it with
 `bash`.
 
+# Declared output shapes
+
+`list(object(B))` says "a list of dicts" but not what is in them, which is how a
+harness ends up with `""` where an affiliation should be, or an empty result where
+the model used a different key spelling. Declare the shape once and name it:
+
+```prolog
+schema(author, [
+    field(name,        string, required),
+    field(affiliation, string, default("not stated")),
+    field(email,       string, default(""))
+]).
+
+extract_authors(Text, Authors) :-
+    task("From the front matter extract every author: {Text}",
+         list(schema(author, Authors))).
+```
+
+Defaults are filled, an absent `required` field or a wrong type fails the step with
+a message naming the field (so the agent can fix it in the same turn), and an
+undeclared field is kept so a model mistake stays visible. `schema/2` is a fact like
+`doc/2`. Use `schema_fill(author, Raw, Author)` to apply one to a dict by hand.
+
 # Memory: `task/N` vs `prompt/N`
 
 `task/N` **shares and accumulates** the conversation: it is sent the memory built

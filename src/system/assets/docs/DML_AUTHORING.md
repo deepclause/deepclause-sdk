@@ -41,6 +41,14 @@ plausibly reuse the predicate with different arguments; if only this request
 would, do not add it. A harness of many task-shaped helpers is as bad as one
 hard-coded script.
 
+**Declare the shape of structured model output.** `list(object(B))` does not say
+what is in the dicts, so every consumer re-derives defaults and tolerates missing
+fields by hand. `schema(Name, [field(Field, Type, Option)])` is checked when the
+result binds: defaults filled, a missing `required` field or a wrong type reported
+against the field name, an undeclared field kept so a mistake stays visible. Name it
+in the output — `task(…, list(schema(author, Authors)))` — or apply it by hand with
+`schema_fill(author, Raw, Author)`.
+
 **Know which conversation the model sees.** `task/N` is sent the memory built so
 far and writes its reply back, so consecutive `task/N` calls accumulate history —
 pass values as explicit arguments instead of relying on the model to remember them.

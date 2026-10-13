@@ -262,6 +262,46 @@ audit(App, Finding) :-
         task("Review {App} against the checklist and report one finding.", Finding))).
 ```
 
+### Declared Output Shapes: `schema/2`
+
+A type says "a list of dicts"; a schema says what is *in* them. Declare the shape
+once, name it in the `task/N` output, and every step gets a value that matches it —
+defaults filled, and a missing required field or a wrong-typed field failing the
+step instead of quietly yielding an empty result:
+
+```prolog
+schema(author, [
+    field(name,        string, required),
+    field(affiliation, string, default("not stated")),
+    field(email,       string, default("")),
+    field(country,     string, default(""))
+]).
+
+extract_authors(Text, Authors) :-
+    task("From the front matter extract every author: {Text}",
+         list(schema(author, Authors))).
+% Authors = [author{name:"Ashish Vaswani", affiliation:"Google Brain", email:"", country:""} …]
+```
+
+- An absent field with a `default(Value)` is filled.
+- An absent `required` field **fails the step** with a message naming the field, so
+  the agent can correct it in the same turn.
+- A field of the wrong type fails the same way. Types are `string`, `integer`,
+  `number`, `boolean`, `object`, `array`.
+- An **undeclared** field is kept, not dropped: a model mistake stays visible
+  rather than disappearing.
+- `schema/2` is a fact, like `doc/2` — it appears in the listing and travels with
+  `export`.
+
+For a single object rather than a list, use `schema(author, Author)` (no `list/1`).
+You can also apply a schema by hand to any dict:
+
+```prolog
+schema_fill(author, Raw, Author),        % fills defaults, validates
+```
+
+`end_turn` reports a `task/N` that names a schema which was never declared.
+
 ### Type-Safe Output Variables
 
 You can wrap output variables with type specifiers to enforce strict validation on the LLM's output. The runtime will ensure the value matches the specified type.
