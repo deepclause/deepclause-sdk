@@ -25,6 +25,20 @@
 - **`dict_field/3,4`** reads a model-produced dict field with an atom or string key,
   any case, ignoring `_`/`-`/space.
 
+### Known gaps
+
+- **The nested-tool exclusion is unverified.** A tool whose body calls `task/N` is
+  withheld from the agent that `task/N` spawns (declared with
+  `(unavailable in this task)`, and refused at dispatch if called anyway), and the
+  construction sites are unit-tested. What is *not* verified is the live nested
+  request: no test drives a tool call through the agent loop, because the DML path
+  goes through `runAgentLoop` and the AI SDK, and the existing SDK mocks call
+  `tools.X.execute` directly rather than exercising the loop's dispatch. Confirming
+  it needs either a faithful `generateText` tool-call fixture or a real model call.
+- **`schema/2` fields are described to the model, but a *changed* schema does not
+  invalidate a task that names it.** Adding a field affects the next evaluated
+  clause, not a session's existing prompt.
+
 ### Fixed
 
 - **`--harness` was inert.** The REPL action handler never forwarded it, so the
