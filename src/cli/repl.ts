@@ -1522,6 +1522,7 @@ export function registerReplCommand(program: Command): void {
         goal: options.goal,
         load: options.load,
         session: options.session,
+        harness: options.harness,
         first: options.first,
         plain: options.plain,
         json: options.json,
