@@ -78,13 +78,10 @@ describe('a tool that calls task/N', () => {
     const events = await collect(repl.query('get_result(done)'));
 
 
-    // The tool that is running must not have been re-entered. The DML tool engine
-    // for `extract_authors` is created once; a recursive entry would create a
-    // second one (or recurse until the model-call budget is gone).
-    const engineCreates = (events as Array<{ type: string; content?: string }>).filter(
-      (e) => e.type === 'log' && (e.content ?? '').includes('create_tool_engine'),
-    );
-    expect(engineCreates.length).toBe(0);
+    // The running tool must not have been re-entered: no second nested agent loop
+    // for it. A recursion would show up as another task_activity 'started'.
+    const tasks = events.filter((e) => e.type === 'task_activity' && e.taskState === 'started');
+    expect(tasks.length).toBe(1);
 
     // It is still declared to the agent inside task/N, so a call can be answered
     // with the reason rather than looking like a missing tool.
