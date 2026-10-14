@@ -89,3 +89,134 @@ export function editorTheme(): EditorTheme {
     },
   };
 }
+
+/**
+ * Pi's theme system, adopted for the component layer.
+ *
+ * Markdown and editor themes come from pi so prose and the input box match the
+ * application the user already runs (`getMarkdownTheme`/`getEditorTheme` are
+ * resolved against pi's active theme). Our own chrome is styled through pi-tui's
+ * `styleText`, which converts to the terminal's colour mode for us, so the
+ * palette below is *colours* rather than pre-baked escape sequences.
+ *
+ * `initTheme()` is best-effort: if pi's theme files are unreadable the SDK still
+ * renders, with the fallbacks below.
+ */
+
+import {
+  getTerminalColorMode,
+  indexedColor,
+  styleText,
+  type Color,
+  type MarkdownTheme,
+  type TextStyle,
+} from '@earendil-works/pi-tui';
+import { getMarkdownTheme, initTheme } from '@earendil-works/pi-coding-agent';
+
+let themeInitialized = false;
+
+/** Load pi's active theme once. Never throws: a missing theme is not fatal. */
+export function initTuiTheme(): void {
+  if (themeInitialized) return;
+  themeInitialized = true;
+  try {
+    initTheme();
+  } catch {
+    // pi's theme is a nicety; the fallbacks below cover a missing theme.
+  }
+}
+
+/** Palette entries, as colours so pi-tui owns the escape-sequence conversion. */
+const C = {
+  accent: indexedColor(75),
+  border: indexedColor(75),
+  borderMuted: indexedColor(240),
+  title: indexedColor(180),
+  muted: indexedColor(245),
+  dim: indexedColor(240),
+  success: indexedColor(114),
+  error: indexedColor(203),
+  warning: indexedColor(214),
+  output: indexedColor(150),
+  thinking: indexedColor(245),
+} as const;
+
+export type TuiToken = keyof typeof C;
+
+/** Style text with a semantic colour, honouring the terminal's colour mode. */
+export function paintToken(token: TuiToken, text: string, extra?: TextStyle): string {
+  return styleText(text, { fg: C[token] as Color, ...extra }, getTerminalColorMode());
+}
+
+/** Convenience wrappers for the tokens the components use most. */
+export const tuiStyle = {
+  accent: (text: string) => paintToken('accent', text),
+  title: (text: string) => paintToken('title', text, { bold: true }),
+  muted: (text: string) => paintToken('muted', text),
+  dim: (text: string) => paintToken('dim', text),
+  success: (text: string) => paintToken('success', text),
+  error: (text: string) => paintToken('error', text),
+  warning: (text: string) => paintToken('warning', text),
+  output: (text: string) => paintToken('output', text),
+  thinking: (text: string) => paintToken('thinking', text, { italic: true }),
+  borderMuted: (text: string) => paintToken('borderMuted', text),
+} as const;
+
+/** Scrollbar colours for the transcript's `ScrollView`. */
+export const scrollbarStyles = {
+  track: (text: string) => paintToken('borderMuted', text),
+  thumb: (text: string) => paintToken('accent', text),
+} as const;
+
+/** Fallback markdown theme, used only if pi's cannot be resolved. */
+function fallbackMarkdownTheme(): MarkdownTheme {
+  const id = (text: string) => text;
+  return {
+    heading: tuiStyle.title,
+    link: tuiStyle.accent,
+    linkUrl: tuiStyle.dim,
+    code: tuiStyle.output,
+    codeBlock: tuiStyle.output,
+    codeBlockBorder: tuiStyle.dim,
+    quote: tuiStyle.muted,
+    quoteBorder: tuiStyle.dim,
+    hr: tuiStyle.dim,
+    listBullet: tuiStyle.accent,
+    bold: (text: string) => paintToken('title', text, { bold: true }),
+    italic: (text: string) => paintToken('thinking', text, { italic: true }),
+    strikethrough: id,
+    underline: id,
+  };
+}
+
+let cachedMarkdownTheme: MarkdownTheme | undefined;
+
+/**
+ * Markdown theme: pi's, so prose matches the rest of the user's terminal. The
+ * import is synchronous because this is called from render paths, and pi is
+ * already a hard dependency (compaction uses it).
+ */
+export function markdownTheme(): MarkdownTheme {
+  if (cachedMarkdownTheme) return cachedMarkdownTheme;
+  try {
+    // pi's theme functions are lazy: they throw on *use* when the theme was
+    // never initialized, so probe one rather than trusting the getter.
+    initTuiTheme();
+    const theme = getMarkdownTheme();
+    theme.heading('probe');
+    cachedMarkdownTheme = theme;
+    return theme;
+  } catch {
+    cachedMarkdownTheme = fallbackMarkdownTheme();
+    return cachedMarkdownTheme;
+  }
+}
+
+/** Editor theme: pi's if available, else the SDK's existing one. */
+let cachedEditorTheme: EditorTheme | undefined;
+
+export function tuiEditorTheme(): EditorTheme {
+  if (cachedEditorTheme) return cachedEditorTheme;
+  cachedEditorTheme = editorTheme();
+  return cachedEditorTheme;
+}

@@ -260,7 +260,31 @@ export function formatBindings(bindings: DMLBinding[]): string {
 /** Max characters of reasoning shown in `summary` mode. */
 const REASONING_SUMMARY_CHARS = 600;
 
-export class ReplRenderer {
+/**
+ * What the CLI needs from a renderer.
+ *
+ * `ReplRenderer` (string output, used by `--plain`, `--json` and the readline
+ * path) and the TUI's component renderer both satisfy this, so the dispatch code
+ * does not care which one is drawing.
+ */
+export interface ReplEventRenderer {
+  readonly mode: RenderMode;
+  render(event: DMLEvent): void;
+  setSink(sink: (text: string) => void, errorSink?: (text: string) => void): void;
+  setImageSink(sink?: (lines: string[]) => void): void;
+  setSuppressInputPrompt(suppress: boolean): void;
+  getWidth(): number;
+  setWidth(width: number): void;
+  writeLine(text?: string): void;
+  writeErrorLine(text: string): void;
+  listing(text: string): string;
+  image(lines: string[]): void;
+  solution(bindings: DMLBinding[], terminator?: string, prefix?: string, maxValue?: number): void;
+  flush(): void;
+  dispose(): void;
+}
+
+export class ReplRenderer implements ReplEventRenderer {
   readonly mode: RenderMode;
   private readonly color: boolean;
   private readonly verbose: boolean;

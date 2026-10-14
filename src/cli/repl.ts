@@ -16,11 +16,22 @@ import { fileURLToPath } from 'url';
 import { createHarnessRepl, type HarnessRepl } from '../repl/index.js';
 import { HistoryStore } from '../repl/history.js';
 import { resolveReplJudgeSelection } from '../repl/judge.js';
-import { ReplRenderer, type RenderMode } from '../repl/render.js';
+import { ReplRenderer, type RenderMode, type ReplEventRenderer } from '../repl/render.js';
+import { TranscriptDocument } from '../repl/tui/document.js';
+import { TuiRenderer } from '../repl/tui/renderer.js';
+import { WorkingLine } from '../repl/tui/working-line.js';
+import { createReplAutocomplete } from '../repl/tui/autocomplete.js';
+import { initTuiTheme, scrollbarStyles } from '../repl/tui/theme.js';
 import { ReplStatusTracker, type ReplStatusSnapshot } from '../repl/status.js';
-import { LineSink, TranscriptComponent } from '../repl/tui/transcript.js';
 import { StatusBarComponent } from '../repl/tui/status-bar.js';
-import { Container, ProcessTerminal, Spacer, TuiMainScreen, matchesKey } from '@earendil-works/pi-tui';
+import {
+  Container,
+  ProcessTerminal,
+  ScrollView,
+  TuiAltScreen,
+  VStack,
+  matchesKey,
+} from '@earendil-works/pi-tui';
 import { editorTheme, formatInputAnswer } from '../repl/tui/theme.js';
 import { PromptEditor } from '../repl/tui/editor.js';
 import { loadProjectContext } from '../repl/project-context.js';
@@ -264,7 +275,7 @@ export function classifyReplInput(line: string): ReplInput {
 export async function runGoalWithRenderer(
   repl: HarnessRepl,
   goal: string,
-  options: { first?: boolean; renderer: ReplRenderer; signal?: AbortSignal },
+  options: { first?: boolean; renderer: ReplEventRenderer; signal?: AbortSignal },
 ): Promise<number> {
   let hadError = false;
   let printedAny = false;
@@ -335,7 +346,8 @@ function resolveModel(modelId: string): { provider: Provider; model: string } {
 
 export interface ReplRuntime {
   repl: HarnessRepl;
-  renderer: ReplRenderer;
+  /** String renderer for plain/json output, or the TUI's component renderer. */
+  renderer: ReplEventRenderer;
   workspace: string;
   promptPrefix: string;
   toolset: ReplToolset;
@@ -1107,7 +1119,7 @@ async function runInteractive(
 
 export async function runInteractiveGoal(
   repl: HarnessRepl,
-  renderer: ReplRenderer,
+  renderer: ReplEventRenderer,
   goal: string,
   options: ReplCliOptions,
   ask: (query: string) => Promise<string | null>,
@@ -1172,10 +1184,31 @@ export async function runTui(
   onExit?: () => Promise<void>,
   loaded: string[] = [],
 ): Promise<number> {
+  initTuiTheme();
   const terminal = new ProcessTerminal();
-  const tui = new TuiMainScreen(terminal);
-  const transcript = new TranscriptComponent();
-  const sink = new LineSink(transcript);
+  // Fullscreen: an application-owned viewport (ScrollView) with the editor and
+  // status bar pinned in a dock. In this mode pi-tui hands scrolling, mouse wheel,
+  // text selection and search to the viewport, and reassigns layout on resize —
+  // which is what makes the transcript scroll inside the app and the input box
+  // behave when the terminal changes size.
+  const tui = new TuiAltScreen(terminal, undefined, undefined, {
+    mouse: true,
+    wheelScrollLines: 'auto',
+    copyOnSelect: true,
+  });
+  const document = new TranscriptDocument();
+  const transcript = document;
+  // The TUI renders components rather than lines: tool calls become panes and
+  // streamed text becomes markdown. There is no external sink to wire.
+  const working = new WorkingLine(tui);
+  const renderer = new TuiRenderer({
+    document,
+    onWorking: (label) => {
+      working.set(label);
+      tui.requestRender();
+    },
+  });
+  runtime.renderer = renderer;
   const runState = { running: false, steerable: false };
   /** Lines typed during a goal query, consumed by the solution pager. */
   const bufferedInput: string[] = [];
@@ -1190,12 +1223,13 @@ export async function runTui(
   });
   transcript.onChange = () => tui.requestRender();
 
-  // Redirect the renderer into the transcript (including error lines).
-  runtime.renderer.setSink((text) => sink.write(text), (text) => sink.write(text));
-  runtime.renderer.setImageSink((lines) => transcript.appendImageLines(lines));
-  runtime.renderer.setWidth(terminal.columns);
+  renderer.setImageSink((lines) => document.appendImageLines(lines));
+  renderer.setWidth(terminal.columns);
+  // pi-tui re-renders on resize but does not invalidate the component tree, and a
+  // component that caches by width (a tool pane, markdown) would draw stale lines.
   const onResize = (): void => {
-    runtime.renderer.setWidth(terminal.columns);
+    renderer.setWidth(terminal.columns);
+    tui.invalidate();
     tui.requestRender();
   };
   process.stdout.on('resize', onResize);
@@ -1256,6 +1290,7 @@ export async function runTui(
 
   const createEditor = (): void => {
     editor = new PromptEditor(tui, editorTheme());
+    editor.setAutocompleteProvider(createReplAutocomplete(runtime.workspace));
     editor.onSubmit = handleSubmit;
     editorContainer.clear();
     editorContainer.addChild(editor);
@@ -1320,6 +1355,12 @@ export async function runTui(
       cancelTurn();
       return { consume: true };
     }
+    // ctrl+o expands or collapses the most recent tool call, the way pi reveals
+    // full tool output on demand.
+    if (matchesKey(data, 'ctrl+o')) {
+      if (renderer.toggleLastPane()) return { consume: true };
+      return undefined;
+    }
     return undefined;
   });
   // Fallback for terminals/raw-mode setups that deliver SIGINT instead of \x03.
@@ -1327,10 +1368,23 @@ export async function runTui(
 
   createEditor();
   for (const line of runtime.inputHistory) editor?.addToHistory(line);
-  tui.addChild(transcript);
-  tui.addChild(new Spacer(1));
-  tui.addChild(editorContainer);
-  tui.addChild(statusBar);
+  // Transcript grows and scrolls; everything below it stays put.
+  const scroll = new ScrollView(document, {
+    follow: 'end',
+    primary: true,
+    scrollbar: 'auto',
+    scrollbarTrackStyle: scrollbarStyles.track,
+    scrollbarThumbStyle: scrollbarStyles.thumb,
+  });
+  const dock = new VStack([
+    { component: working, basis: 'auto', grow: 0, shrink: 1, minSize: 0 },
+    { component: editorContainer, basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
+    { component: statusBar, basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
+  ]);
+  tui.setLayoutRoot(new VStack([
+    { component: scroll, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+    { component: dock, basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
+  ]));
   tui.start();
 
   await printBanner(runtime, loaded);
@@ -1370,6 +1424,7 @@ export async function runTui(
     tui.stop();
     process.off('SIGINT', cancelTurn);
     process.stdout.off('resize', onResize);
+    working.stop();
     // Restore stdout so the exit footer and any later output are visible.
     runtime.renderer.setSink(
       (text) => process.stdout.write(text),

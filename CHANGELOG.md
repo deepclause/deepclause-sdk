@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **The REPL TUI is fullscreen.** It runs on pi-tui's alternate screen with an
+  application-owned viewport: the transcript scrolls inside the app — scrollbar,
+  mouse wheel, text selection, clipboard, search — while the editor and status bar
+  stay pinned in a dock. `ScrollView`'s follow-end and wheel support only exist on
+  that path, which is why the transcript previously scrolled with the terminal's
+  scrollback and the layout was fragile when the terminal was resized. `--plain`,
+  `--json` and non-TTY output are unchanged and still use the line renderer.
+
+### Added
+
+- **Tool calls render as panes.** Each `execute`/`bash`/`listing` call is a
+  component with its own status, duration and captured output — collapsed by
+  default, expanded with `ctrl+o`. Unlike the old line panel it can be re-rendered
+  and reopened, and its content is markdown when expanded.
+- **Streamed answers render as markdown as they arrive** (pi's markdown theme),
+  instead of the per-line ANSI markdown renderer on the TUI path.
+- **A working indicator in the dock**, driven by turn state rather than by whichever
+  event happened to arrive last. With reasoning off and streaming quiet, the
+  transcript used to go silent with no sign that anything was running.
+- **Slash-command autocomplete** in the editor (pi's combined provider), with file
+  completion.
+- **Pi's theme is adopted** for the component layer: markdown and editor themes come
+  from pi, and colours go through pi-tui's styler, so the terminal's colour mode is
+  handled for us. A fallback palette is used if pi's theme cannot be resolved.
+
+### Fixed
+
+- **Constructing a pi-tui `Loader` started a timer that kept the process alive.**
+  The REPL never exited after `/halt` because of it. The indicator is now parked
+  until there is work, and stopped on exit.
+- **`getMarkdownTheme()` styles throw on *use* when pi's theme was never
+  initialized**, not at lookup, so a lookup-time fallback never fired. The theme is
+  initialized first and probed by calling one of its functions.
+
 ## 0.1.2 - 2026-10-14
 
 ### Added

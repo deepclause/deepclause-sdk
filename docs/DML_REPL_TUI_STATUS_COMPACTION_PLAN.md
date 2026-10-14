@@ -73,6 +73,13 @@ renderer only for non-TTY / `--plain` / `--json`.
 `TuiMainScreen` gives differential rendering and keeps the editor + status bar
 fixed while the transcript scrolls.
 
+**Superseded:** this section originally assumed the *regular* screen would scroll
+the transcript and keep the dock fixed. In pi-tui the terminal owns scrollback in
+regular mode, and `ScrollView`'s follow-end/wheel support belongs to the viewport
+(alternate-screen) TUI. The implementation now uses `TuiAltScreen` with a
+`VStack([ScrollView(transcript), dock])` layout root — the shape pi's own chat
+viewport uses (`chat-viewport.js`).
+
 ### 2.2 New modules (`src/repl/tui/`)
 
 | File | Responsibility |
