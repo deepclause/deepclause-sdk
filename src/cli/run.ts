@@ -16,6 +16,7 @@ import { promptUser } from './readline.js';
 import type { DMLEvent } from '../types.js';
 import { DMLSession } from '../repl/session.js';
 import { ReplRenderer, type RenderMode } from '../repl/render.js';
+import { takeStartupPrologMessages } from '../prolog/loader.js';
 import { createReplToolset } from '../repl/toolset.js';
 import { resolveLlmBackend, type BackendKind } from '../repl/backend.js';
 import { EnvModelResolver, PiModelResolver } from '../repl/model-resolver.js';
@@ -147,6 +148,16 @@ export async function run(
     events: options.events !== false,
     reasoning: options.showReasoning ?? config.repl.showReasoning,
   });
+
+  // Diagnostics from loading the runtime itself, once, through the renderer.
+  for (const message of takeStartupPrologMessages()) {
+    renderer.render({
+      type: message.channel === 'stdout' ? 'output' : 'log',
+      content: message.text,
+      level: message.level,
+      channel: message.channel,
+    });
+  }
 
   const toolset = await createReplToolset({
     workspacePath,

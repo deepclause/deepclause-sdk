@@ -26,6 +26,7 @@ import { PromptEditor } from '../repl/tui/editor.js';
 import { loadProjectContext } from '../repl/project-context.js';
 import { createPiBackend } from '../repl/backend.js';
 import { createReplToolset, type ReplToolset } from '../repl/toolset.js';
+import { takeStartupPrologMessages } from '../prolog/loader.js';
 import { createPiImageBackend } from '../repl/imagegen.js';
 import { EnvModelResolver, PiModelResolver, type ModelResolver } from '../repl/model-resolver.js';
 import type { ImageBackend } from '../types.js';
@@ -1383,6 +1384,17 @@ export async function startRepl(options: ReplCliOptions): Promise<number> {
   let runtime: ReplRuntime;
   try {
     runtime = await createReplRuntime(options);
+    // Diagnostics from loading the runtime itself, rendered once and through the
+    // renderer. Before this they were printed by Emscripten straight to the
+    // terminal, in the middle of whatever the UI was drawing.
+    for (const message of takeStartupPrologMessages()) {
+      runtime.renderer.render({
+        type: message.channel === 'stdout' ? 'output' : 'log',
+        content: message.text,
+        level: message.level,
+        channel: message.channel,
+      });
+    }
   } catch (error) {
     process.stderr.write(`ERROR: ${(error as Error).message}\n`);
     return 1;

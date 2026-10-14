@@ -19,6 +19,7 @@ import type {
 } from './types.js';
 import { mountWorkspace } from './prolog/loader.js';
 import { runAgentLoop } from './agent.js';
+import { takePrologMessages } from './prolog/loader.js';
 import { validateToolArguments } from './repl/tool-arguments.js';
 import { judgeAnswersToValues, judgeCacheKey, normalizeJudgeState, parseJudgeQuestions, validateJudgeAnswers, valuesToPrologList } from './judge/marshal.js';
 import type { JudgeAnswer, JudgeCapabilities, JudgeSelection, JudgeUsage, JsonValue, JudgeQuestion } from './judge/types.js';
@@ -470,6 +471,16 @@ export class DMLRunner {
 
       // Step the frame
       const step = this.stepFrame(frame.id);
+
+      // Prolog's own output (warnings from the term reader, `format(user_error,
+      // ...)`, a stray `write/1`) is captured by the loader rather than printed,
+      // and surfaced here so it renders in order and through the normal path.
+      // This is what keeps a warning from scribbling over an interactive frame.
+      for (const message of takePrologMessages()) {
+        yield message.channel === 'stdout'
+          ? { type: 'output', content: message.text, channel: message.channel }
+          : { type: 'log', content: message.text, level: message.level, channel: message.channel };
+      }
 
       if (process.env.DEBUG_STEPS) {
         console.log('[MAIN_LOOP] step:', step.status, step.content?.substring(0, 50));

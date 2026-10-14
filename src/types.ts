@@ -275,8 +275,16 @@ export interface FrameEventMeta {
 }
 
 export interface DMLEvent extends FrameEventMeta {
-  type: 'output' | 'log' | 'answer' | 'input_required' | 'error' | 'finished' | 'stream' | 'reasoning' | 'tool_call' | 'model_call' | 'usage' | 'memory_compaction' | 'task_activity' | 'solution' | 'meta_result' | 'media';
+  type: 'output' | 'log' | 'diagnostic' | 'answer' | 'input_required' | 'error' | 'finished' | 'stream' | 'reasoning' | 'tool_call' | 'model_call' | 'usage' | 'memory_compaction' | 'task_activity' | 'solution' | 'meta_result' | 'media';
   content?: string;
+  /**
+   * Severity of a `log` event. Prolog's own stderr arrives this way; `warning`
+   * and `error` are shown even without `--verbose`, because a deprecated or
+   * failing construct is not low-level noise the user opted out of seeing.
+   */
+  level?: 'info' | 'warning' | 'error';
+  /** Which stream a diagnostic came from (only for Prolog diagnostics). */
+  channel?: 'stdout' | 'stderr';
   /** Media produced by a step (path in the workspace, optional inline base64). */
   media?: { path?: string; mimeType: string; data?: string; kind?: string };
   /** Model-call lifecycle (only for 'model_call' events). */

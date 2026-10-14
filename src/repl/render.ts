@@ -575,11 +575,20 @@ export class ReplRenderer {
           }
         }
         break;
-      case 'log':
-        if (this.verbose) {
-          this.writeLine(this.paint(`${prefix}[log] ${event.content ?? ''}`, ANSI.dim));
+      case 'log': {
+        // `log` is the low-level channel and stays behind `--verbose`, with one
+        // exception: a warning or an error from Prolog itself is a real problem
+        // in the code being written, not noise. Showing it by default is the
+        // whole point of capturing it — it used to go straight to the terminal.
+        const severity = event.level ?? 'info';
+        const loud = severity === 'warning' || severity === 'error';
+        if (this.verbose || loud) {
+          const label = severity === 'info' ? '[log]' : `[${severity}]`;
+          const colour = severity === 'error' ? ANSI.red : loud ? ANSI.cyan : ANSI.dim;
+          this.writeLine(this.paint(`${prefix}${label} ${event.content ?? ''}`, colour));
         }
         break;
+      }
       case 'task_activity':
         this.renderTaskActivity(event, prefix);
         break;

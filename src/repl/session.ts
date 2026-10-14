@@ -11,7 +11,13 @@ import * as os from 'os';
 import * as path from 'path';
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 
-import { loadProlog, mountWorkspace, type SWIPLModule } from '../prolog/loader.js';
+import {
+  loadProlog,
+  mountWorkspace,
+  takePrologMessages,
+  type PrologMessage,
+  type SWIPLModule,
+} from '../prolog/loader.js';
 import {
   describeShellExecutionBackend,
   type ExecutionBackendKind,
@@ -343,6 +349,17 @@ export class DMLSession {
     return this.sessionId;
   }
 
+  /**
+   * Prolog output captured since the last drain.
+   *
+   * The step loop surfaces this while a goal runs; this accessor is for messages
+   * produced by paths that are not the step loop — a load, a host query — so a
+   * host can render them rather than have them vanish into a queue.
+   */
+  takePrologMessages(): PrologMessage[] {
+    return takePrologMessages();
+  }
+
   /** Parse and load DML source into the living module. */
   async loadCode(code: string): Promise<{ error?: string; warnings?: string[] }> {
     if (this.disposed) {
@@ -355,7 +372,12 @@ export class DMLSession {
     if (error === undefined || error === null) {
       return { error: 'Failed to load code' };
     }
-    return error === 'none' ? { warnings: this.unhandledDirectives() } : { error: String(error) };
+    if (error !== 'none') return { error: String(error) };
+    // Parsing is where the term reader speaks up (`\`-continuation, singleton
+    // warnings), so load-time diagnostics belong with the load's warnings
+    // instead of arriving mid-render later.
+    const prologWarnings = takePrologMessages().map((message) => message.text);
+    return { warnings: [...this.unhandledDirectives(), ...prologWarnings] };
   }
 
   /**

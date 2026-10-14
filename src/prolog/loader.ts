@@ -67,6 +67,76 @@ const SWIPL_WASM_ENTRY_URL = (() => {
 })();
 
 /**
+ * SWI-Prolog's own stdout/stderr, captured instead of printed.
+ *
+ * Emscripten's defaults write straight to the terminal (`console.log` /
+ * `console.warn`), which means a Prolog warning lands mid-frame and desyncs an
+ * interactive UI — the reader's `Deprecated ... Use \c` message is the common
+ * case, and it arrives while terms are being parsed, so it scribbles over
+ * whatever is on screen. Capturing here lets the runtime decide: the message
+ * becomes an event and is rendered by the same code as everything else.
+ *
+ * `print`/`printErr` are called one line at a time.
+ */
+export type PrologMessageLevel = 'info' | 'warning' | 'error';
+
+export interface PrologMessage {
+  channel: 'stdout' | 'stderr';
+  text: string;
+  level: PrologMessageLevel;
+}
+
+/** Bounded so a chatty program cannot grow without limit in a long session. */
+const MAX_PENDING_MESSAGES = 500;
+const pendingPrologMessages: PrologMessage[] = [];
+const startupPrologMessages: PrologMessage[] = [];
+let droppedPrologMessages = 0;
+
+/**
+ * Severity from the text, since SWI writes warnings, errors and ordinary output
+ * to the same stream. Anything unrecognised on stderr is treated as a warning:
+ * silence is worse than an over-cautious label here.
+ */
+function classifyPrologMessage(channel: 'stdout' | 'stderr', text: string): PrologMessageLevel {
+  if (channel === 'stdout') return 'info';
+  const trimmed = text.trimStart();
+  if (/^(error|fatal|internal error|assertion)/i.test(trimmed)) return 'error';
+  if (/^warning|deprecat|^note:/i.test(trimmed)) return 'warning';
+  // Unlabelled stderr output is usually a diagnostic wearing no label.
+  return trimmed.length > 0 ? 'warning' : 'info';
+}
+
+function recordPrologMessage(channel: 'stdout' | 'stderr', text: string): void {
+  const line = text.replace(/\r?\n$/, '');
+  if (line.trim().length === 0) return;
+  if (pendingPrologMessages.length >= MAX_PENDING_MESSAGES) {
+    droppedPrologMessages += 1;
+    return;
+  }
+  pendingPrologMessages.push({ channel, text: line, level: classifyPrologMessage(channel, line) });
+}
+
+/**
+ * Take everything SWI has written since the last call.
+ *
+ * Callers drain rather than subscribe because the messages are produced
+ * synchronously inside `prolog.call`/engine steps, while the consumers (the
+ * step loop, a load) are already pulling.
+ */
+export function takePrologMessages(): PrologMessage[] {
+  const messages = pendingPrologMessages.splice(0, pendingPrologMessages.length);
+  if (droppedPrologMessages > 0) {
+    messages.push({
+      channel: 'stderr',
+      text: `[${droppedPrologMessages} earlier Prolog message(s) dropped]`,
+      level: 'info',
+    });
+    droppedPrologMessages = 0;
+  }
+  return messages;
+}
+
+/**
  * Load and initialize SWI-Prolog WASM
  */
 export async function loadProlog(): Promise<SWIPLModule> {
@@ -175,7 +245,11 @@ async function initializeProlog(): Promise<SWIPLModule> {
       '-g', 'true',
       '--nosignals',
     ],
-  }) as SWIPLModule;
+    // Capture rather than print: see recordPrologMessage. Prolog's own output
+    // must not reach the terminal directly, or it corrupts an interactive UI.
+    print: (text: string) => recordPrologMessage('stdout', text),
+    printErr: (text: string) => recordPrologMessage('stderr', text),
+  } as never) as SWIPLModule;
 
   // Create required directories
   try {
@@ -201,7 +275,20 @@ async function initializeProlog(): Promise<SWIPLModule> {
     // library(http/json) may not be available in all WASM builds — skip silently
   }
 
+  // Loading the runtime's own Prolog is the loader's business, not any one
+  // session's: set the diagnostics aside so they cannot surface as the first
+  // warning of an unrelated turn. Hosts render them once at startup.
+  startupPrologMessages.push(...takePrologMessages());
+
   return swipl;
+}
+
+/**
+ * Diagnostics from loading the runtime itself (module warnings), set aside by
+ * `initializeProlog` so they do not leak into the first caller's turn.
+ */
+export function takeStartupPrologMessages(): PrologMessage[] {
+  return startupPrologMessages.splice(0, startupPrologMessages.length);
 }
 
 /**
