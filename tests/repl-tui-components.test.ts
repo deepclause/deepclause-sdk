@@ -482,3 +482,55 @@ describe('wrapped lines keep their position in the tree', () => {
     for (const line of flush) expect(line.startsWith(' ')).toBe(false);
   });
 });
+
+describe('streamed text belongs to the turn that produced it', () => {
+  function rows(events: Array<Record<string, unknown>>): string[] {
+    const document = new TranscriptDocument();
+    const renderer = new TuiRenderer({ document });
+    for (const event of events) renderer.render(event as never);
+    return document.render(72).map(plain).map((line) => line.replace(/\s+$/, ''));
+  }
+
+  const textBlock = (content: string) => ({ type: 'stream', content, frameKind: 'run', depth: 0 });
+
+  it('starts a new block after a run finishes', () => {
+    // The bug: the second turn's text was appended to the first turn's block, which
+    // sits earlier in the transcript — so the reply rendered *above* the prompt.
+    const lines = rows([
+      textBlock('first reply'),
+      { type: 'finished' },
+      { type: 'output', content: 'what is up', frameKind: 'run', depth: 0 },
+      textBlock('second reply'),
+    ]);
+    const joined = lines.join('\n');
+    expect(joined).toContain('first reply');
+    expect(joined).toContain('second reply');
+    // They are separate lines, not one run-on block.
+    expect(lines.some((line) => line.includes('first reply') && line.includes('second reply'))).toBe(false);
+    // And the second reply comes after the prompt, not before it.
+    const promptIndex = lines.findIndex((line) => line.includes('what is up'));
+    const secondIndex = lines.findIndex((line) => line.includes('second reply'));
+    expect(secondIndex).toBeGreaterThan(promptIndex);
+  });
+
+  it('does not close the block for a nested run', () => {
+    // A nested frame finishes many times inside one answer; closing on it would chop
+    // the answer into pieces.
+    const lines = rows([
+      textBlock('part one '),
+      { type: 'finished', frameKind: 'nested', depth: 1 },
+      textBlock('part two'),
+    ]);
+    expect(lines.some((line) => line.includes('part one part two'))).toBe(true);
+  });
+
+  it('can be closed by the host', () => {
+    const document = new TranscriptDocument();
+    const renderer = new TuiRenderer({ document });
+    renderer.render(textBlock('first') as never);
+    renderer.endTextBlock();
+    renderer.render(textBlock('second') as never);
+    const lines = document.render(72).map(plain);
+    expect(lines.some((line) => line.includes('first') && line.includes('second'))).toBe(false);
+  });
+});

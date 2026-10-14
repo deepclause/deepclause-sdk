@@ -123,6 +123,17 @@ export class TuiRenderer {
     this.lastBlock = kind;
   }
 
+  /**
+   * Close any open streamed-text block.
+   *
+   * Called at a turn boundary by the host, which knows when a prompt was submitted
+   * even if the run that was streaming never reported `finished` (an interrupted
+   * turn, for instance).
+   */
+  endTextBlock(): void {
+    this.endStream();
+  }
+
   /** Expand or collapse the most recent tool pane (ctrl+o). */
   toggleLastPane(): boolean {
     const pane = this.panes[this.panes.length - 1];
@@ -153,6 +164,12 @@ export class TuiRenderer {
         this.endStream();
         this.separate('text');
         this.text.render(event);
+        return;
+      case 'finished':
+        // A run ended. Without closing the block, the next turn's streamed text is
+        // appended to this one and renders *above* the prompt the user just typed,
+        // because the block sits earlier in the transcript.
+        if ((event.depth ?? 0) === 0) this.endStream();
         return;
       default:
         // Events that render nothing must not add a separator, or switching models

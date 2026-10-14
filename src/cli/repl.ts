@@ -1261,7 +1261,9 @@ export async function runTui(
           transcript.append(formatInputAnswer(text));
         } else if (activePrompt === runtime.promptPrefix) {
           // A user turn: separate it from the previous output and from the
-          // response that follows; render it as a pi-style blue block.
+          // response that follows; render it as a pi-style blue block. The previous
+          // turn's text block is closed first, so the new response starts below this.
+          runtime.renderer.endTextBlock?.();
           if (transcript.getLines().length > 0) transcript.append('');
           transcript.append(text, 'user');
           transcript.append('');
@@ -1270,6 +1272,7 @@ export async function runTui(
     } else if (text.trim()) {
       // No pending ask means a turn is running.
       if (runState.steerable) {
+        runtime.renderer.endTextBlock?.();
         transcript.append(text, 'steer');
         runtime.repl.steer(text);
       } else {

@@ -299,6 +299,11 @@ export interface ReplEventRenderer {
   writeErrorLine(text: string): void;
   listing(text: string): string;
   image(lines: string[]): void;
+  /**
+   * Close any open streamed-text block. The TUI implements this so a new turn's
+   * text cannot be appended to the previous turn's and render above the prompt.
+   */
+  endTextBlock?(): void;
   solution(bindings: DMLBinding[], terminator?: string, prefix?: string, maxValue?: number): void;
   flush(): void;
   dispose(): void;

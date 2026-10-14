@@ -40,6 +40,14 @@
 
 ### Fixed
 
+- **A turn's streamed reply rendered *above* the prompt that asked for it.** The
+  streamed-text block was never closed at the end of a turn, so the next turn's text
+  was appended to the previous turn's block — which sits earlier in the transcript.
+  What looked like "streaming does not continue after the prompt line" was the reply
+  appearing before it, joined to the previous answer with no separation
+  (`…touching the module.Not much — just a blank harness…`). The block is now closed
+  when a run finishes, and by the host when a prompt is submitted (which also covers
+  an interrupted turn that never reports `finished`).
 - **Wrapped lines lost their place in the tree.** A long line emitted by the line
   renderer (a solution value, a log line) carries its frame's stem (`run │ `) inside
   the text; when the document wrapped it to the terminal width, the continuation lines
