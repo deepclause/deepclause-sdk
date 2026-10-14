@@ -12,6 +12,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { createHarnessRepl, type HarnessRepl } from '../src/repl/index.js';
+import { plainValue } from '../src/repl/frames.js';
 import type { LLMBackend, LLMBackendRequest, LLMBackendResponse } from '../src/types.js';
 
 /** Answers a `task/N` with a result and a finish, and a `prompt/N` with text. */
@@ -120,5 +121,46 @@ describe('task/N memory', () => {
     const fresh = backend.seen.find((call) => call.some((m) => m.content.includes('FRESH-TASK')));
     expect(fresh!.some((m) => m.content.includes('INNER'))).toBe(true);
     expect(fresh!.some((m) => m.content.includes('SYS-MARKER'))).toBe(false);
+  });
+});
+
+describe('prompt/N output binding', () => {
+  it('binds an output variable', async () => {
+    // A regression guard: the descriptor list sent to the agent was left unbound on
+    // the prompt path (only a Prolog singleton warning hinted at it), so the model
+    // was told about no outputs. Binding the variable is the observable effect.
+    //
+    // Its own backend rather than the shared one: that one keys off the
+    // "use set_result" nudge, which never appears for a prompt/N (it has no tools).
+    class PromptMock implements LLMBackend {
+      async complete(request: LLMBackendRequest): Promise<LLMBackendResponse> {
+        const answered = request.messages.some((m) => m.content.includes('"success":true'));
+        if (answered) {
+          return { text: '', toolCalls: [{ id: 'f', name: 'finish', arguments: { success: true } }], finishReason: 'tool_use' };
+        }
+        return {
+          text: '',
+          toolCalls: [{ id: 'r', name: 'set_result', arguments: { variable: 'A', value: 'hello-from-prompt' } }],
+          finishReason: 'tool_use',
+        };
+      }
+    }
+
+    const backend = new PromptMock();
+    repl = await createHarnessRepl({
+      workspacePath: workspace,
+      model: 'm',
+      provider: 'openai',
+      llmBackend: backend,
+      maxModelCalls: 6,
+    });
+    await repl.session.loadCode('go(A) :- prompt("Say hi", A).');
+
+    const events: Array<{ type: string; solution?: { bindings: Array<{ name: string; value: unknown }> } }> = [];
+    for await (const e of repl.query('go(A)')) events.push(e as never);
+    const bound = events
+      .find((e) => e.type === 'solution')
+      ?.solution?.bindings.find((b) => b.name === 'A')?.value;
+    expect(String(plainValue(bound) ?? '')).toContain('hello-from-prompt');
   });
 });

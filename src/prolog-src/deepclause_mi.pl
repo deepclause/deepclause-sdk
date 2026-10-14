@@ -3441,6 +3441,7 @@ mi_call_prompt_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     add_trace_entry(SessionId, llm_call, prompt, [InterpDesc], Depth),
     % prompt/N is a simple LLM call - no tools, no tool scope
     get_model_spec(StateIn, ModelSpec),
+    resolve_schema_fields(SessionId, VarNames, ResolvedVarNames),
     engine_yield(request_agent_loop(InterpDesc, ResolvedVarNames, [], [], none, ModelSpec)),
     % Wait for agent_done (no tool calls expected since no tools provided)
     handle_agent_signals(SessionId, StateIn, StateOut),
@@ -5612,8 +5613,14 @@ var_to_name(Bindings, Var, Name) :-
 %% expand_interpolations(+Term, +Bindings, -ExpandedTerm)
 %% Walk a term and expand strings containing {VarName} patterns
 %% Bindings is a list of 'VarName'=Variable pairs from read_term
+%% Interpolation happens in goal position only: `task/N`/`prompt/N`/`output/1`/… and
+%% the arguments of a user goal, never inside a list, a dict, or another compound
+%% passed as data. See the note on expand_term_interp/3.
+expand_interpolations((Head :- Body), Bindings, (Head :- ExpandedBody)) :-
+    !,
+    expand_body_interp(Body, Bindings, ExpandedBody).
 expand_interpolations(Term, Bindings, ExpandedTerm) :-
-    expand_term_interp(Term, Bindings, ExpandedTerm).
+    expand_body_interp(Term, Bindings, ExpandedTerm).
 
 %% expand_term_interp(+Term, +Bindings, -Expanded)
 %% Main term expansion predicate
@@ -5622,13 +5629,16 @@ expand_interpolations(Term, Bindings, ExpandedTerm) :-
 expand_term_interp(Var, _, Var) :-
     var(Var), !.
 
-% Strings - check if they need interpolation
-expand_term_interp(String, Bindings, Expanded) :-
-    string(String), !,
-    (   string_needs_interpolation(String)
-    ->  build_format_goal(String, Bindings, Expanded)
-    ;   Expanded = String
-    ).
+% Strings are LITERAL here. Interpolation is decided by expand_body_interp/3, which
+% only rewrites a string that is a *direct argument of a goal*. Rewriting every
+% string, nested ones included, corrupted data: the shell command
+%   exec(bash(argv: [..., "-w", "%{http_code}", Url]), R)
+% had its `%{http_code}` element replaced by a format goal inside the argv list, so
+% the list arrived truncated at `-w`. A JSON document, a regex, an `awk` program and
+% a `jq` filter all contain braces and must survive verbatim.
+expand_term_interp(String, _, String) :-
+    string(String),
+    !.
 
 % Atoms - check if they need interpolation (for atom strings)
 expand_term_interp(Atom, Bindings, Expanded) :-
@@ -5673,6 +5683,19 @@ expand_term_interp(Term, Bindings, ExpandedTerm) :-
 % Variable goal
 expand_body_interp(Var, _, Var) :-
     var(Var), !.
+
+% A list or a dict is DATA, not a sequence of goals. Descending into one treats its
+% elements as goal arguments and hoists any `{...}` string it contains, which
+% rewrote data into a goal term:
+%   argv: ["curl","-w","%{http_code}","u"]   became
+%   argv: [curl,-w|((param(http_code,_),format(...)),[Temp,u])]
+% so `exec(bash(argv: [...]))` reached the shell with a truncated argument list.
+expand_body_interp(Data, _, Data) :-
+    (   Data == []
+    ;   Data = [_|_]
+    ;   is_dict(Data)
+    ),
+    !.
 
 % Conjunction
 expand_body_interp((A, B), Bindings, ExpandedConj) :- !,
@@ -5722,6 +5745,7 @@ expand_body_interp(Goal, Bindings, ExpandedGoal) :-
 expand_body_interp(Goal, Bindings, ExpandedGoal) :-
     compound(Goal),
     Goal =.. [Functor|Args],
+    interp_arg_predicate(Functor),
     expand_args_hoist(Args, Bindings, PreGoals, ExpandedArgs, true),
     !,
     Bare =.. [Functor|ExpandedArgs],
@@ -5736,6 +5760,21 @@ expand_body_interp(Goal, Bindings, ExpandedGoal) :-
 
 % Atoms/other
 expand_body_interp(Goal, _, Goal).
+
+%% Predicates whose string arguments interpolate `{Var}`. Interpolation lives in
+%% the *description* of an LLM step and in the question of a judgment; anywhere else
+%% a string is data and must survive verbatim. Hoisting for every goal made a string
+%% of data into a goal argument: `X = "%{code}"` became an interpolation of the
+%% variable `code`, and a shell argv containing `%{http_code}` was rewritten.
+%%
+%% (task/N, prompt/N, answer/1, system/1, user/1, output/1, log/1 and yield/1 are
+%% handled by goal_with_string_arg/4 above, for their first argument.)
+interp_arg_predicate(judge).
+interp_arg_predicate(choose).
+interp_arg_predicate(rate).
+interp_arg_predicate(verify).
+interp_arg_predicate(probability).
+interp_arg_predicate(holds).
 
 %% goal_with_string_arg(+Goal, -Functor, -StringArg, -RestArgs)
 %% Match goals that take a string as their first argument

@@ -1316,6 +1316,14 @@ argument comes from a file, a model, or the user.
 
 ### File I/O and paths — prefer the shell
 
+There is **no paths file and no search-path registry**. A DML path is a string
+relative to the workspace root, and that is the whole mechanism — nothing to
+declare, register, or discover. `script_file(Name, Path)` links a file that belongs
+to the harness (it is bundled on `export`); it does not resolve anything at run
+time. `bash` sees more of the sandbox than DML does, but the workspace is the only
+tree DML's file predicates reach, so searching the host filesystem for a convention
+finds nothing and costs a great deal of time.
+
 **Prefer `exec(bash(...))` for file operations.**
 Reading, writing, copying, or converting files is usually clearer and more
 robust as a shell command; reach for the DML predicates below only when the
