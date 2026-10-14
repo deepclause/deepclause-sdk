@@ -210,14 +210,17 @@ text-only — never attach media to them.
 ## 6. Guard rails
 
 - Read first: call `listing`.
-- **Paths are workspace-relative and workspace-confined.** Never write
-  `/workspace/...` or any absolute path in DML — they are rejected. `size_file/2`,
-  `time_file/2`, `read_file/2`, `open/3`, `directory_files/2`, and `read_media/2`
-  all take a relative path, and `directory_files/2` returns **bare names**, so
-  build one (`atom_concat('images/', Name, Path)`). `bash` sees more of the
-  sandbox than DML can — keep that in `bash` and hand DML only relative paths.
-  Prefer `bash`/host file tools for file operations; use the DML file predicates
-  only for content you must reason over in Prolog.
+- **Paths: use `/workspace/...`.** The workspace is the working directory, so
+  `out/report.txt` and `/workspace/out/report.txt` are the same file — but write
+  the `/workspace` form, because it means the same thing from DML, from
+  `exec(bash(...))`, and from the shell tool on every backend. Everything outside
+  `/workspace` is the session's ephemeral VM filesystem: fine for scratch, never
+  for a result, because **only files under `/workspace` reach the host**. Scratch
+  goes in `$TMPDIR` (per-session in every backend), not a bare `/tmp`.
+  `directory_files/2` returns **bare names**, so build one
+  (`atom_concat('images/', Name, Path)`). Prefer `bash`/host file tools for file
+  operations; use the DML file predicates only for content you must reason over
+  in Prolog.
 - **Side-effecting skills must be deterministic.** Any skill that calls
   `task/N`, `prompt/N`, `exec/2`, `read_media/2`, `attach_media/1`, or writes a
   file must yield exactly one solution with no choicepoint left across the side
@@ -236,10 +239,17 @@ text-only — never attach media to them.
   domain (`X ins 0..N`) before `label/1`, prefer `once/1`, and keep the model
   small: an under-specified or unsatisfiable model searches forever, and there
   is no per-goal timeout. Never reach for CLP as a shortcut for arithmetic.
-- `bash` runs in a sandbox. Explore it (`python3 --version`, `pip list`,
-  `which jq`) and install a dependency when a skill genuinely needs one;
-  installs are sandbox/session-local and do not travel with an exported harness,
-  so prefer the standard library.
+- **Know whether you are sandboxed.** The session's environment block says which
+  backend is in effect. With a sandbox (`bwrap`, AgentVM, `sandbox-exec`),
+  `bash` is isolated and writes outside the workspace are confined. With
+  `clean-room` there is **no** sandbox: commands run as the user, writes outside
+  the workspace are real files that persist, and a `rm` is a real `rm`. Explore
+  what is available (`python3 --version`, `pip list`, `which jq`) and install a
+  dependency when a skill genuinely needs one; installs are sandbox/session-local
+  and do not travel with an exported harness, so prefer the standard library.
+- If a harness genuinely requires isolation, the **user** can add
+  `:- require_sandbox.` (through `/set-require-sandbox`). It makes the load fail
+  rather than run unsandboxed. Do not add it yourself.
 - Do **not** use `agent_main` unless the user asks for a `deepclause run` /
   `/dc-run` skill.
 - Media: reference images with `media(Path, Mime)` (`read_media/2` +

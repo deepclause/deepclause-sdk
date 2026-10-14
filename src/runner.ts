@@ -197,6 +197,8 @@ export interface RunnerOptions {
   imageBackend?: ImageBackend;
   /** Resolves `with_model/2` scopes to concrete models. */
   modelResolver?: ModelResolver;
+  /** Effective shell backend, passed to nested task agents for their env block. */
+  environment?: import('./system/runtime/shell-manager.js').ExecutionEnvironment;
 }
 
 export interface InternalRunOptions {
@@ -1106,6 +1108,7 @@ export class DMLRunner {
       memory: effectiveMemory,
       tools: availableTools,
       workspacePath: options.workspacePath,
+      environment: this.options.environment,
       resolveMedia: (refs) => this.readMediaRefs(options.workspacePath, refs),
       modelOptions: {
         model: scopedModel?.id ?? this.options.model,

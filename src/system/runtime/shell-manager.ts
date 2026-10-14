@@ -348,21 +348,49 @@ export function createShellManager(options: CreateShellManagerOptions): ShellMan
   return new HostShellManager(options.workspacePath, options.hostConfig);
 }
 
+/**
+ * The execution backends that isolate `exec(bash(...))` from the host. `clean-room`
+ * is the absence of a wrapper; it runs the command as the user, so it does not
+ * qualify as a sandbox.
+ */
+export type ExecutionBackendKind = 'agentvm' | HostShellWrapperKind;
+
+export interface ExecutionEnvironment {
+  kind: ExecutionBackendKind;
+  backendLabel: string;
+  description: string;
+  /** True for a backend that provides filesystem isolation. */
+  sandboxed: boolean;
+}
+
+/**
+ * Resolve how shell commands will actually run, as data.
+ *
+ * One source of truth for three consumers that must agree: the harness
+ * `require_sandbox` directive (checked at load against the *effective* backend,
+ * so an installed-but-unused bwrap does not satisfy it), the environment block
+ * put in front of the model, and the CLI status line. It was previously computed
+ * but never read, so nothing told the agent whether it was sandboxed.
+ */
 export function describeShellExecutionBackend(
   sandbox = false,
   hostConfig: HostShellConfig = {},
-): { backendLabel: string; description: string } {
+): ExecutionEnvironment {
   if (sandbox) {
     return {
+      kind: 'agentvm',
       backendLabel: 'sandbox[agentvm]',
       description: 'AgentVM sandbox',
+      sandboxed: true,
     };
   }
 
   const strategy = resolveHostShellStrategy({ hostConfig });
   return {
+    kind: strategy.wrapperKind,
     backendLabel: strategy.backendLabel,
     description: strategy.description,
+    sandboxed: strategy.wrapperKind !== 'clean-room',
   };
 }
 
@@ -622,20 +650,68 @@ function probeCommand(command: string, args: string[]): {
   };
 }
 
+/**
+ * The name every surface uses for the workspace: the WASM filesystem mounts it
+ * there, AgentVM mounts it there, and bwrap is told to bind it there. Where a
+ * mount is impossible the name is mapped onto the real directory instead.
+ */
+export const SANDBOX_WORKSPACE_PATH = '/workspace';
+
+/**
+ * The workspace path a command sees for this backend: `/workspace` where it is
+ * mounted, and the real directory where a mount is impossible (so scripts can
+ * still find it by `$WORKSPACE` and `$PWD`).
+ */
+function sandboxWorkspacePathFor(strategy: ResolvedHostShellStrategy, workspacePath: string): string {
+  return strategy.wrapperKind === 'bwrap' ? SANDBOX_WORKSPACE_PATH : workspacePath;
+}
+
+/**
+ * Rewrite workspace paths for backends that cannot mount `/workspace`.
+ *
+ * Only a word that *begins* with `/workspace` is a workspace path — preceded by
+ * the start of the command, whitespace, or a shell metacharacter, and followed
+ * by `/` or the end of the word. That keeps `/workspacex` and `/workspace-suffix`
+ * untouched, and `-I/workspace/include` and `--dir=/workspace` working. A blind
+ * search-and-replace would corrupt exactly the commands this exists to serve.
+ *
+ * This is a fallback, not the design: bwrap and AgentVM bind the real thing, so
+ * launched *programs* see `/workspace` there rather than only the agent's paths.
+ */
+export function mapWorkspacePaths(command: string, workspacePath: string): string {
+  // What may precede the name: the start of the command, whitespace, or a shell
+  // metacharacter — plus a short option such as `-I/workspace/include`, which is
+  // how compiler and interpreter flags are written.
+  const prefix = '[\\s"\'`=(:;|&<>,@]|-[A-Za-z]+';
+  // What may follow it. `-` is deliberately absent: `/workspace-suffix` is a
+  // different path, not the workspace.
+  const suffix = '[\\s"\'`()=:;|&<>,]';
+  const pattern = new RegExp(`(^|${prefix})\\/workspace(?=\\/|$|${suffix})`, 'g');
+  return command.replace(pattern, (_match, lead: string) => `${lead}${workspacePath}`);
+}
+
 function buildHostShellLaunchPlan(
   strategy: ResolvedHostShellStrategy,
   command: string,
   workspacePath: string,
 ): HostShellLaunchPlan {
   const scratchDir = createScratchDir();
-  const env = buildRestrictedEnv(scratchDir, workspacePath);
+  const sandboxWorkspacePath = sandboxWorkspacePathFor(strategy, workspacePath);
+  const env = buildRestrictedEnv(scratchDir, sandboxWorkspacePath);
+  // Where a mount is impossible (no bwrap, no AgentVM) the name still has to
+  // work, so `/workspace` is mapped onto the real directory in the command
+  // string. Where bwrap is in play the bind has already done it, and rewriting
+  // as well would be wrong.
+  const effectiveCommand = sandboxWorkspacePath === SANDBOX_WORKSPACE_PATH
+    ? command
+    : mapWorkspacePaths(command, workspacePath);
 
   switch (strategy.wrapperKind) {
     case 'bwrap':
       if (strategy.bwrapExecWrapperMode === 'setpriv-no-new-privs') {
         return {
           executable: resolveExecutable('setpriv'),
-          args: ['--no-new-privs', resolveExecutable('bwrap'), ...buildBwrapArgs(command, workspacePath, scratchDir, env, strategy)],
+          args: ['--no-new-privs', resolveExecutable('bwrap'), ...buildBwrapArgs(effectiveCommand, workspacePath, scratchDir, env, strategy)],
           env,
           strategy,
           scratchDir,
@@ -643,7 +719,7 @@ function buildHostShellLaunchPlan(
       }
       return {
         executable: resolveExecutable('bwrap'),
-        args: buildBwrapArgs(command, workspacePath, scratchDir, env, strategy),
+        args: buildBwrapArgs(effectiveCommand, workspacePath, scratchDir, env, strategy),
         env,
         strategy,
         scratchDir,
@@ -651,7 +727,7 @@ function buildHostShellLaunchPlan(
     case 'sandbox-exec':
       return {
         executable: resolveExecutable('sandbox-exec'),
-        args: ['-p', buildSandboxExecProfile(workspacePath, scratchDir), '/bin/bash', '--noprofile', '--norc', '-c', command],
+        args: ['-p', buildSandboxExecProfile(workspacePath, scratchDir), '/bin/bash', '--noprofile', '--norc', '-c', effectiveCommand],
         env,
         strategy,
         scratchDir,
@@ -660,7 +736,7 @@ function buildHostShellLaunchPlan(
     default:
       return {
         executable: resolveExecutable('bash'),
-        args: ['--noprofile', '--norc', '-c', command],
+        args: ['--noprofile', '--norc', '-c', effectiveCommand],
         env,
         strategy,
         scratchDir,
@@ -685,7 +761,10 @@ function cleanupScratchDir(scratchDir: string): void {
   }
 }
 
-function buildRestrictedEnv(scratchDir: string, workspacePath: string): NodeJS.ProcessEnv {
+function buildRestrictedEnv(
+  scratchDir: string,
+  sandboxWorkspacePath: string,
+): NodeJS.ProcessEnv {
   const pathValue = getDefaultHostPathValue();
 
   return {
@@ -697,7 +776,11 @@ function buildRestrictedEnv(scratchDir: string, workspacePath: string): NodeJS.P
     XDG_DATA_HOME: join(scratchDir, '.local', 'share'),
     LANG: 'C.UTF-8',
     LC_ALL: 'C.UTF-8',
-    PWD: workspacePath,
+    PWD: sandboxWorkspacePath,
+    // Scripts can reach the workspace by name. `$TMPDIR` is the scratch
+    // directory, which is disposable in every backend — unlike a hardcoded
+    // /tmp, which is the real one when there is no sandbox.
+    WORKSPACE: sandboxWorkspacePath,
   };
 }
 
@@ -749,13 +832,6 @@ function buildBwrapArgs(
     args.push('--ro-bind', requiredHostPath, requiredHostPath);
   }
 
-  for (const directoryPath of buildMountParentDirs(workspacePath)) {
-    if (createdMountDirs.has(directoryPath)) {
-      continue;
-    }
-    args.push('--dir', directoryPath);
-    createdMountDirs.add(directoryPath);
-  }
   for (const directoryPath of buildMountParentDirs(scratchDir)) {
     if (createdMountDirs.has(directoryPath)) {
       continue;
@@ -764,10 +840,16 @@ function buildBwrapArgs(
     createdMountDirs.add(directoryPath);
   }
 
-  args.push('--bind', workspacePath, workspacePath);
+  // The workspace is presented as /workspace, not at its host path. Every other
+  // surface already calls it that — the WASM filesystem mounts it at /workspace
+  // (src/prolog/loader.ts), AgentVM mounts it at /workspace — so this is what
+  // makes one name true everywhere, and it stops the host path leaking into the
+  // sandbox. `--chdir` matches, so a relative path means the same thing too.
+  args.push('--dir', '/workspace');
+  args.push('--bind', workspacePath, SANDBOX_WORKSPACE_PATH);
   args.push('--bind', scratchDir, scratchDir);
   //args.push('--tmpfs', '/tmp');
-  args.push('--chdir', workspacePath);
+  args.push('--chdir', SANDBOX_WORKSPACE_PATH);
 
   for (const [key, value] of Object.entries(env)) {
     if (typeof value === 'string') {

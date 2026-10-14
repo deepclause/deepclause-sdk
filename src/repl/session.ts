@@ -12,6 +12,11 @@ import * as path from 'path';
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 
 import { loadProlog, mountWorkspace, type SWIPLModule } from '../prolog/loader.js';
+import {
+  describeShellExecutionBackend,
+  type ExecutionBackendKind,
+  type ExecutionEnvironment,
+} from '../system/runtime/shell-manager.js';
 import { getWorkspaceDocAssetPath } from '../system/assets/index.js';
 import { DMLRunner, toJsValue, type Frame, type InternalRunOptions, type RunnerOptions } from '../runner.js';
 import {
@@ -100,6 +105,15 @@ export interface DMLSessionOptions {
   maxModelCalls?: number;
   /** Host tool catalog text injected into the meta prompt (M5). */
   hostToolsCatalog?: string;
+  /**
+   * The effective shell backend for this session (`agentvm`, `bwrap`,
+   * `sandbox-exec`, or `clean-room`). Injected into the Prolog session so the
+   * harness `require_sandbox` directive can refuse to load when the backend
+   * would run unsandboxed, and reported to the model in its environment block.
+   * Callers that build a toolset should pass `toolset.environment.kind` so the
+   * check and the toolset cannot disagree.
+   */
+  executionBackend?: ExecutionBackendKind;
   /** Human-in-the-loop channel for DML `input/2` / `exec(ask_user(...))`. */
   askUser?: (prompt: string, options?: string[]) => Promise<{ answer: string } | { cancelled: true }>;
   /**
@@ -199,6 +213,10 @@ export class DMLSession {
   private resume: boolean;
   /** Harness this session edits. */
   private readonly harnessName: string;
+  /** Effective shell backend; see DMLSessionOptions.executionBackend. */
+  readonly executionBackend: ExecutionBackendKind;
+  /** Full resolution for the backend, for the agent's environment block. */
+  readonly executionEnvironment: ExecutionEnvironment;
   private readonly autoLoadHarness: boolean;
   /** Monotonic per-session turn counter used by history records. */
   private turnCounter = 0;
@@ -224,6 +242,11 @@ export class DMLSession {
     this.historyOptions = options.history;
     this.resume = options.resume ?? false;
     this.harnessName = options.harnessName ?? 'main';
+    this.executionBackend = options.executionBackend ?? 'clean-room';
+    this.executionEnvironment = describeShellExecutionBackend(
+      this.executionBackend === 'agentvm',
+      this.executionBackend === 'agentvm' ? {} : { wrapper: this.executionBackend },
+    );
     this.autoLoadHarness = options.autoLoadHarness ?? true;
     this.compactionSettings = options.compaction?.settings;
     this.compactionAuto = options.compaction?.auto ?? false;
@@ -235,6 +258,7 @@ export class DMLSession {
     this.maxTokens = options.runnerOptions.maxTokens;
     this.runner = new DMLRunner(swipl, {
       ...options.runnerOptions,
+      environment: this.executionEnvironment,
       compactMessages: options.compaction
         ? (messages, lastInputTokens, contextWindow) => this.compactLoopMessages(messages, lastInputTokens, contextWindow)
         : undefined,
@@ -275,6 +299,10 @@ export class DMLSession {
     const sessionParams: Record<string, unknown> = {
       workspace_path: options.workspacePath ?? './',
       trace: options.trace ?? false,
+      // `sandbox-exec` is a subtraction expression to a Prolog parser, so the
+      // hyphen becomes an underscore on the way in; the model still sees the
+      // real name in its environment block.
+      sandbox: session.executionBackend.replace(/-/g, '_'),
       ...options.params,
     };
     if (options.gasLimit !== undefined) {
@@ -1164,6 +1192,7 @@ export class DMLSession {
         ? { settings: this.compactionSettings, auto: this.compactionAuto }
         : undefined,
       workspacePath: this.workspacePath,
+      environment: this.executionEnvironment,
       currentModel: `${this.provider}:${this.model}`,
       modelCatalog: this.modelResolver?.catalog(),
       knownMessages: this.agentMessages,

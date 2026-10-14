@@ -23,6 +23,7 @@ import type { JudgeSelection } from '../judge/types.js';
 import type { CompactionSettings } from './compaction.js';
 import type { DiagramMode } from '../visualize/index.js';
 import type { ModelResolver } from './model-resolver.js';
+import type { ExecutionBackendKind } from '../system/runtime/shell-manager.js';
 
 export type RunOpts = DMLQueryOptions;
 
@@ -57,6 +58,12 @@ export interface HarnessReplOptions {
   maxModelCalls?: number;
   /** Host tool catalog text injected into the meta prompt (M5). */
   hostToolsCatalog?: string;
+  /**
+   * Effective shell backend (`agentvm`/`bwrap`/`sandbox-exec`/`clean-room`).
+   * Pass `toolset.environment.kind` so the harness `require_sandbox` check and
+   * the model's environment block match the toolset that will run commands.
+   */
+  executionBackend?: ExecutionBackendKind;
   /** Human-in-the-loop channel for DML `input/2` / `exec(ask_user(...))`. */
   askUser?: (prompt: string, options?: string[]) => Promise<{ answer: string } | { cancelled: true }>;
   /** Explicit judgment backend registry. When omitted, an `llm` backend is built from the active model. */
@@ -224,6 +231,7 @@ export async function createHarnessRepl(options: HarnessReplOptions): Promise<Ha
     maxDepth: options.maxDepth,
     maxModelCalls: options.maxModelCalls,
     hostToolsCatalog: options.hostToolsCatalog,
+    executionBackend: options.executionBackend,
     askUser: options.askUser,
     history: options.history,
     harnessName: options.harness,

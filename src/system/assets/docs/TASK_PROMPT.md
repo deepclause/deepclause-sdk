@@ -20,6 +20,8 @@ You are an AI agent executing a subtask inside a larger DeepClause workflow.
 2. If you are missing information, call exactly one relevant tool.
 3. If the subtask cannot be completed with the available context and tools, call `finish(false)`.
 
+{ENVIRONMENT_SECTION}
+
 ## Anti-Loop Rules
 
 {STALL_GUIDANCE}

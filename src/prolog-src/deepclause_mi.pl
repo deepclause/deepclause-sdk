@@ -797,6 +797,48 @@ process_directive(repl_delete(Name/Arity), SessionId) :-
     Arity >= 0,
     catch(abolish(SessionId:Name/Arity), _, true).
 
+%% process_directive(require_sandbox, +SessionId)
+%% The harness declares that it must run in an execution sandbox, and the load
+%% fails if it cannot. Checked against the **effective** backend rather than
+%% mere availability: bwrap being installed while the session resolves to
+%% clean-room means the code would run unsandboxed, which is what the directive
+%% exists to prevent. Only the user sets this (see repl_commit_directive/2).
+process_directive(require_sandbox, SessionId) :-
+    (   session_sandbox_backend(SessionId, Kind)
+    ->  true
+    ;   Kind = 'clean-room'
+    ),
+    (   sandbox_backend_acceptable(Kind)
+    ->  true
+    ;   format(atom(Message),
+            'harness requires an execution sandbox, but the effective backend is ~w; bwrap, AgentVM or sandbox-exec is required. Install bubblewrap, run with --sandbox (AgentVM), or remove the :- require_sandbox. directive.',
+            [Kind]),
+        throw(error(permission_error(load, harness, require_sandbox),
+                    context(require_sandbox/0, Message)))
+    ).
+
+%% sandbox_kind_atom(+Raw, -Atom)
+%% A JS string or an atom in, an atom out.
+%%
+%% Uses term_string/3, not atom_string/2: in this WASM build `atom_string/2`
+%% returns the string unchanged, so an "atom" produced by it still fails `atom/1`
+%% and compares unequal to every atom literal. That silently made every backend
+%% look unacceptable. `term_string(Atom, "bwrap", [])` does produce the atom.
+sandbox_kind_atom(Raw, Atom) :-
+    (   atom(Raw)
+    ->  Atom = Raw
+    ;   catch(term_string(Atom, Raw, []), _, Atom = Raw)
+    ).
+
+%% sandbox_backend_acceptable(+Kind)
+%% The backends that provide filesystem isolation for `exec(bash(...))`.
+%% `clean-room` is the absence of a wrapper and does not qualify. The host
+%% normalizes `sandbox-exec` to `sandbox_exec` (see DMLSession.open) because a
+%% hyphen makes the token a subtraction expression to a Prolog parser.
+sandbox_backend_acceptable(agentvm).
+sandbox_backend_acceptable(bwrap).
+sandbox_backend_acceptable(sandbox_exec).
+
 %% Anything else is recorded rather than discarded. An unrecognised directive
 %% (`:- dynamic(f/1).`, a `:- op(...)` without use_module, a typo) does nothing,
 %% and silently doing nothing is how an edit that never took effect goes
@@ -971,6 +1013,15 @@ create_session(SessionId, Params, HarnessMemory, MetaMemory) :-
     assertz(session_frozen(SessionId, false)),
     retractall(session_locked(SessionId, _)),
     assertz(session_locked(SessionId, false)),
+    % Stored as an atom. The host sends a JS string, and an atom and a string
+    % that print identically are not `==`, so normalize once here rather than at
+    % every comparison.
+    (   get_dict(sandbox, Params, SandboxRaw)
+    ->  sandbox_kind_atom(SandboxRaw, SandboxKind)
+    ;   SandboxKind = 'clean-room'
+    ),
+    retractall(session_sandbox_backend(SessionId, _)),
+    assertz(session_sandbox_backend(SessionId, SandboxKind)),
     repl_inject_workspace_predicates(SessionId).
 
 %% repl_abolish_user_predicates(+SessionId)
@@ -1320,6 +1371,7 @@ repl_reserved_name(repl_reserved_name).
 repl_reserved_name(repl_tool_catalog).
 repl_reserved_name(repl_listing).
 repl_reserved_name(repl_assert).
+repl_reserved_name(require_sandbox).
 repl_reserved_name(repl_retract).
 repl_reserved_name(repl_delete).
 repl_reserved_name(repl_freeze).
@@ -1715,10 +1767,24 @@ repl_read_prepared_terms(Stream, SessionId, Terms) :-
         % their operators are visible to the terms that follow; keep them out of
         % the returned list so repl_commit_terms does not process them twice.
         partition_directives(Prepared, Rules, Directives),
-        forall(member(Directive, Directives), process_clause(Directive, SessionId)),
+        forall(member(Directive, Directives), repl_commit_directive(Directive, SessionId)),
         append(Rules, Rest, Terms),
         repl_read_prepared_terms(Stream, SessionId, Rest)
     ).
+
+%% repl_commit_directive(+Directive, +SessionId)
+%% Directives written by the *agent* (assert_many/define) run here. `require_sandbox`
+%% is the user's to set — through `/set-require-sandbox` — so an agent cannot
+%% declare a requirement it was not asked for, nor lift one by re-asserting the
+%% harness. The file-load path (parse_clauses/2) is deliberately not guarded:
+%% that is what the user's own harness file goes through.
+repl_commit_directive((:- require_sandbox), _SessionId) :-
+    !,
+    throw(error(permission_error(modify, reserved_name, require_sandbox),
+                context(repl_commit_directive/2,
+                        'only the user can set the sandbox requirement'))).
+repl_commit_directive(Directive, SessionId) :-
+    process_clause(Directive, SessionId).
 
 partition_directives([], [], []).
 partition_directives([Term|Terms], Rules, Directives) :-

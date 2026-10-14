@@ -339,6 +339,51 @@ describe('HostShellManager cancellation', () => {
     );
   });
 
+  it('presents the workspace as /workspace under bwrap', async () => {
+    // bwrap is the one host backend that *can* mount the workspace, so it does —
+    // and the bind is what makes `/workspace` true inside a command, rather than
+    // only in the agent's path strings. Pinned here because bwrap cannot run on
+    // every machine (unprivileged user namespaces are often disabled), so the
+    // real-shell test cannot always cover it.
+    const child = createMockChildProcess(7788);
+    childProcessMocks.spawn.mockReturnValue(child);
+
+    const manager = new HostShellManager('/tmp/workspace', { wrapper: 'bwrap' });
+    const execPromise = manager.exec('cat /workspace/out.txt');
+    child.emit('close', 0, null);
+    await execPromise;
+
+    const [executable, args, options] = childProcessMocks.spawn.mock.calls[0];
+    expect(String(executable)).toMatch(/(^|\/)bwrap$/);
+    // Bound at /workspace, not at its host path...
+    expect(args).toEqual(expect.arrayContaining(['--bind', '/tmp/workspace', '/workspace']));
+    expect(args).toEqual(expect.arrayContaining(['--chdir', '/workspace']));
+    // ...so the command is passed through untouched, not rewritten.
+    expect(args).toContain('cat /workspace/out.txt');
+    // And the shell's environment agrees with its own view of the tree.
+    expect(options.env).toEqual(expect.objectContaining({
+      PWD: '/workspace',
+      WORKSPACE: '/workspace',
+    }));
+  });
+
+  it('maps /workspace onto the real directory when no mount is possible', async () => {
+    const child = createMockChildProcess(7789);
+    childProcessMocks.spawn.mockReturnValue(child);
+
+    const manager = new HostShellManager('/tmp/workspace', { wrapper: 'clean-room' });
+    const execPromise = manager.exec('cat /workspace/out.txt');
+    child.emit('close', 0, null);
+    await execPromise;
+
+    const [, args, options] = childProcessMocks.spawn.mock.calls[0];
+    expect(args).toContain('cat /tmp/workspace/out.txt');
+    expect(options.env).toEqual(expect.objectContaining({
+      PWD: '/tmp/workspace',
+      WORKSPACE: '/tmp/workspace',
+    }));
+  });
+
   it('prefers bwrap on linux when the probe succeeds', () => {
     expect(resolveHostShellWrapperKind({
       platform: 'linux',

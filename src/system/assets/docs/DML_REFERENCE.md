@@ -732,30 +732,39 @@ argument comes from a file, a model, or the user.
 
 ### File I/O and paths — prefer the shell
 
-There is **no paths file and no search-path registry**. A DML path is a string
-relative to the workspace root, and that is the whole mechanism — nothing to
-declare, register, or discover. `script_file(Name, Path)` links a file that belongs
-to the harness (it is bundled on `export`); it does not resolve anything at run
-time. `bash` sees more of the sandbox than DML does, but the workspace is the only
-tree DML's file predicates reach, so searching the host filesystem for a convention
-finds nothing and costs a great deal of time.
+**`/workspace` is the project, and it is the working directory.** A DML path is
+either absolute under `/workspace` or relative to it, and the two forms name the
+same file:
 
-**Prefer `exec(bash(...))` for file operations.**
-Reading, writing, copying, or converting files is usually clearer and more
-robust as a shell command; reach for the DML predicates below only when the
-content must be bound and reasoned over inside Prolog. Pulling a file into DML
-just to hand it back to the shell is a smell (`DML_AUTHORING.md` §2).
+    out/report.txt          and  /workspace/out/report.txt
 
-If you do use them: every path in DML is **workspace-relative** and confined to
-the workspace. The
-engine mounts the workspace at `/workspace`, but you must not write
-`/workspace/...` in DML — passing an absolute path is rejected, as is `..`. File
-predicates all take a relative path:
+Prefer the `/workspace/...` form: the same name works from DML, from
+`exec(bash(...))`, and from the shell tool, on every backend, so a path never has
+to be translated between them. There is **no paths file and no search-path
+registry** — nothing to declare, register, or discover. `script_file(Name, Path)`
+links a file that belongs to the harness (it is bundled on `export`); it does not
+resolve anything at run time.
+
+**Everything outside `/workspace` is the ephemeral VM filesystem.** `/etc`,
+`/tmp`, `/home` are not this machine. They are an in-memory filesystem that
+belongs to the session and is discarded when it ends, so they are fine for scratch
+and useless for results. **Only files under `/workspace` reach the host.** For
+scratch, use `$TMPDIR`, which is a per-session directory in every backend (a bare
+`/tmp` is the real one when nothing is sandboxed).
+
+**Prefer `exec(bash(...))` for file operations.** Reading, writing, copying, or
+converting files is usually clearer and more robust as a shell command; reach for
+the DML predicates below only when the content must be bound and reasoned over
+inside Prolog. Pulling a file into DML just to hand it back to the shell is a
+smell (`DML_AUTHORING.md` §2).
+
+The file predicates take a path — absolute under `/workspace`, or relative:
 
 ```prolog
-read_file("images/a.png", Bytes),
-write_file("out/report.txt", Text),
-make_directory_path("out/nested"),          % create a directory (and parents)
+read_file("/workspace/images/a.png", Bytes),
+read_file("images/a.png", Bytes),            % same file
+write_file("/workspace/out/report.txt", Text),
+make_directory_path("/workspace/out/nested"),   % create a directory (and parents)
 append_file("out/log.txt", Line),
 delete_file("out/report.txt"),
 directory_files("images", Names),        % bare entry names: ["a.png", ...]
@@ -767,21 +776,24 @@ time_file("images/a.png", Modified).
 `write_file/2` does **not** create parent directories — call
 `make_directory_path/1` first. `directory_files/2` returns bare entry names (no
 directory), so build a path with `atom_concat('images/', Name, Path)` when you
-need one. `bash` runs with a wider view of the sandbox than DML has; convert
-anything from the shell to a workspace-relative path before handing it to DML.
+need one.
 
 These predicates are **real clauses in the session module**, not only
 interpreter handlers, so DML code, a nested `task/N`, and a direct host query
 (the SDK's `runDML`, or `deepclause repl`) all resolve the same definition and
-the same workspace-relative path. `read_file/2` in particular has no other
-definition, which is why it once worked from DML and failed from a host query.
+the same path.
 
-`open/3`, `close/1`, `read_string/3` and `write/2` are the exception. They are SWI
-builtins and cannot be shadowed with a workspace-resolving version, so they stay
-**stream-only** and take an absolute path. Use `read_file/2` and `write_file/2`
-for whole-file I/O — they resolve the relative path and close their own streams.
+`open/3`, `close/1`, `read_string/3` and `write/2` are SWI builtins and cannot be
+shadowed, but they resolve paths the same way — the working directory is
+`/workspace`, so `open("f.txt", read, S)` reads the workspace file. They are not
+a special case with their own path rule.
 
----
+Paths are **isolated by the mount, not by string checks**: there is no rewriting
+layer, so a path is passed through to the filesystem as written. `..` does not
+climb out of the workspace, because above `/workspace` is the VM's own empty
+filesystem. The one thing a mount cannot police is a **symlink inside the
+workspace** pointing outside it; avoid committing those.
+
 
 ### Output Predicates
 
@@ -1466,7 +1478,16 @@ A `.dml` file may contain directives. These are handled:
 :- consult("other.dml").           % load another workspace file
 :- param(topic, "the subject").    % declared session parameter
 :- repl_delete(old_skill/2).       % remove a predicate (same as the bare fact form)
+:- require_sandbox.                % refuse to load unless the shell is sandboxed
 ```
+
+`:- require_sandbox.` is a declaration that the harness must run with an
+isolated shell. It is checked **at load**, and the load **fails** when the
+effective backend is not a sandbox (`bwrap`, AgentVM, or `sandbox-exec`) — it
+does not silently run unsandboxed. "Effective" is deliberate: bubblewrap being
+installed while the session resolves to unsandboxed execution still fails the
+check. Only the **user** sets this (the `/set-require-sandbox` command); an agent
+cannot add or remove it.
 
 `:- repl_delete(Name/Arity).` abolishes a predicate, which `retract/1` cannot do:
 retracting the last clause leaves an empty predicate whose calls fail silently.

@@ -8,6 +8,8 @@
  */
 
 import { readAgentPromptAsset } from '../system/assets/index.js';
+import { describeRuntimeContext } from '../system/environment.js';
+import type { ExecutionEnvironment } from '../system/runtime/shell-manager.js';
 import { loadProjectContext } from './project-context.js';
 import type {
   DMLEvent,
@@ -41,6 +43,8 @@ export interface HarnessAgentOptions {
   compaction?: { settings: CompactionSettings; auto: boolean };
   /** Workspace root, so a `.deepclause/system/AGENT_PROMPT.md` override is used. */
   workspacePath?: string;
+  /** Effective shell backend, reported to the agent in its environment block. */
+  environment?: ExecutionEnvironment;
   /** The session's active model (`provider:model`), shown to the agent. */
   currentModel?: string;
   /** Models available this session (via `with_model/2`). */
@@ -95,6 +99,10 @@ export async function buildAgentSystemPrompt(options: {
   workspacePath?: string;
   currentModel?: string;
   modelCatalog?: ModelCatalogEntry[];
+  /** Effective shell backend; see DMLSessionOptions.executionBackend. */
+  environment?: ExecutionEnvironment;
+  /** Injectable clock, so tests do not depend on the wall calendar. */
+  now?: Date;
 } = {}): Promise<string> {
   let prompt = '';
   try {
@@ -122,6 +130,15 @@ export async function buildAgentSystemPrompt(options: {
   if (project) {
     prompt += `\n\nPROJECT INSTRUCTIONS (AGENTS.md)\n${project.content}\n`;
   }
+
+  // Where we are running and what time it is, last: these change per turn, so
+  // everything stable (the docs, the model catalog, AGENTS.md) stays ahead of
+  // them and can still be prefix-cached.
+  prompt += describeRuntimeContext({
+    workspacePath: options.workspacePath,
+    environment: options.environment,
+    now: options.now,
+  });
   return prompt;
 }
 
@@ -286,6 +303,7 @@ export class HarnessAgent {
       workspacePath: this.options.workspacePath,
       currentModel: this.options.currentModel,
       modelCatalog: this.options.modelCatalog,
+      environment: this.options.environment,
     });
 
     this.messages.push({ role: 'user', content: request });

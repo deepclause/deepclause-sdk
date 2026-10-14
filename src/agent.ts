@@ -23,6 +23,8 @@ import type {
 } from './types.js';
 import { createModelProvider, type RawProviderResponseSnapshot } from './prolog/bridge.js';
 import { readSystemPromptAsset } from './system/assets/index.js';
+import { describeCurrentTime, describeEnvironment } from './system/environment.js';
+import type { ExecutionEnvironment } from './system/runtime/shell-manager.js';
 
 /** Maximum number of retries for LLM error finish reasons */
 const MAX_ERROR_RETRIES = 3;
@@ -71,6 +73,12 @@ export interface AgentLoopOptions {
    */
   excludedTools?: string[];
   workspacePath?: string;
+  /**
+   * Effective shell backend for this run, so the nested task agent is told where
+   * it is running and what time it is. Without it a sub-task reasons about paths
+   * and dates in the dark.
+   */
+  environment?: ExecutionEnvironment;
   modelOptions: {
     model: string;
     provider: string;
@@ -1024,6 +1032,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     outputVars: normalizedOutputVars,
     tools,
     workspacePath: options.workspacePath,
+    environment: options.environment,
   });
 
   // Extract system context from memory (user-defined system() calls)
@@ -1613,6 +1622,7 @@ async function buildSystemPrompt(options: {
   outputVars: TypedVar[];
   tools: Map<string, ToolDefinition>;
   workspacePath?: string;
+  environment?: ExecutionEnvironment;
 }): Promise<string> {
   const toolDescriptions: string[] = [];
   const normalizedOutputVars = options.outputVars;
@@ -1669,5 +1679,9 @@ async function buildSystemPrompt(options: {
     .replace('{TASK_DESCRIPTION}', options.taskDescription)
     .replace('{TOOL_DESCRIPTIONS}', toolDescriptions.join('\n'))
     .replace('{RESULT_SECTION}', resultSection)
-    .replace('{STALL_GUIDANCE}', stallGuidance);
+    .replace('{STALL_GUIDANCE}', stallGuidance)
+    .replace('{ENVIRONMENT_SECTION}', describeEnvironment({
+      workspacePath: options.workspacePath,
+      environment: options.environment,
+    }) + describeCurrentTime());
 }

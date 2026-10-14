@@ -8,7 +8,12 @@
  * control whether `bash` is registered.
  */
 
-import { createShellManager, type HostShellConfig } from '../system/runtime/shell-manager.js';
+import {
+  createShellManager,
+  describeShellExecutionBackend,
+  type ExecutionEnvironment,
+  type HostShellConfig,
+} from '../system/runtime/shell-manager.js';
 import { createShellToolEventBridge } from '../system/runtime/shell-tool-events.js';
 import type { DMLEvent, ToolDefinition } from '../types.js';
 
@@ -29,7 +34,37 @@ export interface ReplToolset {
   tools: Map<string, ToolDefinition>;
   /** Catalog text injected into the meta prompt. */
   catalog: string;
+  /**
+   * How shell commands will actually run here. The caller passes this to the
+   * session so the harness `require_sandbox` check, the model's environment
+   * block and this toolset all agree on one answer.
+   */
+  environment: ExecutionEnvironment;
   dispose(): Promise<void>;
+}
+
+/**
+ * Describe the `bash` tool, including where it runs.
+ *
+ * The agent has to reconcile two surfaces — its own tools and DML's `exec` — and
+ * they must not disagree about what a path means. So the description states the
+ * one name, and states whether anything is actually isolated, rather than
+ * letting the agent assume a sandbox is there.
+ */
+export function describeBashTool(environment: ExecutionEnvironment): string {
+  const isolation = environment.kind === 'clean-room'
+    ? 'There is NO sandbox: commands run as your user account, and anything you '
+      + 'write outside the workspace is real and persists.'
+    : `Isolated by ${environment.description}.`;
+  return [
+    'Run a shell command in the session workspace.',
+    'Your working directory is the workspace, and /workspace names that same '
+      + 'directory (DML uses the same name), so out/report.txt and '
+      + '/workspace/out/report.txt are one file.',
+    'Only files under the workspace are shared with the host. For scratch use '
+      + '"$TMPDIR" (a per-session directory), not a fixed path like /tmp.',
+    isolation,
+  ].join(' ');
 }
 
 /** Human-readable catalog of the registered capability tools. */
@@ -67,6 +102,7 @@ export async function createReplToolset(options: ReplToolsetOptions): Promise<Re
   const requested = options.toolNames === null
     ? []
     : options.toolNames ?? [...DEFAULT_REPL_TOOLS];
+  const environment = describeShellExecutionBackend(options.sandbox, options.hostConfig ?? {});
   const tools = new Map<string, ToolDefinition>();
   let shell = requested.includes('bash')
     ? createShellManager({
@@ -80,7 +116,7 @@ export async function createReplToolset(options: ReplToolsetOptions): Promise<Re
   if (shell) {
     const shellManager = shell;
     tools.set('bash', {
-      description: 'Run a shell command in the active workspace shell.',
+      description: describeBashTool(environment),
       parameters: {
         type: 'object',
         properties: {
@@ -125,6 +161,7 @@ export async function createReplToolset(options: ReplToolsetOptions): Promise<Re
   return {
     tools,
     catalog: buildToolCatalog(tools),
+    environment,
     dispose: async () => {
       if (shell) {
         await shell.dispose();

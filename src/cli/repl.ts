@@ -562,6 +562,7 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
     maxModelCalls: options.maxModelCalls ?? config.repl.maxModelCalls,
     tools: toolset.tools,
     hostToolsCatalog: toolset.catalog,
+    executionBackend: toolset.environment.kind,
     llmBackend,
     judgeSelection,
     imageBackend,
