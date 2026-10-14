@@ -40,6 +40,16 @@
 
 ### Fixed
 
+- **Wrapped lines lost their place in the tree.** A long line emitted by the line
+  renderer (a solution value, a log line) carries its frame's stem (`run │ `) inside
+  the text; when the document wrapped it to the terminal width, the continuation lines
+  carried no stem, so a wrapped value read as one indented line followed by an
+  unindented one, outside the frame. The stem is now kept out of the wrap and reattached
+  to every line.
+- **Wrapping an already-indented line produced a blank line and a bare stem.**
+  `wrapTextWithAnsi` splits on whitespace, so handing it `    │       text` emitted a
+  line containing only the stem, and an indented paragraph emitted an empty first
+  line. The indent is stripped before wrapping and reattached after.
 - **The transcript was crowded.** Output ran edge to edge with no separation: a
   tool call, its result and the next event were adjacent lines. There is now a blank
   row above the transcript and between it and the editor (fixed spacers, so they do

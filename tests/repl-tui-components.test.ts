@@ -454,3 +454,31 @@ describe('separation between blocks', () => {
     expect(rows.filter((line) => line === '')).toHaveLength(0);
   });
 });
+
+describe('wrapped lines keep their position in the tree', () => {
+  function render(line: string, width: number): string[] {
+    const document = new TranscriptDocument();
+    document.appendText(line);
+    return document.render(width).map(plain);
+  }
+
+  it('repeats the frame stem on continuation lines', () => {
+    const wrapped = render(`run │ T = "${'x'.repeat(120)}"`, 40);
+    expect(wrapped.length).toBeGreaterThan(1);
+    for (const line of wrapped) expect(line.startsWith('run │ ')).toBe(true);
+  });
+
+  it('repeats the deeper indent of pane content', () => {
+    const wrapped = render(`    │       ${'y'.repeat(120)}`, 40);
+    expect(wrapped.length).toBeGreaterThan(1);
+    for (const line of wrapped) expect(line.startsWith('    │       ')).toBe(true);
+  });
+
+  it('repeats a plain leading indent, and leaves flush text alone', () => {
+    const indented = render(`  ${'z'.repeat(120)}`, 40);
+    for (const line of indented) expect(line.startsWith('  ')).toBe(true);
+
+    const flush = render('a '.repeat(60).trim(), 40);
+    for (const line of flush) expect(line.startsWith(' ')).toBe(false);
+  });
+});

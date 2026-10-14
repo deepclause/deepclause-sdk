@@ -20,6 +20,20 @@ import { renderSteerLine, renderUserLine, STEER_LABEL } from './theme.js';
 
 export type DocumentLineStyle = 'user' | 'steer';
 
+/**
+ * The stem and indentation a line starts with (`run │ `, `    │ `, `run │     `, or
+ * leading spaces), so a wrapped line keeps it.
+ *
+ * The line renderer embeds the frame prefix in the text it emits. When the document
+ * then wraps that text to the terminal width, the continuation lines carried no
+ * prefix at all — a wrapped solution read as `T = "…"` followed by an unindented
+ * second line, outside the tree.
+ */
+function leadingStem(text: string): string {
+  const match = /^((?:\s*(?:\w+ )?│ )?\s*)/.exec(text);
+  return match?.[1] ?? '';
+}
+
 interface TextEntry {
   kind: 'text';
   text: string;
@@ -146,21 +160,32 @@ export class TranscriptDocument implements Component {
         out.push(entry.text);
         continue;
       }
-      // Styled blocks reserve room for their label/padding; everything else is
-      // wrapped to the full width so no line exceeds it.
-      const wrapWidth = entry.style === 'user'
-        ? Math.max(1, width - 2)
-        : entry.style === 'steer'
-          ? Math.max(1, width - STEER_LABEL.length)
-          : width;
-      const wrapped = visibleWidth(entry.text) <= wrapWidth
-        ? [entry.text]
-        : wrapTextWithAnsi(entry.text, wrapWidth);
-      wrapped.forEach((line, index) => {
-        if (entry.style === 'user') out.push(renderUserLine(line, width));
-        else if (entry.style === 'steer') out.push(renderSteerLine(line, width, index === 0));
-        else out.push(line);
-      });
+      // Styled blocks reserve room for their label/padding.
+      if (entry.style === 'user' || entry.style === 'steer') {
+        const wrapWidth = entry.style === 'user'
+          ? Math.max(1, width - 2)
+          : Math.max(1, width - STEER_LABEL.length);
+        const wrapped = visibleWidth(entry.text) <= wrapWidth
+          ? [entry.text]
+          : wrapTextWithAnsi(entry.text, wrapWidth);
+        wrapped.forEach((line, index) => {
+          if (entry.style === 'user') out.push(renderUserLine(line, width));
+          else out.push(renderSteerLine(line, width, index === 0));
+        });
+        continue;
+      }
+
+      // Everything else: keep the line's stem (`run │ `, or its indent) out of the
+      // wrap and put it back on every line. Handing the wrapper a string that already
+      // begins with indentation splits it wrongly — it produced a line containing
+      // nothing but the stem, and a leading blank line for indented text.
+      const stem = leadingStem(entry.text);
+      const body = entry.text.slice(stem.length);
+      const bodyWidth = Math.max(1, width - visibleWidth(stem));
+      const wrapped = visibleWidth(body) <= bodyWidth
+        ? [body]
+        : wrapTextWithAnsi(body, bodyWidth);
+      for (const line of wrapped) out.push(`${stem}${line}`);
     }
     return out;
   }
