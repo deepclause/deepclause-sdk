@@ -29,6 +29,11 @@ export interface DmlToolPaneOptions {
   args: Record<string, unknown>;
   /** Inline `execute`: show the goal, and keep the pane tight. */
   compact?: boolean;
+  /**
+   * The frame's indentation (`framePrefix`), so a pane inside a nested frame hangs
+   * where the surrounding output does. Every line the pane emits starts with it.
+   */
+  prefix?: string;
 }
 
 /** Lines of body shown while collapsed. */
@@ -43,6 +48,7 @@ export class DmlToolPane implements Component {
   private expanded = false;
   private elapsedMs?: number;
   private readonly compact: boolean;
+  private prefix: string;
   private cachedWidth?: number;
   private cachedLines?: string[];
 
@@ -50,6 +56,14 @@ export class DmlToolPane implements Component {
     this.toolName = options.toolName;
     this.args = options.args;
     this.compact = options.compact ?? false;
+    this.prefix = options.prefix ?? '';
+  }
+
+  /** Re-indent the pane (a frame's depth is only known once its output arrives). */
+  setPrefix(prefix: string): void {
+    if (prefix === this.prefix) return;
+    this.prefix = prefix;
+    this.invalidateCache();
   }
 
   setArgs(args: Record<string, unknown>): void {
@@ -160,24 +174,42 @@ export class DmlToolPane implements Component {
   }
 
   private renderLines(width: number): string[] {
-    const gutter = tuiStyle.borderMuted('│ ');
-    const gutterWidth = 2;
+    /*
+     * The tree belongs to the frame (`framePrefix`), which already puts a `│` at
+     * this depth. The pane must therefore *indent* under that prefix rather than
+     * add a stem of its own, or a nested tool call shows two stems at different
+     * columns while the surrounding output shows one. This is also the shape the
+     * line renderer has always used for tool detail:
+     *
+     *   run │   ⚙ bash
+     *   run │     printf hello
+     */
+    const prefix = this.prefix;
+    const headerIndent = '  ';
+    const bodyIndent = '    ';
+    const gutter = `${prefix}${bodyIndent}`;
+    const gutterWidth = visibleWidth(prefix) + bodyIndent.length;
     const contentWidth = Math.max(1, width - gutterWidth);
-    const glyph = this.state === 'ok' ? '✔' : this.state === 'failed' ? '✖' : '⏺';
+    const glyph = this.state === 'ok' ? '✔' : this.state === 'failed' ? '✖' : '⚙';
     const glyphStyled = this.state === 'failed'
       ? tuiStyle.error(glyph)
       : this.state === 'ok'
         ? tuiStyle.success(glyph)
         : tuiStyle.accent(glyph);
+    // Only offer the key when something is actually hidden: on a one-line call the
+    // hint is noise, and it made every pane look like it had more to show.
+    const body = this.bodyLines();
+    const result = this.resultLines();
+    const hidden = Math.max(0, body.length - COLLAPSED_BODY_LINES)
+      + Math.max(0, result.length - COLLAPSED_BODY_LINES);
     const meta: string[] = [];
     if (this.elapsedMs !== undefined) meta.push(`${this.elapsedMs}ms`);
-    if (!this.expanded) meta.push('ctrl+o to expand');
+    if (!this.expanded && hidden > 0) meta.push('ctrl+o to expand');
 
     const header = `${glyphStyled} ${tuiStyle.title(this.toolName)}${meta.length ? ` ${tuiStyle.dim(`· ${meta.join(' · ')}`)}` : ''}`;
-    const out: string[] = [truncateToWidth(header, width, '…')];
+    const out: string[] = [truncateToWidth(`${prefix}${headerIndent}${header}`, width, '…')];
 
     // Body: the call itself.
-    const body = this.bodyLines();
     const bodyBudget = this.expanded ? body.length : Math.min(body.length, COLLAPSED_BODY_LINES);
     for (const line of body.slice(0, bodyBudget)) {
       for (const wrapped of this.wrap(line, contentWidth, body.length > 1 ? '  ' : '')) {
@@ -186,14 +218,13 @@ export class DmlToolPane implements Component {
     }
 
     // Result: markdown when expanded (a model answer or a report), bounded otherwise.
-    const result = this.resultLines();
     if (result.length > 0) {
       const shown = this.expanded ? result : result.slice(0, COLLAPSED_BODY_LINES);
       const omitted = result.length - shown.length;
       if (this.expanded) {
         const markdown = new Markdown(shown.join('\n'), 0, 0, markdownTheme());
         for (const line of markdown.render(contentWidth)) {
-          out.push(line === '' ? gutter.trimEnd() : `${gutter}${line}`);
+          out.push(line === '' ? '' : `${gutter}${line}`);
         }
       } else {
         for (const line of shown) {

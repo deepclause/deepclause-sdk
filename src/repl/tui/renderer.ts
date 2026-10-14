@@ -18,7 +18,7 @@
 import { Markdown, type Component } from '@earendil-works/pi-tui';
 
 import type { DMLBinding, DMLEvent } from '../../types.js';
-import { ReplRenderer, type ReplRendererOptions } from '../render.js';
+import { framePrefix, ReplRenderer, type ReplRendererOptions } from '../render.js';
 import { TranscriptDocument } from './document.js';
 import { markdownTheme } from './theme.js';
 import { DmlToolPane } from './tool-pane.js';
@@ -27,9 +27,16 @@ import { DmlToolPane } from './tool-pane.js';
 class StreamingBlock implements Component {
   private buffer = '';
   private readonly markdown: Markdown;
+  /** The frame's indentation, so nested answers stay inside the tree. */
+  private prefix: string;
 
-  constructor() {
+  constructor(prefix: string) {
+    this.prefix = prefix;
     this.markdown = new Markdown('', 0, 0, markdownTheme());
+  }
+
+  setPrefix(prefix: string): void {
+    this.prefix = prefix;
   }
 
   append(chunk: string): void {
@@ -42,7 +49,9 @@ class StreamingBlock implements Component {
   }
 
   render(width: number): string[] {
-    return this.markdown.render(width);
+    const lines = this.markdown.render(Math.max(1, width - this.prefix.length));
+    if (!this.prefix) return lines;
+    return lines.map((line) => (line === '' ? line : `${this.prefix}${line}`));
   }
 
   invalidate(): void {
@@ -66,6 +75,8 @@ export class TuiRenderer {
   private readonly document: TranscriptDocument;
   private readonly text: ReplRenderer;
   private readonly onWorking?: (label: string | null) => void;
+  /** Whether activity events (and therefore frame labels) are shown. */
+  private readonly showEvents: boolean;
   /** Tool panes in order, so the last one can be expanded on demand. */
   private readonly panes: DmlToolPane[] = [];
   private currentPane?: DmlToolPane;
@@ -76,6 +87,7 @@ export class TuiRenderer {
   constructor(options: TuiRendererOptions) {
     this.document = options.document;
     this.onWorking = options.onWorking;
+    this.showEvents = options.events !== false;
     this.text = new ReplRenderer({
       mode: 'rich',
       color: options.color,
@@ -110,7 +122,7 @@ export class TuiRenderer {
         return;
       case 'stream':
         if (event.content) {
-          this.stream ??= this.newStreamBlock();
+          this.stream ??= this.newStreamBlock(framePrefix(event, this.showEvents));
           this.stream.append(event.content);
           this.document.onChange?.();
         }
@@ -128,15 +140,18 @@ export class TuiRenderer {
   private renderToolCall(event: DMLEvent): void {
     const name = event.toolName ?? 'tool';
     const state = event.toolState ?? 'running';
+    const prefix = framePrefix(event, this.showEvents);
 
     if (state === 'starting' || !this.currentPane) {
       this.endStream();
-      this.currentPane = new DmlToolPane({ toolName: name, args: event.toolArgs ?? {} });
+      this.currentPane = new DmlToolPane({ toolName: name, args: event.toolArgs ?? {}, prefix });
       this.panes.push(this.currentPane);
       this.document.appendComponent(this.currentPane);
       this.onWorking?.(`${name}…`);
-    } else if (event.toolArgs) {
-      this.currentPane.setArgs(event.toolArgs);
+    } else {
+      // A `completed` event can carry the frame metadata the start event lacked.
+      this.currentPane.setPrefix(prefix);
+      if (event.toolArgs) this.currentPane.setArgs(event.toolArgs);
     }
 
     if (state === 'completed' || state === 'failed') {
@@ -151,8 +166,8 @@ export class TuiRenderer {
     }
   }
 
-  private newStreamBlock(): StreamingBlock {
-    const block = new StreamingBlock();
+  private newStreamBlock(prefix: string): StreamingBlock {
+    const block = new StreamingBlock(prefix);
     this.document.appendComponent(block);
     return block;
   }

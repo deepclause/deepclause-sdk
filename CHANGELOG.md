@@ -31,6 +31,13 @@
 
 ### Fixed
 
+- **Tool panes broke the tree.** Nesting is expressed by the frame's prefix
+  (`run │ ` at top level, `    │ ` for an `execute` child), and the panes ignored it
+  while also adding a stem of their own — so a nested call showed two stems at
+  different columns, and its body did not line up with the surrounding output. Panes
+  now hang off the same prefix with plain indentation, as the line renderer always
+  did, and a pane only advertises `ctrl+o to expand` when something is actually
+  hidden.
 - **The TUI drew a 24-row frame in a taller terminal.** pi-tui asks the stream for
   its size (`process.stdout.rows || LINES || 24`), and when the stream reports none
   the fallback is a hard-coded 24, so the UI occupied the top of the screen and

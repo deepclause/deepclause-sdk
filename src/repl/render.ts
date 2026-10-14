@@ -261,6 +261,26 @@ export function formatBindings(bindings: DMLBinding[]): string {
 const REASONING_SUMMARY_CHARS = 600;
 
 /**
+ * The indentation a frame's output gets, so nesting reads as a tree.
+ *
+ * One rule, shared by the line renderer and the TUI's components: a nested frame
+ * (an `execute` child) hangs off its parent tool call with a `│` and no label;
+ * other frames carry their kind. Components used to ignore this and render
+ * flush-left, which flattened the tree — the same output looked nested in the
+ * readline path and flat in the TUI.
+ */
+export function framePrefix(event: DMLEvent, showEvents = true): string {
+  // `--no-events` also drops the frame label, so output/answer lines are plain.
+  if (!showEvents || !event.frameKind) return '';
+  const depth = event.depth ?? 0;
+  if (event.frameKind === 'nested') {
+    return `${'  '.repeat(depth + 1)}│ `;
+  }
+  const label = event.frameKind === 'object' ? 'run' : event.frameKind;
+  return `${'  '.repeat(depth)}${label} │ `;
+}
+
+/**
  * What the CLI needs from a renderer.
  *
  * `ReplRenderer` (string output, used by `--plain`, `--json` and the readline
@@ -945,17 +965,7 @@ export class ReplRenderer implements ReplEventRenderer {
 
   /** `run │ ` for an object frame; nested (`execute` child) events use indentation + `│`. */
   private frameLabel(event: DMLEvent): string {
-    // `--no-events` also drops the frame label, so output/answer lines are plain.
-    if (!this.showEvents || !event.frameKind) return '';
-    const depth = event.depth ?? 0;
-    // Nested (`execute` child) activity reads as belonging to the parent tool
-    // call through indentation plus a hanging `│`, with no `nested` label.
-    if (event.frameKind === 'nested') {
-      return `${'  '.repeat(depth + 1)}│ `;
-    }
-    const label = event.frameKind === 'object' ? 'run' : event.frameKind;
-    const indent = '  '.repeat(depth);
-    return `${indent}${label} │ `;
+    return framePrefix(event, this.showEvents);
   }
 
   /**

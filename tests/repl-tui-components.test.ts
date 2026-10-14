@@ -76,14 +76,24 @@ describe('TranscriptDocument', () => {
 });
 
 describe('DmlToolPane', () => {
-  it('shows the call, and how to reveal the rest', () => {
+  it('shows the call and its duration', () => {
     const pane = new DmlToolPane({ toolName: 'bash', args: { command: 'printf hello' } });
     pane.setResult({ stdout: 'hello\n', exitCode: 0 }, true, 9);
     const rendered = text(pane.render(60));
     expect(rendered).toContain('bash');
     expect(rendered).toContain('printf hello');
     expect(rendered).toContain('9ms');
-    expect(rendered).toContain('ctrl+o to expand');
+  });
+
+  it('advertises ctrl+o only when something is hidden', () => {
+    const trivial = new DmlToolPane({ toolName: 'bash', args: { command: 'true' } });
+    trivial.setResult({ stdout: 'ok' }, true);
+    expect(text(trivial.render(60))).not.toContain('ctrl+o');
+
+    const long = new DmlToolPane({ toolName: 'execute', args: { goal: 'rows' } });
+    long.setResult({ stdout: Array.from({ length: 12 }, (_, i) => `row ${i}`).join('\n') }, true);
+    expect(text(long.render(60))).toContain('ctrl+o to expand');
+    expect(text(long.render(60))).toContain('more lines');
   });
 
   it('marks a failure, and shows the error', () => {
@@ -259,5 +269,46 @@ describe('SizedTerminal', () => {
     expect(terminal.rows).toBe(Math.max(1, terminal.rows));
     terminal.refreshSize();
     expect(terminal.rows).toBeGreaterThan(0);
+  });
+});
+
+describe('tree indentation', () => {
+  function render(events: Array<Record<string, unknown>>): string[] {
+    const document = new TranscriptDocument();
+    const renderer = new TuiRenderer({ document });
+    for (const event of events) renderer.render(event as never);
+    return document.render(70).map(plain).map((line) => line.replace(/\s+$/, ''));
+  }
+
+  it('hangs a tool pane off its frame prefix with a single stem', () => {
+    const lines = render([
+      { type: 'tool_call', toolName: 'bash', toolState: 'completed', toolResult: { stdout: 'hi' }, frameKind: 'run', depth: 0 },
+    ]);
+    // Header under the frame prefix, body indented under the header — the shape the
+    // line renderer has always used for tool detail.
+    expect(lines[0]).toMatch(/^run │ {3}✔ bash/);
+    expect(lines[1]).toMatch(/^run │ {5}hi$/);
+    // One stem: the frame's. The pane used to add a second at a different column,
+    // so a nested call showed `    │   │` while surrounding output showed `    │`.
+    for (const line of lines) {
+      expect((line.match(/│/g) ?? []).length).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('keeps a nested pane at the nested depth', () => {
+    const lines = render([
+      { type: 'tool_call', toolName: 'bash', toolState: 'completed', toolResult: { stdout: '42' }, frameKind: 'nested', depth: 1 },
+      { type: 'output', content: 'plain nested output', frameKind: 'nested', depth: 1 },
+    ]);
+    expect(lines[0]).toMatch(/^ {4}│ {3}✔ bash/);
+    // The pane's body and a plain output line agree on where the frame's stem is.
+    expect(lines[1].indexOf('│')).toBe(lines[2].indexOf('│'));
+  });
+
+  it('indents streamed answers inside their frame', () => {
+    const lines = render([
+      { type: 'stream', content: 'an answer', frameKind: 'run', depth: 0 },
+    ]);
+    expect(lines[0]).toMatch(/^run │ an answer/);
   });
 });
