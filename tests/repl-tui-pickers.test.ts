@@ -10,6 +10,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { visibleWidth } from '@earendil-works/pi-tui';
 
 import { ChoicePicker } from '../src/repl/tui/picker.js';
+import { REPL_COMMANDS } from '../src/repl/tui/autocomplete.js';
 import { ReplRenderer } from '../src/repl/render.js';
 
 const plain = (line: string): string => line.replace(/\u001b\[[0-9;]*[a-zA-Z]/g, '');
@@ -116,5 +117,58 @@ describe('the two reasoning settings are distinct', () => {
     expect(tracker.snapshot().model.thinkingLevel).toBe('medium');
     tracker.setThinkingLevel('high');
     expect(tracker.snapshot().model.thinkingLevel).toBe('high');
+  });
+});
+
+describe('autocomplete and the parser agree', () => {
+  // Names the parser accepts but deliberately does not advertise (aliases and the
+  // shorter spellings users already know).
+  const ALIASES = new Set([
+    'exit', 'quit', 'reasoning-level', 'reasoning-summary', 'diagram', 'image', 'imagine',
+  ]);
+
+  /** A command that needs an argument, probed with one so it can be classified. */
+  const PROBES: Record<string, string> = {
+    goal: '/goal true',
+    show: '/show x.png',
+    gen: '/gen a cat',
+    image: '/image x.png',
+    imagine: '/imagine a cat',
+  };
+  const probe = (name: string): string => PROBES[name] ?? `/${name}`;
+
+  /** Commands the parser handles that should be visible in the completion list. */
+  const ADVERTISED = [
+    'goal', 'listing', 'halt', 'help', 'reset', 'rollback', 'compact', 'export',
+    'model', 'reasoning', 'show-reasoning', 'freeze', 'unfreeze', 'params',
+    'trace', 'notrace', 'viz', 'show', 'gen',
+  ];
+
+  it('advertises every command the parser accepts', async () => {
+    const { classifyReplInput } = await import('../src/cli/repl.js');
+    const listed = new Set(REPL_COMMANDS.map((command) => command.name));
+    for (const name of ADVERTISED) {
+      // `/reasoning` and `/show-reasoning` were missing from this list, so they
+      // parsed but could not be found from the editor.
+      expect(listed.has(name), `${name} is missing from the autocomplete list`).toBe(true);
+      expect(classifyReplInput(probe(name)).kind, `/${name} does not parse`).not.toBe('unknown-command');
+    }
+  });
+
+  it('lists nothing the parser rejects', async () => {
+    const { classifyReplInput } = await import('../src/cli/repl.js');
+    for (const command of REPL_COMMANDS) {
+      expect(classifyReplInput(probe(command.name)).kind, `/${command.name} does not parse`).not.toBe(
+        'unknown-command',
+      );
+    }
+  });
+
+  it('keeps the alias list honest', async () => {
+    const { classifyReplInput } = await import('../src/cli/repl.js');
+    for (const alias of ALIASES) {
+      // An alias must still parse; otherwise it is a stale entry in this list.
+      expect(classifyReplInput(probe(alias)).kind, `/${alias} does not parse`).not.toBe('unknown-command');
+    }
   });
 });

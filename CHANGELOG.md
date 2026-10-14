@@ -54,6 +54,9 @@
   - A setting is applied even when it cannot be saved: `updateConfig` needs an
     existing config file, and letting that failure abort the picker made the
     selection do nothing at all.
+  - Both appear in the editor's command completion, along with every other command the
+    parser accepts — a test now checks that the two lists agree in both directions,
+    which is how `/reasoning` and `/show-reasoning` were found to be missing.
 
 ### Fixed
 

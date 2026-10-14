@@ -1,10 +1,15 @@
 /**
  * Slash-command completion for the REPL editor.
  *
- * Pi's `CombinedAutocompleteProvider` does the work: it matches commands by
- * prefix and, where a base path is given, completes file paths too. The command
- * list mirrors `classifyReplInput` in `cli/repl.ts`; the two are easy to drift, so
- * the list lives here in one place and the CLI reads it from here.
+ * Pi's `CombinedAutocompleteProvider` does the work: it matches commands by prefix
+ * and, where a base path is given, completes file paths too.
+ *
+ * The list is *not* what the CLI parses — `classifyReplInput` has its own switch and
+ * reads nothing from here — so the two drift, and a command that parses but is not
+ * listed is invisible to the user. `/reasoning` and `/show-reasoning` were exactly
+ * that. `tests/repl-tui-pickers.test.ts` now checks both directions: every advertised
+ * command must parse, and every command the parser accepts must be advertised (or be
+ * a deliberate alias).
  */
 
 import {
@@ -21,6 +26,8 @@ export const REPL_COMMANDS: SlashCommand[] = [
   { name: 'viz', description: 'Draw a skill as a diagram', argumentHint: '<entry> [presentation|spec]' },
   { name: 'export', description: 'Save the harness to a file', argumentHint: '[path]' },
   { name: 'model', description: 'Switch or show the active model', argumentHint: '[provider:id]' },
+  { name: 'reasoning', description: 'Set the model reasoning level', argumentHint: '[off|minimal|low|medium|high|xhigh|max]' },
+  { name: 'show-reasoning', description: 'How much reasoning to display', argumentHint: '[off|summary|full]' },
   { name: 'reset', description: 'Clear the harness' },
   { name: 'rollback', description: 'Restore the previous harness version' },
   { name: 'compact', description: 'Compact the conversation', argumentHint: '[instructions]' },
