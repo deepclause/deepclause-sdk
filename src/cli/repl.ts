@@ -28,6 +28,7 @@ import { StatusBarComponent } from '../repl/tui/status-bar.js';
 import {
   Container,
   ScrollView,
+  Spacer,
   TuiAltScreen,
   VStack,
   matchesKey,
@@ -1392,12 +1393,18 @@ export async function runTui(
     scrollbarTrackStyle: scrollbarStyles.track,
     scrollbarThumbStyle: scrollbarStyles.thumb,
   });
+  // Margins: a blank row above the transcript and one between it and the editor, so
+  // the first and last line of output are not jammed against the chrome. Fixed
+  // spacers rather than padding inside the scroll view: they do not scroll away and
+  // do not consume scrollback.
   const dock = new VStack([
     { component: working, basis: 'auto', grow: 0, shrink: 1, minSize: 0 },
+    { component: new Spacer(1), basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
     { component: editorContainer, basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
     { component: statusBar, basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
   ]);
   tui.setLayoutRoot(new VStack([
+    { component: new Spacer(1), basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
     { component: scroll, basis: 0, grow: 1, shrink: 1, minSize: 1 },
     { component: dock, basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
   ]));

@@ -73,8 +73,19 @@ export class TranscriptDocument implements Component {
     this.appendText(line, style);
   }
 
-  /** Append a component (a tool pane, markdown block, status notice). */
+  /**
+   * Append a component (a tool pane, markdown block, status notice).
+   *
+   * Components get a blank line above them unless the document already ends in one.
+   * Without it a tool call, its output and the next tool call read as one wall of
+   * text — the transcript has no other separation once the blocks are adjacent.
+   */
   appendComponent(component: Component): void {
+    const last = this.entries[this.entries.length - 1];
+    const atStart = this.entries.length === 0;
+    if (!atStart && !(last?.kind === 'text' && last.text === '')) {
+      this.entries.push({ kind: 'text', text: '' });
+    }
     this.entries.push({ kind: 'component', component });
     this.trim();
     this.onChange?.();

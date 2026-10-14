@@ -303,7 +303,10 @@ describe('tree indentation', () => {
     ]);
     expect(lines[0]).toMatch(/^ {4}│ {3}✔ bash/);
     // The pane's body and a plain output line agree on where the frame's stem is.
-    expect(lines[1].indexOf('│')).toBe(lines[2].indexOf('│'));
+    // Found by content: a blank line now separates a component from following text.
+    const paneBody = lines.find((line) => line.includes('42'))!;
+    const plainOutput = lines.find((line) => line.includes('plain nested output'))!;
+    expect(paneBody.indexOf('│')).toBe(plainOutput.indexOf('│'));
   });
 
   it('indents streamed answers inside their frame', () => {
@@ -393,5 +396,61 @@ describe('status bar', () => {
 
   it('says when it is frozen', () => {
     expect(plain(bar({ isFrozen: () => true }).render(140)[0]!)).toContain('FROZEN');
+  });
+});
+
+describe('separation between blocks', () => {
+  function lines(events: Array<Record<string, unknown>>): string[] {
+    const document = new TranscriptDocument();
+    const renderer = new TuiRenderer({ document });
+    for (const event of events) renderer.render(event as never);
+    return document.render(72).map(plain).map((line) => line.replace(/\s+$/, ''));
+  }
+
+  const pane = (name: string) => ({
+    type: 'tool_call', toolName: name, toolState: 'completed', toolResult: { stdout: 'out' }, frameKind: 'run', depth: 0,
+  });
+
+  it('keeps a blank line between text and a tool call, and back again', () => {
+    const rows = lines([
+      { type: 'stream', content: 'looking at the module', frameKind: 'run', depth: 0 },
+      pane('listing'),
+      { type: 'solution', solution: { bindings: [{ name: 'R', value: '1' }] }, frameKind: 'run', depth: 0 },
+      pane('execute'),
+      { type: 'stream', content: 'now I will write it', frameKind: 'run', depth: 0 },
+    ]);
+    // Four transitions: text→pane, pane→text, text→pane, pane→text.
+    expect(rows.filter((line) => line === '')).toHaveLength(4);
+    // Never two blanks in a row, and never a blank at the very start.
+    expect(rows[0]).not.toBe('');
+    for (let i = 1; i < rows.length; i += 1) {
+      if (rows[i] === '') expect(rows[i - 1]).not.toBe('');
+    }
+    // Each pane is preceded by a blank.
+    for (const name of ['listing', 'execute']) {
+      const index = rows.findIndex((line) => line.includes(name));
+      expect(index).toBeGreaterThan(0);
+      expect(rows[index - 1]).toBe('');
+    }
+  });
+
+  it('does not separate chunks of the same streamed block', () => {
+    const rows = lines([
+      { type: 'stream', content: 'one ', frameKind: 'run', depth: 0 },
+      { type: 'stream', content: 'two', frameKind: 'run', depth: 0 },
+    ]);
+    expect(rows.filter((line) => line === '')).toHaveLength(0);
+  });
+
+  it('adds nothing for events that render nothing', () => {
+    // A model call or a usage update is not output; separating on them would open a
+    // gap in the transcript for every turn.
+    const rows = lines([
+      { type: 'output', content: 'first', frameKind: 'run', depth: 0 },
+      { type: 'usage', usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, frameKind: 'run', depth: 0 },
+      { type: 'model_call', modelCallState: 'started' } as never,
+      { type: 'output', content: 'second', frameKind: 'run', depth: 0 },
+    ]);
+    expect(rows.filter((line) => line === '')).toHaveLength(0);
   });
 });

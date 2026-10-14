@@ -40,6 +40,13 @@
 
 ### Fixed
 
+- **The transcript was crowded.** Output ran edge to edge with no separation: a
+  tool call, its result and the next event were adjacent lines. There is now a blank
+  row above the transcript and between it and the editor (fixed spacers, so they do
+  not scroll away), and a blank line between any text block and a component — a
+  streamed answer, a tool pane, a solution — in either order. Events that render
+  nothing (a model call, a usage update) add no gap, and consecutive chunks of one
+  streamed answer stay one block.
 - **The status bar is one row.** Where the harness lives and what it is doing on the
   left, the model on the right, the token/context counters between them; anything
   that does not fit is dropped whole. The workspace is shortened to `…/project`

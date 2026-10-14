@@ -23,6 +23,9 @@ import { TranscriptDocument } from './document.js';
 import { markdownTheme } from './theme.js';
 import { DmlToolPane } from './tool-pane.js';
 
+/** Events that produce no transcript output of their own. */
+const QUIET_EVENTS = new Set(['model_call', 'finished', 'meta_result', 'usage']);
+
 /** A markdown block whose text grows as the model streams. */
 class StreamingBlock implements Component {
   private buffer = '';
@@ -83,6 +86,15 @@ export class TuiRenderer {
   private stream?: StreamingBlock;
   /** The live (unterminated) line written by the delegated renderer. */
   private pending = '';
+  /**
+   * What was emitted last: a text block or a component.
+   *
+   * The line renderer already separates its own blocks, but it cannot see the
+   * components (panes, streamed markdown) that never pass through it — so text
+   * followed by a component, or the reverse, ran together. Any blank requested here
+   * collapses with one the line renderer adds, so this cannot double them.
+   */
+  private lastBlock: 'none' | 'text' | 'component' = 'none';
 
   constructor(options: TuiRendererOptions) {
     this.document = options.document;
@@ -101,6 +113,14 @@ export class TuiRenderer {
       (text) => this.writeDocumentText(text),
       (text) => this.writeDocumentText(text),
     );
+  }
+
+  /** Keep unlike output apart: one blank line between a text block and a component. */
+  private separate(kind: 'text' | 'component'): void {
+    if (this.lastBlock !== 'none' && this.lastBlock !== kind) {
+      this.document.appendText('');
+    }
+    this.lastBlock = kind;
   }
 
   /** Expand or collapse the most recent tool pane (ctrl+o). */
@@ -122,6 +142,7 @@ export class TuiRenderer {
         return;
       case 'stream':
         if (event.content) {
+          if (!this.stream) this.separate('component');
           this.stream ??= this.newStreamBlock(framePrefix(event, this.showEvents));
           this.stream.append(event.content);
           this.document.onChange?.();
@@ -130,9 +151,13 @@ export class TuiRenderer {
       case 'answer':
       case 'error':
         this.endStream();
+        this.separate('text');
         this.text.render(event);
         return;
       default:
+        // Events that render nothing must not add a separator, or switching models
+        // or finishing a turn would open a gap.
+        if (!QUIET_EVENTS.has(event.type)) this.separate('text');
         this.text.render(event);
     }
   }
@@ -144,6 +169,7 @@ export class TuiRenderer {
 
     if (state === 'starting' || !this.currentPane) {
       this.endStream();
+      this.separate('component');
       this.currentPane = new DmlToolPane({ toolName: name, args: event.toolArgs ?? {}, prefix });
       this.panes.push(this.currentPane);
       this.document.appendComponent(this.currentPane);
