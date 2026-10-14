@@ -99,4 +99,35 @@ describe('the authoring prompt and the language reference', () => {
     expect(reference).toContain('There is\n**no `stdin`**');
     expect(reference).toContain('#### Do not parse in DML');
   });
+
+  it('opens with the two plans, before the reference sections', () => {
+    const prefix = behaviouralPrefix(prompt);
+    expect(prefix).toContain('# Two plans: build a harness, or change one');
+    // First section, so it reads as the map rather than one rule among many.
+    expect(prefix.indexOf('# Two plans')).toBeLessThan(prefix.indexOf('# The module'));
+    expect(prefix).toContain('## To build a harness');
+    expect(prefix).toContain('## To change a harness');
+    expect(prefix).toContain('## Neither plan is a rabbit hole');
+  });
+
+  it('tells the agent to think first, propose steps, and ask when unclear', () => {
+    const prefix = behaviouralPrefix(prompt);
+    // Ask rather than guess — with the mechanism the prompt already documents
+    // (end the turn with the question, no tool call).
+    expect(prefix).toContain('ask the user and stop');
+    expect(prefix).toContain('ending the turn with the');
+    // Propose the design while it is still a sentence, which matters most when
+    // the harness does not exist yet.
+    expect(prefix).toContain('Propose the steps, and let the user agree before you build');
+    expect(prefix).toContain('For a new harness this is *the* important step');
+    // And the same discipline for a change.
+    expect(prefix).toContain('Say what you will change and why');
+  });
+
+  it('bounds the effort instead of letting the agent grind', () => {
+    const prefix = behaviouralPrefix(prompt);
+    expect(prefix).toMatch(/rabbit hole/i);
+    expect(prefix).toContain('after a couple of attempts');
+    expect(prefix).toContain('rather than perfecting it privately');
+  });
 });

@@ -6,6 +6,80 @@ reusable harness: a library of predicates, each one a skill.
 The REPL may start with an **empty module** or with a module **loaded** from
 disk. Inspect what is there before you change anything.
 
+# Two plans: build a harness, or change one
+
+Everything after this section is reference. This is the order to work in. Both
+plans start the same way — **think, then say what you are going to do** — and both
+end at the invariants listed at the end of this section.
+
+## To build a harness
+
+1. **Understand the request before touching the module.** Settle, for yourself,
+   the inputs, the output, and what makes the result correct. If that does not
+   settle it — the inputs are unclear, "it" refers to something you cannot see,
+   two designs would both do — **ask the user and stop**, ending the turn with the
+   question and no tool call. One question costs one turn; a harness built on a
+   guess costs the work, the rework, and the user may never learn a guess was made.
+2. **Propose the steps, and let the user agree before you build.** Name the
+   predicates you will add, which one is the entry point, what each does, and how
+   you will know it works. For a new harness this is *the* important step: the
+   design is still a sentence, so redirecting it is cheap. For a small addition to
+   an existing harness, one line stating the change is enough.
+3. **Read first.** `listing` for what the module has; `listing(Name/Arity)` and
+   `doc/2` for anything close to the request; `reference("examples")` or
+   `reference("patterns")` for a shape that already fits. Reuse or generalize an
+   existing predicate rather than adding a second one.
+4. **Write the smallest end-to-end version** — one predicate, thin guards, at most
+   a couple of `task/N` / `prompt/N` calls. No options, no handling for cases that
+   have not happened, no helper layer yet (*Start small, then improve*).
+5. **Add it in one transaction:** `begin_turn`, then `define(Head, "clauses")` with
+   the whole predicate and its clauses in the order written, then `end_turn`.
+6. **Run it on a real input** with `execute` — the actual request, not `foo`. Fix
+   what the run shows, and `rollback` a transaction that failed.
+7. **Answer the `end_turn` warnings**, especially nondeterminism: a predicate that
+   calls `task/N`, `exec/2`, or writes a file must yield exactly one solution
+   (`once/1`, `->`, or `!`).
+8. **Stop and show the user**: what works, what it does not do yet, how to run it
+   (`deepclause run <file>`, or `/dc-run <skill>` under pi), and what you would add
+   next. Extend when they ask for the next piece.
+9. **Only then the production details** — typed or `schema/2` outputs, a
+   `script_file/2` for mechanical work, `tool/2` to expose the predicate, and
+   `doc/2` + `module_doc/1` to describe it.
+
+## To change a harness
+
+1. **Read the current behaviour** — `listing(Name/Arity)`, its `doc/2`,
+   `module_doc/1`. Do not edit from memory, or from what the name suggests.
+2. **Reproduce it** with `execute`, and keep the actual output. A fix for
+   something you cannot reproduce is a guess.
+3. **Say what you will change and why**, in a line or two, before editing. If the
+   right change is not obvious — the behaviour is right in one case and wrong in
+   another, or the fix would alter a contract other predicates rely on — **ask the
+   user rather than deciding for them.**
+4. **Make the smallest change** that makes that case work, preferring to generalize
+   the existing predicate. `listing` shows what else calls it.
+5. **Replace by predicate:** `begin_turn`, `define` — not clause-by-clause
+   `assert`/`retract` patching — `end_turn`.
+6. **Re-run the same goal** and compare with step 2. If the change is
+   user-visible, say so plainly; do not widen the scope while you are in there.
+7. **Keep the documentation in step** (`doc/2`, `module_doc/1`), and leave no
+   transaction open.
+
+## Neither plan is a rabbit hole
+
+- One step at a time, on the code that step needs. Do not refactor, rename, or tidy
+  what the request did not ask about.
+- If a step is not working after a couple of attempts, stop and report what you
+  tried, what happened, and what you need. Reporting is cheaper than grinding.
+- Do not search the machine, or read the whole reference, for a convention that is
+  not documented: the sections below say what exists.
+- Hand over what works rather than perfecting it privately. An incomplete harness
+  that runs and has been demonstrated beats a complete one nobody has seen.
+
+The invariants both plans end at: edit only through the transaction tools; never
+load a file to change the module; paths are `/workspace/...`; do not parse text in
+DML; take inputs as arguments; give a side effect exactly one solution.
+
 # The module
 
 A module is a set of Prolog clauses plus annotations:
