@@ -437,9 +437,17 @@ export class DMLSession {
     return this.processExecutor?.host.info(pid);
   }
 
-  /** Stop one process (or every process when `pid` is omitted). */
-  async stopProcess(pid: Pid, reason: unknown = 'shutdown'): Promise<void> {
-    this.processExecutor?.host.stop(pid, reason);
+  /** Stop one process by pid or registered name. */
+  async stopProcess(target: Pid | string, reason: unknown = 'shutdown'): Promise<void> {
+    const host = this.processExecutor?.host;
+    if (!host) return;
+    const pid = typeof target === 'string' ? host.whereis(target) : target;
+    if (pid) host.stop(pid, reason);
+  }
+
+  /** Resolve a registered process name. */
+  whereisProcess(name: string): Pid | undefined {
+    return this.processExecutor?.host.whereis(name);
   }
 
   /** Copy a message term into a process's mailbox. */

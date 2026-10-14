@@ -27,6 +27,8 @@ export interface StatusBarOptions {
   isFrozen?: () => boolean;
   /** True while a turn is running (so the user knows they can steer). */
   isRunning?: () => boolean;
+  /** Compact subagent status, e.g. `⚙ desk 2/3`; omitted when none run. */
+  processLabel?: () => string | undefined;
 }
 
 /**
@@ -98,6 +100,7 @@ export class StatusBarComponent implements Component {
       : undefined;
     const frozen = this.options.isFrozen?.() ? 'FROZEN' : undefined;
     const harness = this.options.harness ? `harness ${this.options.harness}` : undefined;
+    const processes = this.options.processLabel?.();
 
     // Priority order, most useful first: where we are, what state we are in, what
     // it has cost, what we are pointed at. The session id is printed by the exit
@@ -106,6 +109,7 @@ export class StatusBarComponent implements Component {
       [
         shortenPath(this.options.workspace),
         running,
+        processes,
         frozen,
         formatUsageSegment(snapshot),
         formatContextSegment(snapshot),

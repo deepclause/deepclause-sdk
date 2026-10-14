@@ -18,7 +18,7 @@ import { HistoryStore } from '../repl/history.js';
 import { resolveReplJudgeSelection } from '../repl/judge.js';
 import { ReplRenderer, type RenderMode, type ReplEventRenderer } from '../repl/render.js';
 import { TranscriptDocument } from '../repl/tui/document.js';
-import { ChoicePicker } from '../repl/tui/picker.js';
+import { formatProcessTable } from '../repl/harness-tools.js';import { ChoicePicker } from '../repl/tui/picker.js';
 import { HarnessView } from '../repl/tui/harness-view.js';
 import { TuiRenderer } from '../repl/tui/renderer.js';
 import { WorkingLine } from '../repl/tui/working-line.js';
@@ -132,6 +132,11 @@ export type ReplInput =
   | { kind: 'gen'; prompt: string }
   | { kind: 'goal'; goal: string }
   | { kind: 'prompt'; prompt: string }
+  | { kind: 'spawn'; goal: string; name?: string }
+  | { kind: 'ps' }
+  | { kind: 'send'; target: string; message: string }
+  | { kind: 'call'; target: string; message: string }
+  | { kind: 'stop'; target: string }
   | { kind: 'unknown-command'; name: string };
 
 const OUT_OF_BAND = new Set(['halt', 'help', 'reset', 'rollback', 'freeze', 'unfreeze', 'trace', 'notrace', 'params']);
@@ -246,6 +251,27 @@ export function classifyReplInput(line: string): ReplInput {
       case 'gen':
       case 'imagine':
         return arg ? { kind: 'gen', prompt: arg } : { kind: 'unknown-command', name: 'gen (missing prompt)' };
+      case 'spawn':
+      case 'serve':
+        return arg ? { kind: 'spawn', goal: arg } : { kind: 'unknown-command', name: 'spawn (missing goal)' };
+      case 'ps':
+      case 'processes':
+        return { kind: 'ps' };
+      case 'send':
+      case 'cast': {
+        const [target, ...rest] = arg.split(/\s+/);
+        return target && rest.length > 0
+          ? { kind: 'send', target, message: rest.join(' ') }
+          : { kind: 'unknown-command', name: 'send (usage: /send <name> <message>)' };
+      }
+      case 'call': {
+        const [target, ...rest] = arg.split(/\s+/);
+        return target && rest.length > 0
+          ? { kind: 'call', target, message: rest.join(' ') }
+          : { kind: 'unknown-command', name: 'call (usage: /call <name> <message>)' };
+      }
+      case 'stop':
+        return arg ? { kind: 'stop', target: arg } : { kind: 'unknown-command', name: 'stop (usage: /stop <name>)' };
       default:
         return { kind: 'unknown-command', name };
     }
@@ -652,7 +678,7 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
     }
   }
 
-  return {
+  const runtime: ReplRuntime = {
     repl,
     renderer,
     workspace,
@@ -679,6 +705,23 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
     setOnInput: (handler) => repl.setOnInput(handler),
     missingCredential,
   };
+
+  // Session-scoped subagents render their lifecycle and output through the
+  // active renderer (the TUI swaps it in after this runtime is built).
+  repl.session.setProcessEventSink((event) => {
+    const label = `⚙ ${event.name}`;
+    const sink = runtime.renderer;
+    if (event.type === 'output' && event.content) {
+      sink.writeLine(`${label}  ${event.content.trimEnd()}`);
+    } else if (event.type === 'answer') {
+      sink.writeLine(`${label} › ${String(event.answer ?? 'ok')}`);
+    } else if (event.type === 'exited' && event.state !== 'done') {
+      const reason = event.reason && event.reason !== 'normal' ? ` (${String(event.reason)})` : '';
+      sink.writeLine(`${label} ${event.state}${reason}`);
+    }
+  });
+
+  return runtime;
 }
 
 /** Package version, read once from package.json for the banner/`--version`. */
@@ -790,6 +833,41 @@ export async function dispatchReplInput(
     case 'empty':
     case 'comment':
       return true;
+    case 'spawn': {
+      try {
+        const pid = await repl.session.spawnProcess(input.goal, input.name ? { name: input.name } : {});
+        print(`spawned ${formatProcessTable(repl.session.processes().filter((p) => p.pid.id === pid.id))}`);
+      } catch (error) {
+        print(`ERROR: ${(error as Error).message}`);
+      }
+      return true;
+    }
+    case 'ps': {
+      for (const line of formatProcessTable(repl.session.processes()).split('\n')) print(line);
+      return true;
+    }
+    case 'send': {
+      try {
+        repl.session.sendProcess(input.target, input.message);
+      } catch (error) {
+        print(`ERROR: ${(error as Error).message}`);
+      }
+      return true;
+    }
+    case 'call': {
+      try {
+        const reply = await repl.session.callProcess(input.target, input.message);
+        print(`${input.target} › ${reply}`);
+      } catch (error) {
+        print(`ERROR: ${(error as Error).message}`);
+      }
+      return true;
+    }
+    case 'stop': {
+      await repl.session.stopProcess(input.target);
+      print(`stopped ${input.target}`);
+      return true;
+    }
     case 'unknown-command':
       print(`unknown command: /${input.name} — try /help.`);
       return true;
@@ -960,6 +1038,11 @@ function helpText(): string {
     '                         question. An agent writes, tests, and commits the DML.',
     '',
     '  Commands',
+    '    /spawn <goal>        start a session-scoped subagent (alias /serve)',
+    '    /ps                  list subagents and their state',
+    '    /send <name> <msg>   send a DML term to a subagent (alias /cast)',
+    '    /call <name> <msg>   request/reply with a service subagent',
+    '    /stop <name>         stop a subagent',
     '    /listing [filter]    inspect the harness (all | Name/Arity | tools | scripts)',
     '    /viz [entry] [--spec] diagram of a skill, drawn in the terminal',
     '                         (--graphics=auto|kitty|iterm2|ascii|off)',
@@ -1249,6 +1332,14 @@ export async function runTui(
     backend: runtime.backend,
     isFrozen: () => runtime.repl.isFrozen(),
     isRunning: () => runState.running,
+    processLabel: () => {
+      const active = runtime.repl.session
+        .processes()
+        .filter((process) => ['running', 'runnable', 'waiting', 'input'].includes(process.state));
+      if (active.length === 0) return undefined;
+      const attention = active.some((process) => process.state === 'input');
+      return `⚙ ${active.length} svc${attention ? ' !' : ''}`;
+    },
   });
   transcript.onChange = () => tui.requestRender();
 

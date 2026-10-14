@@ -9,6 +9,9 @@
 import type { DMLEvent, ToolDefinition } from '../types.js';
 import type { DiagramMode } from '../visualize/index.js';
 
+import type { Pid, ProcessInfo, SpawnOptions } from './processes.js';
+import { pidTermText } from './processes.js';
+
 export interface HarnessExecuteResult {
   bindings: Array<{ name: string; value: string }>;
   solutions: Array<Array<{ name: string; value: string }>>;
@@ -94,10 +97,35 @@ export interface HarnessToolController {
   reference(topic: string): Promise<string>;
   /** The models available in this session (for `with_model/2`). */
   listModels(): Promise<string>;
+  /** Start a session-scoped subagent; returns immediately. */
+  spawnProcess(goal: string, options?: SpawnOptions): Promise<Pid>;
+  /** The whole process state. */
+  processes(): ProcessInfo[];
+  /** Resolve a registered process name. */
+  whereisProcess(name: string): Pid | undefined;
+  /** Copy a message term into a process's mailbox. */
+  sendProcess(to: Pid | string, messageTerm: string): void;
+  /** Request/reply against a service process. */
+  callProcess(to: Pid | string, messageTerm: string, timeoutMs?: number): Promise<string>;
+  /** Stop a process by pid or registered name. */
+  stopProcess(target: Pid | string, reason?: unknown): Promise<void>;
 }
 
 function text(message: string): Record<string, unknown> {
   return { text: message };
+}
+
+/** A compact, model-readable table of the process state. */
+export function formatProcessTable(processes: ProcessInfo[]): string {
+  if (processes.length === 0) return 'no subagents';
+  return processes
+    .map((p) => {
+      const usage = p.usage.totalTokens > 0 ? ` · ${p.usage.totalTokens} tok` : '';
+      const activity = p.currentActivity ? ` · ${p.currentActivity}` : '';
+      const error = p.error ? ` (${p.error})` : '';
+      return `${pidTermText(p.pid)}  ${p.name}  ${p.state}${error}  mailbox ${p.mailboxDepth}${usage}${activity}`;
+    })
+    .join('\n');
 }
 
 const stringProp = (description: string): { type: string; description: string } => ({ type: 'string', description });
@@ -307,6 +335,97 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
       required: ['topic'],
     },
     execute: async (args) => text(await controller.reference(String(args.topic ?? 'language'))),
+  });
+
+  // ---- Session-scoped subagents (spec §9.1) ------------------------------
+
+  tools.set('spawn', {
+    description: 'Start a session-scoped subagent running a DML goal. Returns immediately with its id; it keeps running after this turn. The goal decides the shape: return when done, loop on receive/2 to wait for messages, or call input/2 to ask the user. Do not await it unless the user asked for its result.',
+    parameters: {
+      type: 'object',
+      properties: {
+        goal: stringProp('The DML goal to run, e.g. "keeper([])" or "summarise(topic)".'),
+        name: stringProp('Optional readable label (defaults to the goal functor).'),
+        priority: stringProp('foreground | interactive | background (default background).'),
+      },
+      required: ['goal'],
+    },
+    execute: async (args) => {
+      const goal = String(args.goal ?? '').trim();
+      if (!goal) return { error: 'spawn requires a goal' };
+      try {
+        const priority = args.priority === 'foreground' || args.priority === 'interactive'
+          ? args.priority
+          : 'background';
+        const pid = await controller.spawnProcess(goal, {
+          name: typeof args.name === 'string' && args.name.trim() ? args.name.trim() : undefined,
+          priority,
+        });
+        const name = controller.processes().find((p) => p.pid.id === pid.id)?.name ?? goal;
+        return { pid: pidTermText(pid), name };
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+  });
+
+  tools.set('ps', {
+    description: 'List the session\'s subagents (the whole process state): id, name, state, mailbox depth, usage. Use this to inspect running work.',
+    parameters: { type: 'object', properties: {}, required: [] },
+    execute: async () => text(formatProcessTable(controller.processes())),
+  });
+
+  tools.set('send', {
+    description: 'Send a DML term to a subagent (by id or registered name). Fire-and-forget: use this for "text from the user" or a message to another process.',
+    parameters: {
+      type: 'object',
+      properties: {
+        to: stringProp('Process id (proc(...)) or registered name.'),
+        message: stringProp('The DML term to send, for example the atom stop or a compound like request(a, b).'),
+      },
+      required: ['to', 'message'],
+    },
+    execute: async (args) => {
+      try {
+        controller.sendProcess(String(args.to ?? ''), String(args.message ?? 'true'));
+        return { ok: true };
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+  });
+
+  tools.set('call', {
+    description: 'Send a request to a service subagent and wait for its reply (the library(service) request/reply protocol).',
+    parameters: {
+      type: 'object',
+      properties: {
+        to: stringProp('Process id (proc(...)) or registered name.'),
+        message: stringProp('The request term.'),
+      },
+      required: ['to', 'message'],
+    },
+    execute: async (args) => {
+      try {
+        const reply = await controller.callProcess(String(args.to ?? ''), String(args.message ?? 'true'));
+        return { reply };
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+  });
+
+  tools.set('stop', {
+    description: 'Stop a subagent (by id or registered name).',
+    parameters: {
+      type: 'object',
+      properties: { target: stringProp('Process id or registered name.') },
+      required: ['target'],
+    },
+    execute: async (args) => {
+      await controller.stopProcess(String(args.target ?? ''));
+      return { ok: true };
+    },
   });
 
   return tools;
