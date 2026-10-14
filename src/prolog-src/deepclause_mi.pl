@@ -817,6 +817,24 @@ process_directive(require_sandbox, SessionId) :-
                     context(require_sandbox/0, Message)))
     ).
 
+%% Anything else is recorded rather than discarded. An unrecognised directive
+%% (`:- dynamic(f/1).`, a `:- op(...)` without use_module, a typo) does nothing,
+%% and silently doing nothing is how an edit that never took effect goes
+%% unnoticed. The host reports these after a load.
+process_directive(Directive, SessionId) :-
+    (   repl_benign_directive(Directive)
+    ->  true
+    ;   assertz(session_unhandled_directive(SessionId, Directive))
+    ).
+
+%% Directives DML deliberately accepts and ignores (SWI state it manages itself).
+repl_benign_directive(dynamic(_)).
+repl_benign_directive(dynamic(_, _)).
+repl_benign_directive(discontiguous(_)).
+repl_benign_directive(discontiguous(_, _)).
+repl_benign_directive(multifile(_)).
+repl_benign_directive(multifile(_, _)).
+
 %% sandbox_kind_atom(+Raw, -Atom)
 %% A JS string or an atom in, an atom out.
 %%
@@ -839,23 +857,6 @@ sandbox_backend_acceptable(agentvm).
 sandbox_backend_acceptable(bwrap).
 sandbox_backend_acceptable(sandbox_exec).
 
-%% Anything else is recorded rather than discarded. An unrecognised directive
-%% (`:- dynamic(f/1).`, a `:- op(...)` without use_module, a typo) does nothing,
-%% and silently doing nothing is how an edit that never took effect goes
-%% unnoticed. The host reports these after a load.
-process_directive(Directive, SessionId) :-
-    (   repl_benign_directive(Directive)
-    ->  true
-    ;   assertz(session_unhandled_directive(SessionId, Directive))
-    ).
-
-%% Directives DML deliberately accepts and ignores (SWI state it manages itself).
-repl_benign_directive(dynamic(_)).
-repl_benign_directive(dynamic(_, _)).
-repl_benign_directive(discontiguous(_)).
-repl_benign_directive(discontiguous(_, _)).
-repl_benign_directive(multifile(_)).
-repl_benign_directive(multifile(_, _)).
 
 %% repl_unhandled_directives(+SessionId, -Directives)
 repl_unhandled_directives(SessionId, Directives) :-

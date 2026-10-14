@@ -77,6 +77,8 @@ export interface ReplCliOptions {
   tools?: string;
   noTools?: boolean;
   sandbox?: boolean;
+  /** Refuse to start unless the effective shell backend is a sandbox. */
+  requireSandbox?: boolean;
   noAsk?: boolean;
   answer?: string;
   interactiveInput?: boolean;
@@ -423,6 +425,16 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
       }
     },
   });
+
+  // The CLI counterpart of `:- require_sandbox.`: enforce it without editing the
+  // harness, for CI and for a run you do not want to be quietly unsandboxed.
+  if (options.requireSandbox && !toolset.environment.sandboxed) {
+    throw new Error(
+      `--require-sandbox: the effective shell backend is ${toolset.environment.backendLabel}, `
+      + 'which is not sandboxed. Install bubblewrap (Linux), grant sandbox-exec (macOS), '
+      + 'or run with --sandbox (AgentVM).',
+    );
+  }
 
   const backendKind = options.backend ?? config.backend?.kind ?? 'pi';
   let llmBackend;
@@ -1503,6 +1515,7 @@ export function registerReplCommand(program: Command): void {
     .option('--tools <list>', 'comma-separated capability host tools (default: bash)')
     .option('--no-tools', 'register no capability host tools')
     .option('--sandbox', 'run shell tools in AgentVM')
+    .option('--require-sandbox', 'refuse to run unless the shell is sandboxed (bwrap/AgentVM/sandbox-exec)')
     .option('--no-ask', 'make ask_user / input/2 fail instead of prompting')
     .option('--image-model <provider:id>', 'image model for generation (default: first available)')
     .option('--no-open', 'do not hand images to the OS viewer on terminals without inline images')
@@ -1547,6 +1560,7 @@ export function registerReplCommand(program: Command): void {
         tools: typeof options.tools === 'string' ? options.tools : undefined,
         noTools: options.tools === false,
         sandbox: options.sandbox,
+        requireSandbox: options.requireSandbox,
         noAsk: options.ask === false,
         imageModel: options.imageModel,
         open: options.open,
