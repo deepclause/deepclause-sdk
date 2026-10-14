@@ -25,6 +25,43 @@
 - **`dict_field/3,4`** reads a model-produced dict field with an atom or string key,
   any case, ignoring `_`/`-`/space.
 
+- **`execute(goal, bindings: "brief" | "none")`** trims what a test run returns when
+  one bound value is huge: `brief` keeps the names and shortens each value,
+  `none` returns no bindings. Both report what was left out and the original
+  length, so a shortened value cannot be mistaken for a short one, or an omitted
+  binding for a goal that bound nothing.
+
+### Fixed
+
+- **A failed `define` used to destroy the predicate it was replacing.** Abolish
+  ran before the commit, so a block with one reserved name in it removed the
+  target, reported an error, and a following `end_turn` committed the deletion as
+  a version. Everything that can fail is now checked first, and the clauses being
+  replaced are copied so a failure mid-commit still restores them.
+- **`define`'s head argument was ignored.** `'f/1'` reads as the operator term
+  `/(f, 1)`, so the target was parsed as the functor `//2` and the clause block
+  alone decided what got replaced. The head is now the target, and `define`
+  refuses a target the block does not define.
+- **`assert`/`assert_many` silently mixed versions** — appending to an existing
+  predicate left both live with their clauses interleaved. Refused now, naming the
+  clause count and the remedy.
+- **`retract` ignored its pattern** and removed every clause of the predicate,
+  reporting `ok`. It now removes the clauses that match, reports how many, and
+  fails when none did.
+- **A nested `begin_turn` clobbered the snapshot**, so `rollback` restored the
+  uncommitted state instead of the last commit. Refused now.
+- **Prolog's own stdout/stderr went straight to the terminal**, so a reader
+  warning landed in the middle of an interactive frame. Captured and rendered as
+  events instead: a warning or error is shown without `--verbose`.
+- **DML paths no longer go through a rewriting layer.** `/workspace` is mounted
+  and is the working directory, so `x` and `/workspace/x` are one file; anything
+  else is the session's ephemeral VM filesystem. The old layer turned
+  `/workspace/x` into `/workspace/workspace/x` and re-rooted `/etc/passwd` into
+  the workspace instead of rejecting it, as the docs claimed.
+- **`exec(bash(...))` has no `stdin`** — passing one was silently dropped, and
+  then the command blocked until the timeout. An unknown tool parameter is now an
+  error that names the accepted ones.
+
 ### Known gaps
 
 - **The nested-tool exclusion is unverified.** A tool whose body calls `task/N` is

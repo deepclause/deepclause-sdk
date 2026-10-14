@@ -16,6 +16,30 @@ export interface HarnessExecuteResult {
   error?: string;
   /** Wall-clock duration of the goal, in milliseconds. */
   elapsedMs: number;
+  /**
+   * What was left out of the bindings, when not all of them were returned.
+   * Without it a shortened value is indistinguishable from a short one, and an
+   * omitted binding looks like a goal that bound nothing.
+   */
+  bindingsNote?: string;
+}
+
+/**
+ * How much of each binding to return.
+ *
+ * A goal often binds one large term — a document, a nested dict — and the full
+ * value is noise in the transcript and in the model's context. `brief` is for
+ * "I want to know it bound something that looks like this"; `none` is for
+ * "I only care that it succeeded and what it printed".
+ */
+export type BindingMode = 'full' | 'brief' | 'none';
+
+/** Characters kept per value in `brief` mode. */
+export const BRIEF_VALUE_CHARS = 80;
+
+/** Read the `bindings` option; anything unrecognised keeps the full values. */
+export function readBindingMode(value: unknown): BindingMode {
+  return value === 'brief' || value === 'none' ? value : 'full';
 }
 
 export interface HarnessCommitResult {
@@ -51,7 +75,13 @@ export interface HarnessToolController {
   /** Delete a predicate by `Name/Arity`. */
   deletePredicate(nameArity: string): Promise<{ ok: boolean; error?: string }>;
   /** Run a DML goal against the scratch harness. */
-  execute(goal: string, limit?: number, signal?: AbortSignal, onEvent?: (event: DMLEvent) => void): Promise<HarnessExecuteResult>;
+  execute(
+    goal: string,
+    limit?: number,
+    signal?: AbortSignal,
+    onEvent?: (event: DMLEvent) => void,
+    bindingMode?: BindingMode,
+  ): Promise<HarnessExecuteResult>;
   /** ASCII diagram of a skill and its sub-agent/tool calls. */
   visualize(entry?: string, mode?: DiagramMode): Promise<{ message: string; event?: DMLEvent }>;
   /** Display a workspace image in the terminal. */
@@ -184,6 +214,12 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
       properties: {
         goal: stringProp('The DML goal to run, e.g. "fact(5, F)".'),
         limit: { type: 'integer', description: 'Maximum solutions to collect (default 5).' },
+        bindings: stringProp(
+          "How much of each binding to return. 'full' (default) returns the values as they are; "
+          + "'brief' keeps the names and shortens each value, for a goal that binds one large term; "
+          + "'none' returns no bindings at all, for when you only care that the goal succeeded or what it printed. "
+          + 'Both reduced modes say what they left out.',
+        ),
       },
       required: ['goal'],
     },
@@ -192,6 +228,7 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
       typeof args.limit === 'number' ? args.limit : undefined,
       context?.signal,
       context?.onEvent,
+      readBindingMode(args.bindings),
     ),
   });
 

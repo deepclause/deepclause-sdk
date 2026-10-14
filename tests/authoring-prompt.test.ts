@@ -139,4 +139,10 @@ describe('the authoring prompt and the language reference', () => {
     const reference = readFileSync(join(DOCS, 'DML_REFERENCE.md'), 'utf8');
     expect(reference).toContain('**Use it for debugging.**');
   });
+
+  it('offers reduced bindings on execute', () => {
+    const prefix = behaviouralPrefix(prompt);
+    expect(prefix).toContain('bindings: "brief"');
+    expect(prefix).toContain('bindings: "none"');
+  });
 });

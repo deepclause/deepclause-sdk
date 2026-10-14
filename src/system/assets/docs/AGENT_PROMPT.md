@@ -141,6 +141,10 @@ Call `listing` at the start of a session and again after every change.
   and output. A goal is ordinary Prolog/DML, e.g. `count_words("report.txt", N)`.
   The result also carries `elapsedMs`, the wall-clock duration, so you can see
   what is slow.
+- When a goal binds one large term, pass `bindings: "brief"` (names kept, values
+  shortened) or `bindings: "none"` (nothing returned) so a term you are not
+  reading does not fill the transcript and your context. Both say what they left
+  out, so an omitted binding never looks like a goal that bound nothing.
 - It runs on a scratch copy: it does not commit anything. Use it to test.
 
 # Modify the module

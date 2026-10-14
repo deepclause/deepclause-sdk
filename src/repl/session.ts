@@ -33,8 +33,9 @@ import {
   type CompactionSettings,
 } from './compaction.js';
 import { HarnessAgent } from './agent.js';
-import { createHarnessTools } from './harness-tools.js';
-import type { HarnessCommitResult, HarnessExecuteResult } from './harness-tools.js';import type {
+import { BRIEF_VALUE_CHARS, createHarnessTools } from './harness-tools.js';
+import type { BindingMode, HarnessCommitResult, HarnessExecuteResult } from './harness-tools.js';
+import type {
   DMLEvent,
   FrameKind,
   ImageBackend,
@@ -1027,6 +1028,7 @@ export class DMLSession {
     limit = 5,
     onEvent?: (event: DMLEvent) => void,
     signal?: AbortSignal,
+    bindingMode: BindingMode = 'full',
   ): Promise<HarnessExecuteResult> {
     const startedAt = Date.now();
     const elapsed = (): number => Date.now() - startedAt;
@@ -1086,12 +1088,19 @@ export class DMLSession {
       this.setMemory('harness', memoryBefore);
     }
 
+    const bindingCount = solutions[0]?.length ?? 0;
     return {
-      bindings: solutions[0] ?? [],
-      solutions,
+      ...shapeBindings(solutions, bindingMode),
       output: output.slice(0, 4000),
       error: runError,
       elapsedMs: elapsed(),
+      ...(bindingMode === 'full'
+        ? {}
+        : {
+          bindingsNote: bindingMode === 'none'
+            ? `${bindingCount} binding${bindingCount === 1 ? '' : 's'} omitted (use bindings: "brief" to see the names, or "full" for the values)`
+            : `values shortened to ${BRIEF_VALUE_CHARS} characters (use bindings: "full" for the whole value)`,
+        }),
     };
   }
 
@@ -1607,8 +1616,9 @@ export class DMLSession {
     limit?: number,
     signal?: AbortSignal,
     onEvent?: (event: DMLEvent) => void,
+    bindingMode: BindingMode = 'full',
   ): Promise<HarnessExecuteResult> {
-    return this.executeGoal(goal, limit ?? 5, onEvent, signal);
+    return this.executeGoal(goal, limit ?? 5, onEvent, signal, bindingMode);
   }
 
   /**
@@ -1869,6 +1879,31 @@ export function qualifyWithSession(goal: string, sessionId: string): string {
   if (trimmed.length === 0) return goal;
   if (/^[a-z][A-Za-z0-9_]*\s*:/.test(trimmed)) return goal;
   return `${sessionId}:(${trimmed})`;
+}
+
+/**
+ * Apply the `bindings` option to the solutions returned to the agent.
+ *
+ * `bindings` mirrors `solutions[0]`, so the mode applies to both — a half-done
+ * job would leave the full value sitting in the other field.
+ */
+function shapeBindings(
+  solutions: HarnessExecuteResult['solutions'],
+  mode: BindingMode,
+): Pick<HarnessExecuteResult, 'bindings' | 'solutions'> {
+  const first = solutions[0] ?? [];
+  if (mode === 'none') return { bindings: [], solutions: [] };
+  if (mode === 'brief') {
+    const shorten = (entries: HarnessExecuteResult['bindings']) =>
+      entries.map(({ name, value }) => ({
+        name,
+        value: value.length > BRIEF_VALUE_CHARS
+          ? `${value.slice(0, BRIEF_VALUE_CHARS)}… (${value.length} chars)`
+          : value,
+      }));
+    return { bindings: shorten(first), solutions: solutions.map(shorten) };
+  }
+  return { bindings: first, solutions };
 }
 
 /** Render a Prolog value for a warning message. */
