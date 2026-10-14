@@ -977,20 +977,112 @@ all: arithmetic, counting, ordering, membership, `findall/3`, `aggregate_all/3`,
 list/set operations, and constraint or optimisation problems. Reach for `task/N`
 only when the step genuinely needs language understanding.
 
-### Lists
+### Lists and common operations
+
+A list is `[1,2,3]` or `[Head|Tail]`; the recursion below is the shape everything
+else is built on. Prefer the library predicates to hand-rolled recursion.
+
 ```prolog
 process_items([]).
 process_items([H|T]) :-
     format(string(Msg), "Processing: ~w", [H]),
     output(Msg),
     process_items(T).
-
-agent_main :-
-    process_items([apple, banana, cherry]),
-    answer("All items processed").
 ```
 
-Not all builtin SWI Prolog predicates are guaranteed to work at this stage!
+`maplist/3`, `include/3`, `exclude/3`, `foldl/4` and `predsort/3` take a **goal with
+extra arguments**, written `[X,Y]>>Goal` (a *yall* lambda). The list before `>>` is
+the extra arguments — so `[X,Y]>>(Y is X*X)` is a two-argument goal. The lambda's
+arity must match the predicate you are using.
+
+**Transform**
+
+| Want | Write |
+|---|---|
+| Apply to each | `maplist([X,Y]>>(Y is X*X), [1,2,3], L)` → `[1,4,9]` |
+| Combine two lists | `maplist([A,B,C]>>(C is A+B), [1,2], [10,20], L)` → `[11,22]` |
+| Apply, skipping failures | `convlist([X,Y]>>(integer(X), Y is X*2), [1,a,3], L)` → `[2,6]` |
+| Keep / drop matching | `include(P, L, Keep)` / `exclude(P, L, Drop)` |
+| Reduce to one value | `foldl([X,A0,A]>>(A is A0+X), [1,2,3], 0, S)` → `6` |
+| Reverse | `reverse([1,2,3], L)` |
+| Take / split | `append(Chunk, Rest, List)`, or `length(Chunk, 2)` to bound it |
+| A list of N blanks | `length(L, 3)` |
+
+**Select and aggregate**
+
+| Want | Write |
+|---|---|
+| Element at position | `nth0(1, [a,b,c], E)` (0-based) / `nth1(1, …, E)` (1-based) |
+| Remove one occurrence | `select(b, [a,b,c], L)` → `[a,c]` |
+| Check membership (once) | `memberchk(b, L)` — semidet, no choice point |
+| Last element | `last([a,b,c], E)` |
+| Sum | `sum_list([1,2,3], S)` → `6` |
+| Largest / smallest | `max_member(M, L)` / `min_member(M, L)` |
+| Any aggregate | `aggregate_all(max(N), member(N,[1,9,3]), M)` → `9`; also `min`, `sum`, `count`, `bag` |
+
+**Sort, group, dedupe**
+
+| Want | Write |
+|---|---|
+| Sort and dedupe | `sort([3,1,2,1], L)` → `[1,2,3]` |
+| Sort keeping duplicates | `msort([3,1,2,1], L)` → `[1,1,2,3]` (stable) |
+| Sort pairs by key | `keysort([b-2,a-1], L)` → `[a-1,b-2]` (stable) |
+| Sort compounds by an argument | `sort(2, @>=, [a-1,b-3,c-2], L)` — the `2` is the argument position |
+| Sort with your own comparison | `predsort([O,A,B]>>compare(O,A,B), L, Sorted)` |
+| Dedupe, keeping first order | `list_to_set([a,b,a,c], L)` → `[a,b,c]` |
+| Group by key | `group_pairs_by_key([a-1,a-2,b-3], G)` → `[a-[1,2], b-[3]]` |
+| Set difference / intersect / union | `subtract/3`, `intersection/3`, `union/3` |
+| Zip / unzip | `pairs_keys_values(Pairs, Keys, Values)`, `pairs_keys/2`, `pairs_values/2` |
+
+**Strings in a list.** `split_string/4` leaves empty strings behind, which is the
+usual reason a list "has blanks in it":
+
+```prolog
+split_string("a,,b", ",", "", Parts),      % Parts = ["a","","b"]
+exclude(==(""), Parts, Clean).              % Clean = ["a","b"]
+include(dif(""), Parts, Clean).             % the same, by unification
+exclude(=([]), Lists, NonEmpty).            % drop empty lists
+```
+
+**A field from a list of dicts** — the most common list task with model output:
+
+```prolog
+json_gets(Doc, "rows.*.name", Names),                       % one call, collects
+findall(N, (member(D, Dicts), dict_field(D, name, N)), Names).   % from a list
+```
+
+To sort a list of dicts, use `predsort/3`: `sort/4` addresses arguments of a
+compound and a dict has none.
+
+**Batch a list into chunks.** There is no builtin; this is the definition:
+
+```prolog
+chunks([], _, []).
+chunks(List, N, [Chunk|Rest]) :-
+    N > 0,
+    length(Chunk, N),
+    append(Chunk, Tail, List),
+    chunks(Tail, N, Rest).
+chunks(List, N, [List]) :-
+    N > 0,
+    length(List, Len),
+    Len < N.
+% chunks([1,2,3,4,5], 2, L) -> L = [[1,2],[3,4],[5]]
+```
+
+### Traps
+
+- **`setof/3` and `bagof/3` fail when there are no solutions**; `findall/3` succeeds
+  with `[]`. Use `findall/3` unless you want that failure.
+- **`sort/2` silently removes duplicates.** Use `msort/2` to keep them.
+- **`max_list([])` fails**, and `sum_list([a,b])` raises a type error — guard a
+  possibly-empty or possibly-non-numeric list before aggregating.
+- **A nondeterministic goal inside `maplist`, `include` or `foldl` multiplies
+  solutions**, and re-runs any model call in it. Keep the goal semidet
+  (`once/1`, `->`, a cut).
+- **Not available in this build:** `nth0/4` (replace an element), `numlist/4` (range
+  with a step), `chunk/3`, `rename_keys/3`. Replace an element with
+  `nth0(I, L, _, Tail), nth0(I, New, V, Tail)`, and use `chunks/3` above.
 
 ### Arithmetic
 ```prolog

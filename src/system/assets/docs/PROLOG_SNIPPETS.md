@@ -90,7 +90,28 @@ pattern with `(?i)` for case-insensitive matching.
 | Group by key | `group_pairs_by_key([a-1,a-2,b-3], G)` | `[a-[1,2], b-[3]]` |
 
 `sort/4`'s first argument is the **argument position** to sort on (here `2` =
-the value in each `Key-Value`), not a sort mode.
+the value in each `Key-Value`), not a sort mode. It addresses arguments of a
+compound, so it does **not** work on dicts — use `predsort/3` for those.
+
+More, all verified:
+
+| Task | Snippet | Result |
+|---|---|---|
+| Reverse | `reverse([1,2,3], L)` | `[3,2,1]` |
+| 1-based index | `nth1(1, [a,b,c], E)` | `a` |
+| Remove one occurrence | `select(b, [a,b,c], L)` | `[a,c]` |
+| Membership, once | `memberchk(b, [a,b,c])` | true (no choice point) |
+| Generate blanks | `length(L, 3)` | `[_,_,_]` |
+| Zip | `pairs_keys_values(P, [a,b], [1,2])` | `[a-1,b-2]` |
+| Unzip | `pairs_keys/2` / `pairs_values/2` | `[a,b]` / `[1,2]` |
+| Keep only integers | `convlist([X,Y]>>(integer(X), Y is X*2), [1,a,3], L)` | `[2,6]` |
+| All of a type | `maplist(integer, [1,2,3])` | true |
+| Map over two lists | `maplist([A,B,C]>>(C is A+B), [1,2], [10,20], L)` | `[11,22]` |
+| Custom sort | `predsort([O,A,B]>>compare(O,A,B), [3,1,2], L)` | `[1,2,3]` |
+| Max by aggregate | `aggregate_all(max(N), member(N,[1,9,3]), M)` | `9` |
+| Drop empty strings | `exclude(==(""), ["",a,""], L)` | `[a]` |
+| Field from dicts | `json_gets(D, "rows.*.name", L)` | the field values |
+| Stable pairs sort | `msort([b-1,a-2,a-1], L)` | `[a-1,a-2,b-1]` |
 
 ## Dicts and data
 
@@ -123,6 +144,11 @@ the value in each `Key-Value`), not a sort mode.
   error. Use `dict_field/3,4` for model-produced dicts, whose key spelling varies.
 - `phrase/2` takes a **list**: `phrase(g(X), "text")` raises
   `type_error(list, "text")`. Convert first with `string_chars/2`.
+- **`setof/3` and `bagof/3` fail on an empty solution set**; `findall/3` gives `[]`.
+- **`sort/2` removes duplicates.** `msort/2` keeps them and is stable.
+- `max_list([])` fails; `sum_list([a,b])` raises a type error. Guard first.
+- **Not available in this build:** `nth0/4` (replace), `numlist/4` (step),
+  `chunk/3`, `rename_keys/3`.
 - A missing `json_get/3` path **fails**; use `json_get/4` for a default.
 - A top-level `:- use_module(library(clpfd)).` is required before `#=`/`ins`.
 - Untrusted data (URLs, file contents, user text) goes through files/stdin,
