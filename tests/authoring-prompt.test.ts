@@ -49,4 +49,14 @@ describe('the authoring prompt and the language reference', () => {
       expect(prefix, `the behavioural half should mention ${term}`).toContain(term);
     }
   });
+
+  it('tells the agent to edit only through the transaction tools', () => {
+    const prefix = behaviouralPrefix(prompt);
+    expect(prefix).toContain('Change the module only through those tools');
+    expect(prefix).toContain('consult');
+    // The rule names the tools it wants instead.
+    for (const tool of ['begin_turn', 'define', 'assert_many', 'end_turn']) {
+      expect(prefix).toContain(tool);
+    }
+  });
 });

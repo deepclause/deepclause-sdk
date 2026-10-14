@@ -1472,6 +1472,17 @@ A `.dml` file may contain directives. These are handled:
 retracting the last clause leaves an empty predicate whose calls fail silently.
 The bare fact form `repl_delete(Name/Arity).` works the same way.
 
+These apply to a file **loaded** into a session (`deepclause repl -l file.dml`).
+They are not the way to edit a live harness. `consult/1`, a file-list directive and
+`use_module/1` on a workspace `.dml` assert straight into the module rather than
+through the REPL's edit tools, so the predicates they add are absent from the
+transaction's tracked set — the nondeterminism probe does not see them, and a
+directive that fails inside the file only warns. They do still appear in the next
+commit's diff, so the change is recorded without any account of where it came from —
+and outside a transaction there is no snapshot, so nothing validates the load at all.
+An agent changing a harness adds code with `assert`/`assert_many`/`define` inside a
+transaction instead.
+
 Any other directive does nothing, and the loader now says so — it reports
 `unrecognised directive ignored: …` after the file loads, so a directive that
 never took effect is not mistaken for one that did. `dynamic/1`,

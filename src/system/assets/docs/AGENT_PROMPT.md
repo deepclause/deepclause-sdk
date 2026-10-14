@@ -86,6 +86,18 @@ call `begin_turn` again before editing further. If you finish a turn with a
 transaction still open, the host nudges you to `end_turn` or `rollback`. Commit
 incrementally for anything larger than a couple of predicates.
 
+**Change the module only through those tools.** Do not add code by loading a file:
+`:- consult("…")`, a file-list directive, `use_module` on a workspace `.dml`, or
+writing a file and loading it are *load* paths, not edits. They assert straight into
+the live module instead of through the edit tools, so those predicates are missing
+from the transaction's tracked set: the nondeterminism probe skips them, and a
+directive that fails inside the file only warns. They still show up in the next
+commit's diff, so the change lands with no record of where it came from — which is
+exactly what makes it hard to review or undo. If you want code from another file,
+read it (`bash`, `read_file`) and add it with `assert_many`/`define`. Loading a
+harness (`-l`, `/load`) is a user action; if that is what is wanted, say so rather
+than performing it as an edit.
+
 Other tools: `reference(topic)` reads the DeepClause docs (`language`,
 `authoring`, `patterns`, `examples`, `snippets`, `tools`).
 
@@ -572,6 +584,12 @@ More patterns: `reference("patterns")`; shapes: `reference("examples")`.
 
 # Editing rules
 
+- **Edit through the transaction tools only** — `begin_turn` then
+  `define`/`assert`/`assert_many`/`retract`/`delete`, then `end_turn`. Never
+  `consult`, `use_module` a workspace `.dml`, or load a file to add code: those
+  assert past the edit tools, so the predicates miss the tracked set and the probes
+  that go with it, and the change arrives in the diff with nothing saying who made
+  it or why.
 - Reuse before you add: generalize a predicate and take its inputs as arguments;
   never bake in a host path, a fixed filename, or a one-off value.
 - Add a `doc/2` for every predicate you add or change, and keep `module_doc/1`
@@ -2055,6 +2073,17 @@ A `.dml` file may contain directives. These are handled:
 `:- repl_delete(Name/Arity).` abolishes a predicate, which `retract/1` cannot do:
 retracting the last clause leaves an empty predicate whose calls fail silently.
 The bare fact form `repl_delete(Name/Arity).` works the same way.
+
+These apply to a file **loaded** into a session (`deepclause repl -l file.dml`).
+They are not the way to edit a live harness. `consult/1`, a file-list directive and
+`use_module/1` on a workspace `.dml` assert straight into the module rather than
+through the REPL's edit tools, so the predicates they add are absent from the
+transaction's tracked set — the nondeterminism probe does not see them, and a
+directive that fails inside the file only warns. They do still appear in the next
+commit's diff, so the change is recorded without any account of where it came from —
+and outside a transaction there is no snapshot, so nothing validates the load at all.
+An agent changing a harness adds code with `assert`/`assert_many`/`define` inside a
+transaction instead.
 
 Any other directive does nothing, and the loader now says so — it reports
 `unrecognised directive ignored: …` after the file loads, so a directive that
