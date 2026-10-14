@@ -185,6 +185,13 @@ export interface LLMBackendResponse {
 }
 
 export interface LLMBackend {
+  /**
+   * Change the reasoning level of the active model, when the backend supports it.
+   * Optional: a backend that cannot change it simply omits this.
+   */
+  setThinkingLevel?(level: string): void;
+  getThinkingLevel?(): string | undefined;
+  supportedThinkingLevels?(): string[];
   complete(request: LLMBackendRequest): Promise<LLMBackendResponse>;
 }
 

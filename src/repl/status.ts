@@ -90,7 +90,7 @@ function cloneTotals(totals: TokenUsageTotals): TokenUsageTotals {
 }
 
 export class ReplStatusTracker {
-  private readonly model: StatusModelInfo;
+  private model: StatusModelInfo;
   private contextWindow: number;
   private readonly totals = createTokenUsageTotals();
   private readonly byGroup: Record<StatusFrameGroup, TokenUsageTotals> = {
@@ -196,6 +196,11 @@ export class ReplStatusTracker {
     const observed = isAgent ? this.lastPromptTokens.agent : this.lastPromptTokens.child;
     const fallback = isAgent ? this.estimated.agent : this.estimated.harness;
     return emptyContext(this.contextWindow, observed ?? fallback);
+  }
+
+  /** Update the reasoning level shown next to the model. */
+  setThinkingLevel(level: string | undefined): void {
+    this.model = { ...this.model, thinkingLevel: level };
   }
 
   snapshot(): ReplStatusSnapshot {

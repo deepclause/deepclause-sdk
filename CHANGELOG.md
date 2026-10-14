@@ -40,15 +40,20 @@
 
 ### Added
 
-- **Model and reasoning pickers in the TUI.** `/model` with no argument opens a
-  chooser of the models the session can switch to (with prices or context size), and
-  `/reasoning` opens `off` / `summary` / `full`. Both are overlays over the
-  transcript: the list takes the keys while it is up, and Escape closes it. The
-  reasoning choice applies **immediately** — it is a rendering setting, so the next
-  reasoning chunk obeys it — while the model choice sets the workspace default and
-  says that it takes effect on the next start, because the session has no live
-  model-switch API to call (`with_model/2` scopes one call, it does not change the
-  session).
+- **Model and reasoning pickers in the TUI**, over the transcript: the list takes the
+  keys while it is up, Escape closes it, and focus returns to the editor.
+  - `/model` with no argument — the models this session can switch to, with prices or
+    context size. Sets the workspace default; it says "takes effect on the next
+    start", because the session has no live model-switch API (`with_model/2` scopes
+    one call, it does not change the session).
+  - `/reasoning [level]` — the model's reasoning **level** (its thinking effort:
+    `off`…`max`), offering the levels that model accepts. Applies immediately: the
+    backend resolves the level per call instead of capturing it.
+  - `/show-reasoning` (alias `/reasoning-summary`) — how much of that reasoning is
+    **displayed**: `off` / `summary` / `full`. Also applies immediately.
+  - A setting is applied even when it cannot be saved: `updateConfig` needs an
+    existing config file, and letting that failure abort the picker made the
+    selection do nothing at all.
 
 ### Fixed
 

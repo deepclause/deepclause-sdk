@@ -37,7 +37,7 @@ import {
 import { editorTheme, formatInputAnswer } from '../repl/tui/theme.js';
 import { PromptEditor } from '../repl/tui/editor.js';
 import { loadProjectContext } from '../repl/project-context.js';
-import { createPiBackend } from '../repl/backend.js';
+import { createPiBackend, THINKING_LEVELS } from '../repl/backend.js';
 import { createReplToolset, type ReplToolset } from '../repl/toolset.js';
 import { takeStartupPrologMessages } from '../prolog/loader.js';
 import { createPiImageBackend } from '../repl/imagegen.js';
@@ -114,7 +114,8 @@ export type ReplInput =
   | { kind: 'rollback' }
   | { kind: 'compact'; instructions?: string }
   | { kind: 'model'; model?: string }
-  | { kind: 'reasoning' }
+  | { kind: 'reasoning'; level?: string }
+  | { kind: 'show-reasoning' }
   | { kind: 'export'; path?: string }
   | { kind: 'freeze' }
   | { kind: 'unfreeze' }
@@ -213,7 +214,11 @@ export function classifyReplInput(line: string): ReplInput {
       case 'model':
         return { kind: 'model', model: arg || undefined };
       case 'reasoning':
-        return { kind: 'reasoning' };
+      case 'reasoning-level':
+        return { kind: 'reasoning', level: arg || undefined };
+      case 'show-reasoning':
+      case 'reasoning-summary':
+        return { kind: 'show-reasoning' };
       case 'freeze':
         return { kind: 'freeze' };
       case 'unfreeze':
@@ -368,6 +373,10 @@ export interface ReplRuntime {
   reasoningMode: 'off' | 'summary' | 'full';
   /** Models this session can switch to, for the model picker. */
   modelResolver?: ModelResolver;
+  /** The backend, so a picker can change the reasoning level live. */
+  llmBackend?: import('../types.js').LLMBackend;
+  /** Set the reasoning level shown in the status bar. */
+  setThinkingLevel?: (level: string | undefined) => void;
   thinkingLevel?: string;
   /** Session id of this run. */
   sessionId: string;
@@ -649,6 +658,8 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
     reasoning,
     reasoningMode: options.showReasoning ?? config.repl.showReasoning,
     modelResolver,
+    llmBackend,
+    setThinkingLevel: (level) => statusTracker.setThinkingLevel(level),
     thinkingLevel,
     sessionId: repl.session.getSessionId(),
     harnessName,
@@ -1441,7 +1452,63 @@ export async function runTui(
     const mode = picked as 'off' | 'summary' | 'full';
     runtime.reasoningMode = mode;
     runtime.renderer.setReasoningMode?.(mode);
-    renderer.writeLine(`reasoning: ${mode}`);
+    await persistSetting({ repl: { showReasoning: mode } }, 'reasoning display');
+    renderer.writeLine(`reasoning display: ${mode}`);
+  };
+
+  /**
+   * The model's reasoning level (its thinking effort), as opposed to how much of
+   * that reasoning is displayed — `/show-reasoning` is the other one.
+   */
+  /**
+   * Persist a setting, but never let that failure stop it applying.
+   *
+   * `updateConfig` requires an existing config file (`deepclause init`), and a
+   * picker that threw before applying the change left the selection doing nothing at
+   * all — which read as "I cannot adjust the reasoning".
+   */
+  const persistSetting = async (patch: Record<string, unknown>, label: string): Promise<void> => {
+    try {
+      await updateConfig(runtime.workspace, patch);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      renderer.writeLine(`${label} applied to this session, but not saved: ${message.split('\n')[0]}`);
+    }
+  };
+
+  const pickReasoningLevel = async (level?: string): Promise<void> => {
+    const backend = runtime.llmBackend;
+    const supported = (backend?.supportedThinkingLevels?.() ?? THINKING_LEVELS.slice()) as string[];
+    const apply = async (chosen: string): Promise<void> => {
+      backend?.setThinkingLevel?.(chosen);
+      runtime.thinkingLevel = chosen;
+      runtime.setThinkingLevel?.(chosen);
+      await persistSetting({ backend: { kind: 'pi', thinkingLevel: chosen } }, 'reasoning level');
+      renderer.writeLine(`reasoning level: ${chosen}`);
+    };
+
+    if (level) {
+      if (!supported.includes(level)) {
+        renderer.writeLine(`unknown reasoning level '${level}'; supported: ${supported.join(', ')}`);
+        return;
+      }
+      await apply(level);
+      return;
+    }
+
+    const chosen = await choose((done) => new ChoicePicker({
+      title: 'Reasoning level',
+      hint: 'How hard the model is asked to think (not how much is shown)',
+      current: runtime.thinkingLevel,
+      items: supported.map((value) => ({
+        value,
+        label: value,
+        description: value === 'off' ? 'no reasoning requested' : undefined,
+      })),
+      onSelect: (item) => done(item.value),
+      onCancel: () => done(),
+    }));
+    if (chosen) await apply(chosen);
   };
 
   const pickModel = async (): Promise<void> => {
@@ -1466,7 +1533,7 @@ export async function runTui(
       onCancel: () => done(),
     }));
     if (!picked) return;
-    await updateConfig(runtime.workspace, { backend: { kind: 'pi', model: picked } });
+    await persistSetting({ backend: { kind: 'pi', model: picked } }, 'model');
     renderer.writeLine(`default model set to ${picked} (takes effect on the next start)`);
   };
   // Transcript grows and scrolls; everything below it stays put.
@@ -1506,7 +1573,8 @@ export async function runTui(
       // The pickers are overlays over the transcript, so they need the TUI and are
       // handled here rather than in the command dispatcher the readline path shares.
       if (input.kind === 'model' && !input.model) { await pickModel(); continue; }
-      if (input.kind === 'reasoning') { await pickReasoningMode(); continue; }
+      if (input.kind === 'reasoning') { await pickReasoningLevel(input.level); continue; }
+      if (input.kind === 'show-reasoning') { await pickReasoningMode(); continue; }
 
       const controller = new AbortController();
       holder.turn = controller;

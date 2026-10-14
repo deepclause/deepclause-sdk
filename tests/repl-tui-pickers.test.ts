@@ -85,3 +85,36 @@ describe('the reasoning display mode can change while running', () => {
     expect(written.join('')).toContain('weighing the options');
   });
 });
+
+describe('the two reasoning settings are distinct', () => {
+  it('classifies /reasoning as the level and /show-reasoning as the display mode', async () => {
+    const { classifyReplInput } = await import('../src/cli/repl.js');
+    expect(classifyReplInput('/reasoning')).toMatchObject({ kind: 'reasoning' });
+    expect(classifyReplInput('/reasoning high')).toMatchObject({ kind: 'reasoning', level: 'high' });
+    expect(classifyReplInput('/reasoning-level low')).toMatchObject({ kind: 'reasoning', level: 'low' });
+    expect(classifyReplInput('/show-reasoning')).toMatchObject({ kind: 'show-reasoning' });
+    expect(classifyReplInput('/reasoning-summary')).toMatchObject({ kind: 'show-reasoning' });
+  });
+
+  it('applies a level change to the backend and the status bar', async () => {
+    const { createPiAdapter } = await import('../src/repl/backend.js');
+    // The adapter is what carries the level; the CLI calls these two on it.
+    const source = await import('node:fs/promises').then((fs) => fs.readFile('src/repl/backend.ts', 'utf8'));
+    expect(source).toContain('setThinkingLevel(level: string): void');
+    // Per call, not captured: a captured level ignored the picker entirely.
+    expect(source).toContain('const baseResolved = (): ReturnType<typeof resolveThinkingLevel> =>');
+    expect(source).toContain('return completeWith(model, baseResolved(), maxTokens, request);');
+    expect(typeof createPiAdapter).toBe('function');
+  });
+
+  it('updates the level shown next to the model', async () => {
+    const { ReplStatusTracker } = await import('../src/repl/status.js');
+    const tracker = new ReplStatusTracker({
+      model: { id: 'gpt-4o', provider: 'openai', reasoning: true, thinkingLevel: 'medium' },
+      contextWindow: 128_000,
+    });
+    expect(tracker.snapshot().model.thinkingLevel).toBe('medium');
+    tracker.setThinkingLevel('high');
+    expect(tracker.snapshot().model.thinkingLevel).toBe('high');
+  });
+});

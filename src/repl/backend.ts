@@ -268,7 +268,11 @@ export function createPiAdapter(
     throw new Error(`pi has no configured authentication for ${modelLabel(model)}`);
   }
 
-  const baseResolved = resolveThinkingLevel(model, thinkingLevel);
+  // Resolved per call rather than once: the reasoning level is a setting the user can
+  // change while the session runs, and a captured value would ignore it.
+  let currentThinkingLevel = thinkingLevel;
+  const baseResolved = (): ReturnType<typeof resolveThinkingLevel> =>
+    resolveThinkingLevel(model, currentThinkingLevel);
 
   // Per-call model overrides from `with_model/2`, resolved lazily and cached.
   const scoped = new Map<string, { model: PiModelLike; resolved: ReturnType<typeof resolveThinkingLevel> }>();
@@ -391,7 +395,17 @@ export function createPiAdapter(
         const entry = resolveScoped(request.target);
         return completeWith(entry.model, entry.resolved, request.target.maxTokens ?? maxTokens, request);
       }
-      return completeWith(model, baseResolved, maxTokens, request);
+      return completeWith(model, baseResolved(), maxTokens, request);
+    },
+    /** Change the reasoning level for subsequent calls. */
+    setThinkingLevel(level: string): void {
+      currentThinkingLevel = level;
+    },
+    getThinkingLevel(): string | undefined {
+      return currentThinkingLevel;
+    },
+    supportedThinkingLevels(): ThinkingLevel[] {
+      return baseResolved().supported;
     },
   };
 
@@ -403,9 +417,9 @@ export function createPiAdapter(
     contextWindow: model.contextWindow,
     maxTokens,
     reasoning: Boolean(model.reasoning),
-    thinkingLevel: baseResolved.level,
-    supportedThinkingLevels: baseResolved.supported,
-    warning: baseResolved.warning,
+    thinkingLevel: baseResolved().level,
+    supportedThinkingLevels: baseResolved().supported,
+    warning: baseResolved().warning,
   };
 }
 
