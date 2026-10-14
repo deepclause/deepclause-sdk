@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.3 - 2026-10-14
 
 ### Changed
 
@@ -11,6 +11,13 @@
   that path, which is why the transcript previously scrolled with the terminal's
   scrollback and the layout was fragile when the terminal was resized. `--plain`,
   `--json` and non-TTY output are unchanged and still use the line renderer.
+
+- **Esc interrupts a turn; Ctrl-C exits.** Ctrl-C used to abort the turn and need a
+  second press to leave, which made it ambiguous whether a session was still alive.
+  Escape now interrupts (leaving its usual meaning alone while a completion list or
+  a search overlay owns it), and Ctrl-C exits the REPL — aborting a running turn
+  first so nothing keeps writing after the UI is gone. The readline path exits on
+  Ctrl-C too, since it has no raw key to tell Escape apart from an editing sequence.
 
 ### Added
 
@@ -28,17 +35,6 @@
 - **Pi's theme is adopted** for the component layer: markdown and editor themes come
   from pi, and colours go through pi-tui's styler, so the terminal's colour mode is
   handled for us. A fallback palette is used if pi's theme cannot be resolved.
-
-### Changed
-
-- **Esc interrupts a turn; Ctrl-C exits.** Ctrl-C used to abort the turn and need a
-  second press to leave, which made it ambiguous whether a session was still alive.
-  Escape now interrupts (leaving its usual meaning alone while a completion list or
-  a search overlay owns it), and Ctrl-C exits the REPL — aborting a running turn
-  first so nothing keeps writing after the UI is gone. The readline path exits on
-  Ctrl-C too, since it has no raw key to tell Escape apart from an editing sequence.
-
-### Added
 
 - **Model and reasoning pickers in the TUI**, over the transcript: the list takes the
   keys while it is up, Escape closes it, and focus returns to the editor.
