@@ -109,9 +109,10 @@ import {
   styleText,
   type Color,
   type MarkdownTheme,
+  type SelectListTheme,
   type TextStyle,
 } from '@earendil-works/pi-tui';
-import { getMarkdownTheme, initTheme } from '@earendil-works/pi-coding-agent';
+import { getMarkdownTheme, getSelectListTheme, initTheme } from '@earendil-works/pi-coding-agent';
 
 let themeInitialized = false;
 
@@ -219,4 +220,33 @@ export function tuiEditorTheme(): EditorTheme {
   if (cachedEditorTheme) return cachedEditorTheme;
   cachedEditorTheme = editorTheme();
   return cachedEditorTheme;
+}
+
+/** Fallback list theme, used only if pi's cannot be resolved. */
+function fallbackSelectListTheme(): SelectListTheme {
+  return {
+    selectedPrefix: (text: string) => tuiStyle.accent(text),
+    selectedText: (text: string) => paintToken('title', text, { bold: true }),
+    description: (text: string) => tuiStyle.dim(text),
+    scrollInfo: (text: string) => tuiStyle.dim(text),
+    noMatch: (text: string) => tuiStyle.dim(text),
+  };
+}
+
+let cachedSelectListTheme: SelectListTheme | undefined;
+
+/** Selection-list theme: pi's, so pickers look like the rest of pi. */
+export function selectListTheme(): SelectListTheme {
+  if (cachedSelectListTheme) return cachedSelectListTheme;
+  try {
+    initTuiTheme();
+    const theme = getSelectListTheme();
+    // pi's theme functions are lazy and throw when the theme was never initialized.
+    theme.selectedPrefix('probe');
+    cachedSelectListTheme = theme;
+    return theme;
+  } catch {
+    cachedSelectListTheme = fallbackSelectListTheme();
+    return cachedSelectListTheme;
+  }
 }

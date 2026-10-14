@@ -299,6 +299,10 @@ export interface ReplEventRenderer {
   writeErrorLine(text: string): void;
   listing(text: string): string;
   image(lines: string[]): void;
+  /** Change the reasoning display mode at runtime (TUI picker). */
+  setReasoningMode?(mode: 'off' | 'summary' | 'full'): void;
+  /** The current reasoning display mode, when the renderer tracks one. */
+  getReasoningMode?(): 'off' | 'summary' | 'full';
   /**
    * Close any open streamed-text block. The TUI implements this so a new turn's
    * text cannot be appended to the previous turn's and render above the prompt.
@@ -315,7 +319,7 @@ export class ReplRenderer implements ReplEventRenderer {
   private readonly verbose: boolean;
   private readonly showStream: boolean;
   private readonly showEvents: boolean;
-  private readonly reasoningMode: 'off' | 'summary' | 'full';
+  private reasoningMode: 'off' | 'summary' | 'full';
   private readonly markdownEnabled: boolean;
   private readonly markdown = new MarkdownStream();
   private pendingTextEvent?: DMLEvent;
@@ -391,6 +395,20 @@ export class ReplRenderer implements ReplEventRenderer {
    * Suppress `input_required` prompt lines. The TUI editor shows the question in
    * its border, so a transcript line would be a duplicate.
    */
+  /**
+   * Change how much model reasoning is shown, while the session is running.
+   *
+   * The setting is a rendering choice, so it applies to the next reasoning chunk
+   * rather than to a new session — which is what a picker in the TUI should do.
+   */
+  setReasoningMode(mode: 'off' | 'summary' | 'full'): void {
+    this.reasoningMode = mode;
+  }
+
+  getReasoningMode(): 'off' | 'summary' | 'full' {
+    return this.reasoningMode;
+  }
+
   setSuppressInputPrompt(suppress: boolean): void {
     this.suppressInputPrompt = suppress;
   }

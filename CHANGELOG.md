@@ -38,6 +38,18 @@
   first so nothing keeps writing after the UI is gone. The readline path exits on
   Ctrl-C too, since it has no raw key to tell Escape apart from an editing sequence.
 
+### Added
+
+- **Model and reasoning pickers in the TUI.** `/model` with no argument opens a
+  chooser of the models the session can switch to (with prices or context size), and
+  `/reasoning` opens `off` / `summary` / `full`. Both are overlays over the
+  transcript: the list takes the keys while it is up, and Escape closes it. The
+  reasoning choice applies **immediately** — it is a rendering setting, so the next
+  reasoning chunk obeys it — while the model choice sets the workspace default and
+  says that it takes effect on the next start, because the session has no live
+  model-switch API to call (`with_model/2` scopes one call, it does not change the
+  session).
+
 ### Fixed
 
 - **A turn's streamed reply rendered *above* the prompt that asked for it.** The

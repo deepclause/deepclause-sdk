@@ -282,6 +282,14 @@ export class TuiRenderer {
     this.text.setSuppressInputPrompt(suppress);
   }
 
+  setReasoningMode(mode: 'off' | 'summary' | 'full'): void {
+    this.text.setReasoningMode(mode);
+  }
+
+  getReasoningMode(): 'off' | 'summary' | 'full' {
+    return this.text.getReasoningMode();
+  }
+
   getWidth(): number {
     return this.text.getWidth();
   }

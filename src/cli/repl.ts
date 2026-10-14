@@ -18,6 +18,7 @@ import { HistoryStore } from '../repl/history.js';
 import { resolveReplJudgeSelection } from '../repl/judge.js';
 import { ReplRenderer, type RenderMode, type ReplEventRenderer } from '../repl/render.js';
 import { TranscriptDocument } from '../repl/tui/document.js';
+import { ChoicePicker } from '../repl/tui/picker.js';
 import { TuiRenderer } from '../repl/tui/renderer.js';
 import { WorkingLine } from '../repl/tui/working-line.js';
 import { createReplAutocomplete } from '../repl/tui/autocomplete.js';
@@ -113,6 +114,7 @@ export type ReplInput =
   | { kind: 'rollback' }
   | { kind: 'compact'; instructions?: string }
   | { kind: 'model'; model?: string }
+  | { kind: 'reasoning' }
   | { kind: 'export'; path?: string }
   | { kind: 'freeze' }
   | { kind: 'unfreeze' }
@@ -210,6 +212,8 @@ export function classifyReplInput(line: string): ReplInput {
         return { kind: 'export', path: arg || undefined };
       case 'model':
         return { kind: 'model', model: arg || undefined };
+      case 'reasoning':
+        return { kind: 'reasoning' };
       case 'freeze':
         return { kind: 'freeze' };
       case 'unfreeze':
@@ -360,6 +364,10 @@ export interface ReplRuntime {
   /** Active model capabilities (pi backend), used by the status bar. */
   contextWindow?: number;
   reasoning: boolean;
+  /** How much model reasoning the renderer shows (the picker changes this live). */
+  reasoningMode: 'off' | 'summary' | 'full';
+  /** Models this session can switch to, for the model picker. */
+  modelResolver?: ModelResolver;
   thinkingLevel?: string;
   /** Session id of this run. */
   sessionId: string;
@@ -639,6 +647,8 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
     backend: backendKind,
     contextWindow,
     reasoning,
+    reasoningMode: options.showReasoning ?? config.repl.showReasoning,
+    modelResolver,
     thinkingLevel,
     sessionId: repl.session.getSessionId(),
     harnessName,
@@ -1388,6 +1398,77 @@ export async function runTui(
 
   createEditor();
   for (const line of runtime.inputHistory) editor?.addToHistory(line);
+
+  /**
+   * Show a chooser over the transcript and resolve when it closes.
+   *
+   * The overlay owns input while it is up (pi-tui routes keys to the focused
+   * overlay), so the editor does not see the keys the list is using.
+   */
+  const choose = (build: (done: (picked?: string) => void) => ChoicePicker): Promise<string | undefined> => {
+    return new Promise((resolve) => {
+      let handle: { hide(): void } | undefined;
+      const done = (picked?: string): void => {
+        handle?.hide();
+        if (editor) tui.setFocus(editor);
+        tui.requestRender();
+        resolve(picked);
+      };
+      const picker = build(done);
+      handle = tui.showOverlay(picker, {
+        anchor: 'center',
+        width: '70%',
+        maxHeight: picker.contentHeight + 2,
+      });
+    });
+  };
+
+  const pickReasoningMode = async (): Promise<void> => {
+    const modes: Array<'off' | 'summary' | 'full'> = ['off', 'summary', 'full'];
+    const picked = await choose((done) => new ChoicePicker({
+      title: 'Reasoning',
+      hint: 'How much of the model\'s thinking to show in the transcript',
+      current: runtime.reasoningMode,
+      items: [
+        { value: 'off', label: 'off', description: 'hide reasoning entirely' },
+        { value: 'summary', label: 'summary', description: 'a bounded preview' },
+        { value: 'full', label: 'full', description: 'everything the model emits' },
+      ].filter((item) => modes.includes(item.value as 'off')),
+      onSelect: (item) => done(item.value),
+      onCancel: () => done(),
+    }));
+    if (!picked) return;
+    const mode = picked as 'off' | 'summary' | 'full';
+    runtime.reasoningMode = mode;
+    runtime.renderer.setReasoningMode?.(mode);
+    renderer.writeLine(`reasoning: ${mode}`);
+  };
+
+  const pickModel = async (): Promise<void> => {
+    const catalog = runtime.modelResolver?.catalog() ?? [];
+    if (catalog.length === 0) {
+      renderer.writeLine(`model: ${runtime.model} (no catalog to choose from; set one in config)`);
+      return;
+    }
+    const current = runtime.model.includes(':') ? runtime.model : undefined;
+    const picked = await choose((done) => new ChoicePicker({
+      title: 'Model',
+      hint: 'The default for this workspace (applies to the next session)',
+      current,
+      items: catalog.map((entry) => ({
+        value: entry.model,
+        label: entry.model,
+        description: entry.inputCost !== undefined
+          ? `$${entry.inputCost}/$${entry.outputCost ?? '?'} per 1M in/out`
+          : (entry.contextWindow ? `${Math.round(entry.contextWindow / 1000)}k context` : undefined),
+      })),
+      onSelect: (item) => done(item.value),
+      onCancel: () => done(),
+    }));
+    if (!picked) return;
+    await updateConfig(runtime.workspace, { backend: { kind: 'pi', model: picked } });
+    renderer.writeLine(`default model set to ${picked} (takes effect on the next start)`);
+  };
   // Transcript grows and scrolls; everything below it stays put.
   const scroll = new ScrollView(document, {
     follow: 'end',
@@ -1422,6 +1503,10 @@ export async function runTui(
       if (line === null) break;
       const input = classifyReplInput(line);
       if (input.kind === 'halt') break;
+      // The pickers are overlays over the transcript, so they need the TUI and are
+      // handled here rather than in the command dispatcher the readline path shares.
+      if (input.kind === 'model' && !input.model) { await pickModel(); continue; }
+      if (input.kind === 'reasoning') { await pickReasoningMode(); continue; }
 
       const controller = new AbortController();
       holder.turn = controller;
