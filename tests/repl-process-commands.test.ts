@@ -15,8 +15,9 @@ describe('classifyReplInput subagent commands', () => {
   });
 
   it('classifies /ps and its alias', () => {
-    expect(classifyReplInput('/ps')).toEqual({ kind: 'ps' });
-    expect(classifyReplInput('/processes')).toEqual({ kind: 'ps' });
+    expect(classifyReplInput('/ps')).toEqual({ kind: 'ps', watch: false });
+    expect(classifyReplInput('/processes')).toEqual({ kind: 'ps', watch: false });
+    expect(classifyReplInput('/ps --watch')).toEqual({ kind: 'ps', watch: true });
   });
 
   it('classifies /send and /call with a target and message', () => {

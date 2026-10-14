@@ -18,6 +18,7 @@ import { HistoryStore } from '../repl/history.js';
 import { resolveReplJudgeSelection } from '../repl/judge.js';
 import { ReplRenderer, type RenderMode, type ReplEventRenderer } from '../repl/render.js';
 import { TranscriptDocument } from '../repl/tui/document.js';
+import { ServicesPanel } from '../repl/tui/services-panel.js';
 import { formatProcessTable } from '../repl/harness-tools.js';import { ChoicePicker } from '../repl/tui/picker.js';
 import { HarnessView } from '../repl/tui/harness-view.js';
 import { TuiRenderer } from '../repl/tui/renderer.js';
@@ -137,7 +138,7 @@ export type ReplInput =
   | { kind: 'goal'; goal: string }
   | { kind: 'prompt'; prompt: string }
   | { kind: 'spawn'; goal: string; name?: string }
-  | { kind: 'ps' }
+  | { kind: 'ps'; watch?: boolean }
   | { kind: 'send'; target: string; message: string }
   | { kind: 'call'; target: string; message: string }
   | { kind: 'stop'; target: string }
@@ -259,8 +260,10 @@ export function classifyReplInput(line: string): ReplInput {
       case 'serve':
         return arg ? { kind: 'spawn', goal: arg } : { kind: 'unknown-command', name: 'spawn (missing goal)' };
       case 'ps':
-      case 'processes':
-        return { kind: 'ps' };
+      case 'processes': {
+        const watch = /(?:^|\s)--watch(?:\s|$)/.test(arg);
+        return { kind: 'ps', watch };
+      }
       case 'send':
       case 'cast': {
         const [target, ...rest] = arg.split(/\s+/);
@@ -1043,7 +1046,7 @@ function helpText(): string {
     '',
     '  Commands',
     '    /spawn <goal>        start a session-scoped subagent (alias /serve)',
-    '    /ps                  list subagents and their state',
+    '    /ps [--watch]        list subagents; --watch pins a live panel',
     '    /send <name> <msg>   send a DML term to a subagent (alias /cast)',
     '    /call <name> <msg>   request/reply with a service subagent',
     '    /stop <name>         stop a subagent',
@@ -1687,6 +1690,11 @@ export async function runTui(
   });
   harnessView.refresh();
   let harnessVisible = options.harnessView ?? false;
+  let servicesVisible = false;
+  const servicesPanel = new ServicesPanel({
+    getProcesses: () => runtime.repl.session.processes(),
+    isVisible: () => servicesVisible,
+  });
   const refreshHarness = (): void => {
     if (!harnessVisible) return;
     harnessView.refresh();
@@ -1695,6 +1703,13 @@ export async function runTui(
   // Poll while the view is open. It is meant to be watched, and a change has to be
   // visible when it happens, not at the next turn boundary.
   const harnessTimer = setInterval(refreshHarness, 600);
+  const servicesTimer = setInterval(() => {
+    if (!servicesVisible) return;
+    const active = runtime.repl.session
+      .processes()
+      .some((process) => ['running', 'runnable', 'waiting', 'input'].includes(process.state));
+    if (active) tui.requestRender();
+  }, 600);
 
   // Transcript grows and scrolls; everything below it stays put.
   const scroll = new ScrollView(document, {
@@ -1710,6 +1725,7 @@ export async function runTui(
   // do not consume scrollback.
   const dock = new VStack([
     { component: working, basis: 'auto', grow: 0, shrink: 1, minSize: 0 },
+    { component: servicesPanel, basis: 'auto', grow: 0, shrink: 1, minSize: 0 },
     { component: new Spacer(1), basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
     { component: editorContainer, basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
     { component: statusBar, basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
@@ -1757,6 +1773,11 @@ export async function runTui(
         await handleHarnessCommand(input.width);
         continue;
       }
+      if (input.kind === 'ps' && input.watch) {
+        servicesVisible = !servicesVisible;
+        tui.requestRender();
+        continue;
+      }
 
       const controller = new AbortController();
       holder.turn = controller;
@@ -1786,6 +1807,7 @@ export async function runTui(
     process.off('SIGINT', exitRepl);
     process.stdout.off('resize', onResize);
     clearInterval(harnessTimer);
+    clearInterval(servicesTimer);
     working.stop();
     // Restore stdout so the exit footer and any later output are visible.
     runtime.renderer.setSink(
