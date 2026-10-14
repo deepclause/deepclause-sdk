@@ -31,6 +31,11 @@
 
 ### Fixed
 
+- **The TUI drew a 24-row frame in a taller terminal.** pi-tui asks the stream for
+  its size (`process.stdout.rows || LINES || 24`), and when the stream reports none
+  the fallback is a hard-coded 24, so the UI occupied the top of the screen and
+  left the rest untouched. It now asks the tty directly (`stty size`) when the
+  stream cannot answer, refreshed on resize.
 - **Constructing a pi-tui `Loader` started a timer that kept the process alive.**
   The REPL never exited after `/halt` because of it. The indicator is now parked
   until there is work, and stopped on exit.

@@ -22,11 +22,11 @@ import { TuiRenderer } from '../repl/tui/renderer.js';
 import { WorkingLine } from '../repl/tui/working-line.js';
 import { createReplAutocomplete } from '../repl/tui/autocomplete.js';
 import { initTuiTheme, scrollbarStyles } from '../repl/tui/theme.js';
+import { SizedTerminal } from '../repl/tui/terminal.js';
 import { ReplStatusTracker, type ReplStatusSnapshot } from '../repl/status.js';
 import { StatusBarComponent } from '../repl/tui/status-bar.js';
 import {
   Container,
-  ProcessTerminal,
   ScrollView,
   TuiAltScreen,
   VStack,
@@ -1185,7 +1185,9 @@ export async function runTui(
   loaded: string[] = [],
 ): Promise<number> {
   initTuiTheme();
-  const terminal = new ProcessTerminal();
+  // Sized, because pi-tui falls back to a hard 24 rows when the stream reports no
+  // size, which leaves the bottom of a taller terminal untouched.
+  const terminal = new SizedTerminal();
   // Fullscreen: an application-owned viewport (ScrollView) with the editor and
   // status bar pinned in a dock. In this mode pi-tui hands scrolling, mouse wheel,
   // text selection and search to the viewport, and reassigns layout on resize —
@@ -1228,6 +1230,7 @@ export async function runTui(
   // pi-tui re-renders on resize but does not invalidate the component tree, and a
   // component that caches by width (a tool pane, markdown) would draw stale lines.
   const onResize = (): void => {
+    terminal.refreshSize();
     renderer.setWidth(terminal.columns);
     tui.invalidate();
     tui.requestRender();

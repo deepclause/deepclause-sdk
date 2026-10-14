@@ -11,6 +11,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { visibleWidth } from '@earendil-works/pi-tui';
 
 import { TranscriptDocument } from '../src/repl/tui/document.js';
+import { SizedTerminal } from '../src/repl/tui/terminal.js';
 import { DmlToolPane } from '../src/repl/tui/tool-pane.js';
 import { WorkingLine } from '../src/repl/tui/working-line.js';
 import { TuiRenderer } from '../src/repl/tui/renderer.js';
@@ -214,5 +215,49 @@ describe('TuiRenderer', () => {
   it('reports nothing to toggle when there are no tool calls', () => {
     const { renderer } = build();
     expect(renderer.toggleLastPane()).toBe(false);
+  });
+});
+
+describe('the frame fills the terminal', () => {
+  it('stretches the transcript and pins the dock to the bottom row', async () => {
+    // The layout pass the alternate screen runs (`renderLayoutFrame`), not the
+    // component `render(width)` — the height distribution only happens there, which
+    // is why "it does not use the full height" was not visible to component tests.
+    const { renderLayoutFrame } = await import('@earendil-works/pi-tui/dist/layout.js');
+    const { ScrollView, VStack, Text } = await import('@earendil-works/pi-tui');
+
+    const document = new Text('one\ntwo', 0, 0);
+    const scroll = new ScrollView(document, { follow: 'end', primary: true });
+    const dock = new VStack([
+      { component: new Text('editor', 0, 0), basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
+      { component: new Text('status', 0, 0), basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
+    ]);
+    const root = new VStack([
+      { component: scroll, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+      { component: dock, basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
+    ]);
+
+    const frame = renderLayoutFrame(root, 60, 24, () => {});
+    expect(frame.lines).toHaveLength(24);
+    expect(text(frame.lines).trimEnd().split('\n').slice(-2).map((l) => l.trim())).toEqual(['editor', 'status']);
+  });
+});
+
+describe('SizedTerminal', () => {
+  it('always reports a usable size, never NaN', () => {
+    // `rows`/`columns` feed `Math.floor` inside the layout; a NaN there renders
+    // nothing at all, which is what chaining `Number(process.env.LINES)` did.
+    const terminal = new SizedTerminal();
+    for (const value of [terminal.rows, terminal.columns]) {
+      expect(Number.isInteger(value)).toBe(true);
+      expect(value).toBeGreaterThan(0);
+    }
+  });
+
+  it('prefers the stream, and lets the fallback be refreshed', () => {
+    const terminal = new SizedTerminal();
+    expect(terminal.rows).toBe(Math.max(1, terminal.rows));
+    terminal.refreshSize();
+    expect(terminal.rows).toBeGreaterThan(0);
   });
 });
