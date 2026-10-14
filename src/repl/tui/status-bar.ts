@@ -1,8 +1,10 @@
 /**
  * Fixed status bar for the REPL TUI (pi-style footer).
  *
- * Two lines: workspace/session/backend, then token totals, context usage for
- * the active frame slot, and the current model (with reasoning level).
+ * One row: where the harness lives and what it is doing on the left, the model on
+ * the right, and the token/context counters in between. Anything that does not fit
+ * is dropped whole, in priority order (see `render`), so a narrow terminal loses
+ * detail instead of showing truncated fragments.
  */
 
 import { truncateToWidth, visibleWidth, type Component } from '@earendil-works/pi-tui';
@@ -27,15 +29,21 @@ export interface StatusBarOptions {
   isRunning?: () => boolean;
 }
 
-/** `~/src/project` instead of `/home/me/src/project`, and `…/gh/project` when long. */
-function shortenPath(path: string, maxWidth = 28): string {
+/**
+ * The workspace, as short as it can be while still identifying it.
+ *
+ * A single row cannot afford `/home/me/git/org/project` — it takes half the line
+ * and pushes the model and counters off it — so this falls back to the parent and
+ * name (`…/org/project`) and then to the name alone.
+ */
+function shortenPath(path: string, maxWidth = 24): string {
   const home = process.env.HOME;
-  let shown = home && path.startsWith(home) ? `~${path.slice(home.length)}` : path;
-  if (visibleWidth(shown) > maxWidth) {
-    const parts = shown.split('/').filter(Boolean);
-    shown = `…/${parts.slice(-2).join('/')}`;
-  }
-  return shown;
+  const shown = home && path.startsWith(home) ? `~${path.slice(home.length)}` : path;
+  if (visibleWidth(shown) <= maxWidth) return shown;
+  const parts = shown.split('/').filter(Boolean);
+  const parentAndName = `…/${parts.slice(-2).join('/')}`;
+  if (visibleWidth(parentAndName) <= maxWidth) return parentAndName;
+  return `…/${parts[parts.length - 1] ?? shown}`;
 }
 
 /**
@@ -67,7 +75,7 @@ function joinFitting(segments: Array<string | undefined>, width: number, separat
  * The counters are dropped whole before the model is touched: a run is identified
  * by its model, and a half-printed counter is worse than a missing one.
  */
-function spread(left: string[], right: string, width: number): string {
+function spread(left: Array<string | undefined>, right: string, width: number): string {
   const gap = 2;
   const rightWidth = visibleWidth(right);
   if (rightWidth >= width) return truncateToWidth(right, width, '…');
@@ -83,30 +91,33 @@ export class StatusBarComponent implements Component {
 
   render(width: number): string[] {
     const snapshot = this.options.getSnapshot();
-    const running = this.options.isRunning?.() ? 'running (type to steer)' : undefined;
+    // The long steering hint only on a wide terminal; `running` alone still says
+    // what matters, and the dock's loader shows that work is happening.
+    const running = this.options.isRunning?.()
+      ? (width >= 100 ? 'running (type to steer)' : 'running')
+      : undefined;
     const frozen = this.options.isFrozen?.() ? 'FROZEN' : undefined;
     const harness = this.options.harness ? `harness ${this.options.harness}` : undefined;
 
-    // Ordered by what identifies the session: the workspace basename first (short,
-    // and where the harness lives), then what it is running. A long path used to
-    // crowd out everything after it, so the footer said where but not what.
-    const workspace = shortenPath(this.options.workspace);
-    const line1 = joinFitting([
-      workspace,
-      running,
-      frozen,
-      harness,
-      `backend ${this.options.backend}`,
-      `session ${this.options.sessionId}`,
-    ], width) || truncateToWidth(workspace, width, '…');
-
-    const line2 = spread(
-      [formatUsageSegment(snapshot), formatContextSegment(snapshot)],
+    // Priority order, most useful first: where we are, what state we are in, what
+    // it has cost, what we are pointed at. The session id is printed by the exit
+    // footer, and the backend is only interesting when debugging, so they go last.
+    const line = spread(
+      [
+        shortenPath(this.options.workspace),
+        running,
+        frozen,
+        formatUsageSegment(snapshot),
+        formatContextSegment(snapshot),
+        harness,
+        `backend ${this.options.backend}`,
+        `session ${this.options.sessionId}`,
+      ],
       formatModelSegment(snapshot),
       width,
     );
 
-    return [dim(line1), dim(line2)];
+    return [dim(line)];
   }
 
   invalidate(): void {

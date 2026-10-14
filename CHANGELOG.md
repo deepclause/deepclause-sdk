@@ -40,6 +40,11 @@
 
 ### Fixed
 
+- **The status bar is one row.** Where the harness lives and what it is doing on the
+  left, the model on the right, the token/context counters between them; anything
+  that does not fit is dropped whole. The workspace is shortened to `…/project`
+  rather than spending half the row on an absolute path, and `running` spells out
+  `(type to steer)` only when there is room.
 - **The status bar cut segments in half and lost the useful ones.** It truncated the
   last thing on the line to fit, so a narrow terminal showed `deepseek-flash · ` — a
   separator with nothing after it — and the absolute workspace path won the space

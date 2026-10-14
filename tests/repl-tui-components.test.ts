@@ -344,51 +344,54 @@ describe('status bar', () => {
     });
   }
 
-  it('is two lines that fit the width, at every width', () => {
+  it('is one row that fits the width, at every width', () => {
     for (const width of [24, 32, 40, 60, 80, 100, 120, 200]) {
       const lines = bar().render(width);
-      expect(lines).toHaveLength(2);
-      for (const line of lines) {
-        expect(visibleWidth(line)).toBeLessThanOrEqual(width);
-      }
+      expect(lines).toHaveLength(1);
+      expect(visibleWidth(lines[0]!)).toBeLessThanOrEqual(width);
     }
   });
 
   it('never cuts a segment in half', () => {
     // The failure this replaced read `deepseek-flash · ` — a separator with nothing
     // after it, which is indistinguishable from a short value.
-    for (const width of [24, 30, 40, 60, 80, 120]) {
-      for (const line of bar().render(width)) {
-        const visible = plain(line).trimEnd();
-        expect(visible.endsWith('·')).toBe(false);
-        expect(visible.endsWith('|')).toBe(false);
-        expect(visible.includes(' ·  · ')).toBe(false);
-      }
+    for (const width of [24, 30, 40, 60, 80, 120, 200]) {
+      const visible = plain(bar().render(width)[0]!).trimEnd();
+      expect(visible.endsWith('·')).toBe(false);
+      expect(visible.includes(' ·  · ')).toBe(false);
+      expect(visible.includes('  ·')).toBe(false);
     }
   });
 
   it('keeps the model, and drops the counters before it', () => {
     // A run is identified by its model; the token counters are the least important
-    // thing on the line.
-    expect(plain(bar().render(40)[1])).toContain('deepseek-flash · medium');
-    expect(plain(bar().render(40)[1])).not.toContain('↑');
-    expect(plain(bar().render(80)[1])).toContain('↑21k');
-    expect(plain(bar().render(80)[1])).toContain('deepseek-flash · medium');
+    // thing on the row, so they go first when space runs out.
+    for (const width of [40, 60, 80, 120]) {
+      expect(plain(bar().render(width)[0]!)).toContain('deepseek-flash · medium');
+    }
+    expect(plain(bar().render(40)[0]!)).not.toContain('↑');
+    expect(plain(bar().render(80)[0]!)).toContain('↑21k');
   });
 
-  it('shortens the path and lets short segments through when it does not fit', () => {
-    const wide = plain(bar().render(120)[0]);
+  it('shortens the path, and drops it before the model', () => {
+    const wide = plain(bar().render(140)[0]!);
+    expect(wide).toContain('…/deepclause-sdk');
     expect(wide).not.toContain('/home/andreas/git/gh');
-    expect(wide).toContain('deepclause-sdk');
     expect(wide).toContain('harness main');
+    expect(wide).toContain('backend pi');
 
-    // At 24 columns the long path is skipped entirely rather than crowding out the
-    // one short segment that matters, which is how identity used to be lost.
-    const narrow = plain(bar().render(24)[0]).trim();
-    expect(narrow).toBe('running (type to steer)');
+    // At 24 columns only the model survives — right-aligned, not truncated.
+    const narrow = plain(bar().render(24)[0]!).trim();
+    expect(narrow).toBe('deepseek-flash · medium');
+  });
+
+  it('says `running`, and only spells out the steering hint when there is room', () => {
+    expect(plain(bar().render(40)[0]!)).toContain('running');
+    expect(plain(bar().render(40)[0]!)).not.toContain('type to steer');
+    expect(plain(bar().render(140)[0]!)).toContain('running (type to steer)');
   });
 
   it('says when it is frozen', () => {
-    expect(plain(bar({ isFrozen: () => true }).render(120)[0])).toContain('FROZEN');
+    expect(plain(bar({ isFrozen: () => true }).render(140)[0]!)).toContain('FROZEN');
   });
 });

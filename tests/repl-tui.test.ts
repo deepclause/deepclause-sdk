@@ -172,16 +172,21 @@ describe('StatusBarComponent', () => {
       isFrozen: () => false,
     });
 
-    const lines = bar.render(80);
-    expect(lines).toHaveLength(2);
-    expect(lines[0]).toContain('/work/project');
-    expect(lines[0]).toContain('repl_1');
-    expect(lines[1]).toContain('↑1.5k');
-    expect(lines[1]).toContain('agent 1.5k/128k');
-    expect(lines[1]).toContain('gpt-4o · high');
+    // One row: where the harness lives on the left, the model on the right, and the
+    // counters between them. Anything that does not fit is dropped whole, so a
+    // longer row carries the same segments and the session id is on the exit footer.
+    const lines = bar.render(100);
+    expect(lines).toHaveLength(1);
+    const row = lines[0]!;
+    expect(row).toContain('/work/project');
+    expect(row).toContain('↑1.5k');
+    expect(row).toContain('agent 1.5k/128k');
+    expect(row).toContain('gpt-4o · high');
+    // The session id only appears when the row is wide enough for it.
+    expect(bar.render(200)[0]).toContain('repl_1');
     for (const line of lines) {
       // strip ANSI for width measurement
-      expect(line.replace(/\u001b\[[0-9;]*m/g, '').length).toBeLessThanOrEqual(80);
+      expect(line.replace(/\u001b\[[0-9;]*m/g, '').length).toBeLessThanOrEqual(100);
     }
   });
 
