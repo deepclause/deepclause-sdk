@@ -71,16 +71,20 @@ describe('workspace predicates from a host query', () => {
   });
 
   it('refuses directory traversal', () => {
-    expect(val('read_file("../etc/passwd", C)', 'C')).toBeUndefined();
+    // `..` does not climb out of the workspace: /workspace is a mount point, and
+    // above it is the VM's own (empty) filesystem, not the host. So this fails
+    // rather than reaching anything — the mount is the boundary, not a string
+    // check. See the containment test in path-semantics.test.ts for the canary.
+    expect(val('read_file("../outside.txt", C)', 'C')).toBeUndefined();
   });
 
-  it('keeps the stream predicates stream-only', () => {
-    // open/3, close/1, read_string/3 and write/2 are imported builtins, and SWI
-    // refuses to shadow an imported private predicate. So they stay stream-only:
-    // there is no workspace-resolving way to open a stream from a relative path,
-    // and attempting it fails. read_file/2 and write_file/2 are the whole-file
-    // API and cover the same need.
-    expect(host('(open("f.txt", read, St), close(St))').success).toBeUndefined();
+  it('resolves open/3 against the workspace, like every other path', () => {
+    // open/3 is a raw SWI builtin and cannot be shadowed, so it used to fail for
+    // a relative path and needed an absolute one. With the process working
+    // directory set to /workspace it resolves relatively too, so streams are no
+    // longer a special case with their own path rule.
+    expect(host('(open("f.txt", read, St), close(St))').success).toBe(true);
+    expect(val('open("f.txt", read, St), read_string(St, _, S), close(St)', 'S')).toBe('hello\n');
   });
 });
 

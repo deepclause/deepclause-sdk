@@ -34,6 +34,7 @@ interface SWIPLFileSystem {
   mount(type: unknown, options: { root: string }, mountpoint: string): void;
   unmount(mountpoint: string): void;
   mkdir(path: string): void;
+  chdir(path: string): void;
   writeFile(path: string, data: string): void;
   unlink(path: string): void;
 }
@@ -127,6 +128,27 @@ export function mountWorkspace(swipl: SWIPLModule, workspacePath: string): void 
       // If still fails, the directory might not exist in WASM FS
       throw new Error(`Failed to mount workspace: ${error}`);
     }
+  }
+
+  // Make the workspace the working directory, so DML can name a file either
+  // `out/report.txt` or `/workspace/out/report.txt`. Without this the cwd is `/`
+  // and only the absolute form resolves. Both forms must stay equivalent — DML
+  // code, `exec`, and the host tools are all told to use `/workspace`, while
+  // existing skills use relative paths.
+  //
+  // Two cwds have to move. `FS.chdir` is the Emscripten one, which `open/3` and
+  // other raw descriptors follow; SWI-Prolog keeps its own notion (it reports
+  // `//` at startup), and `read_file_to_string/3` resolves against that. Setting
+  // only the former leaves reads and writes disagreeing about what `.` means.
+  try {
+    swipl.FS.chdir('/workspace');
+  } catch {
+    // Non-fatal: absolute /workspace paths still resolve via the mount.
+  }
+  try {
+    swipl.prolog.call("working_directory(_, '/workspace').");
+  } catch {
+    // Non-fatal, as above.
   }
 }
 

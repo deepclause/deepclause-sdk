@@ -764,8 +764,7 @@ process_directive(consult(File), SessionId) :-
     !,
     % Set session ID for get_session_id to find, then call our custom consult
     nb_setval(current_session_id, SessionId),
-    resolve_workspace_path(File, FullPath),
-    system:read_file_to_string(FullPath, Code, []),
+    system:read_file_to_string(File, Code, []),
     consult_string(Code, SessionId).
 %% Handle use_module directive
 process_directive(use_module(Module), SessionId) :-
@@ -1556,12 +1555,11 @@ repl_script_files(SessionId, Paths) :-
 repl_materialize_embedded(SessionId) :-
     (   current_predicate(SessionId:embedded_file/2)
     ->  forall(SessionId:embedded_file(Path, Content),
-            (   resolve_workspace_path(Path, Full),
-                catch(
-                    (   file_directory_name(Full, Dir),
+            (   catch(
+                    (   file_directory_name(Path, Dir),
                         make_directory_path(Dir),
                         setup_call_cleanup(
-                            open(Full, write, Stream),
+                            open(Path, write, Stream),
                             format(Stream, "~s", [Content]),
                             close(Stream))
                     ),
@@ -4045,15 +4043,12 @@ mi_call(save_image(Media, Out), StateIn, StateIn) :-
     media_dict(Media, Dict),
     (   get_dict(kind, Dict, inline_svg),
         get_dict(data, Dict, Svg)
-    ->  resolve_workspace_path(Out, OutAbs),
-        open(OutAbs, write, Stream),
+    ->  open(Out, write, Stream),
         write(Stream, Svg),
         close(Stream)
     ;   get_dict(path, Dict, Path),
         Path \== ""
-    ->  resolve_workspace_path(Path, InAbs),
-        resolve_workspace_path(Out, OutAbs),
-        copy_file(InAbs, OutAbs)
+    ->  copy_file(Path, Out)
     ;   throw(error(domain_error(save_image, Media), save_image/2))
     ).
 
@@ -4917,29 +4912,29 @@ repl_inject_workspace_predicates(SessionId) :-
         catch(assertz(Clause), _, true)).
 
 workspace_predicate_clause(S, (S:read_file(F, C) :-
-    deepclause_mi:resolve_workspace_path(F, P), system:read_file_to_string(P, C, []))).
+    system:read_file_to_string(F, C, []))).
 workspace_predicate_clause(S, (S:read_file_to_string(F, C, O) :-
-    deepclause_mi:resolve_workspace_path(F, P), system:read_file_to_string(P, C, O))).
+    system:read_file_to_string(F, C, O))).
 workspace_predicate_clause(S, (S:write_file(F, C) :-
-    deepclause_mi:resolve_workspace_path(F, P), system:open(P, write, St), system:write(St, C), system:close(St))).
+    system:open(F, write, St), system:write(St, C), system:close(St))).
 workspace_predicate_clause(S, (S:append_file(F, C) :-
-    deepclause_mi:resolve_workspace_path(F, P), system:open(P, append, St), system:write(St, C), system:close(St))).
+    system:open(F, append, St), system:write(St, C), system:close(St))).
 workspace_predicate_clause(S, (S:exists_file(F) :-
-    deepclause_mi:resolve_workspace_path(F, P), system:exists_file(P))).
+    system:exists_file(F))).
 workspace_predicate_clause(S, (S:exists_directory(D) :-
-    deepclause_mi:resolve_workspace_path(D, P), system:exists_directory(P))).
+    system:exists_directory(D))).
 workspace_predicate_clause(S, (S:directory_files(D, L) :-
-    deepclause_mi:resolve_workspace_path(D, P), system:directory_files(P, L))).
+    system:directory_files(D, L))).
 workspace_predicate_clause(S, (S:make_directory(D) :-
-    deepclause_mi:resolve_workspace_path(D, P), system:make_directory(P))).
+    system:make_directory(D))).
 workspace_predicate_clause(S, (S:make_directory_path(D) :-
-    deepclause_mi:resolve_workspace_path(D, P), system:make_directory_path(P))).
+    system:make_directory_path(D))).
 workspace_predicate_clause(S, (S:delete_file(F) :-
-    deepclause_mi:resolve_workspace_path(F, P), system:delete_file(P))).
+    system:delete_file(F))).
 workspace_predicate_clause(S, (S:delete_directory(D) :-
-    deepclause_mi:resolve_workspace_path(D, P), system:delete_directory(P))).
+    system:delete_directory(D))).
 workspace_predicate_clause(S, (S:size_file(F, Sz) :-
-    deepclause_mi:resolve_workspace_path(F, P), system:size_file(P, Sz))).
+    system:size_file(F, Sz))).
 workspace_predicate_clause(S, (S:dict_field(D, K, V) :- deepclause_mi:dict_field(D, K, V))).
 workspace_predicate_clause(S, (S:dict_field(D, K, Def, V) :- deepclause_mi:dict_field(D, K, Def, V))).
 workspace_predicate_clause(S, (S:dict_field_key(K, N) :- deepclause_mi:dict_field_key(K, N))).
@@ -4953,31 +4948,18 @@ workspace_predicate_clause(S, (S:schema_fill(N, V, F) :-
 workspace_predicate_clause(S, (S:pattern(T, Text, B) :- deepclause_mi:pattern(T, Text, B))).
 
 workspace_predicate_clause(S, (S:time_file(F, T) :-
-    deepclause_mi:resolve_workspace_path(F, P), system:time_file(P, T))).
+    system:time_file(F, T))).
 
 %% ============================================================
-%% File I/O - All paths relative to /workspace
+%% File I/O - paths resolve against /workspace (see the note above)
 %% ============================================================
 
-%% Helper: resolve path relative to /workspace
-%% Prevents directory traversal outside workspace
-resolve_workspace_path(RelPath, FullPath) :-
-    (   atom(RelPath) -> atom_string(RelPath, RelPathStr)
-    ;   RelPathStr = RelPath
-    ),
-    % Remove leading slashes to make relative
-    (   sub_string(RelPathStr, 0, 1, _, "/")
-    ->  sub_string(RelPathStr, 1, _, 0, CleanPath)
-    ;   CleanPath = RelPathStr
-    ),
-    % Prevent directory traversal
-    (   sub_string(CleanPath, _, _, _, "..")
-    ->  throw(error(permission_error(access, directory, RelPath), 
-                    context(resolve_workspace_path/2, 'Directory traversal not allowed')))
-    ;   true
-    ),
-    % Build full path
-    atom_concat('/workspace/', CleanPath, FullPath).
+%% File I/O paths
+%% `/workspace` is the host project, mounted by the WASM filesystem (NODEFS);
+%% its working directory is set to /workspace, so a relative path and a
+%% `/workspace/...` path name the same file. Every other absolute path is the
+%% ephemeral in-memory VM filesystem, not the host. There is no rewriting
+%% layer any more: the mount is the boundary.
 
 %% mi_call(consult(File), +StateIn, -StateOut)
 %% Load Prolog clauses from a file into the current session module
@@ -4986,8 +4968,7 @@ mi_call(consult(File), StateIn, StateIn) :-
     !,
     get_session_id(SessionId),
     guard_not_frozen(SessionId),
-    resolve_workspace_path(File, FullPath),
-    system:read_file_to_string(FullPath, Code, []),
+    system:read_file_to_string(File, Code, []),
     consult_string(Code, SessionId).
 
 mi_call(use_module(Module), StateIn, StateIn) :-
@@ -5085,22 +5066,19 @@ consult_process_term(Head, SessionId) :-
 %% mi_call(read_file_to_string(File, Content, Options), +StateIn, -StateOut)
 mi_call(read_file_to_string(File, Content, Options), StateIn, StateIn) :-
     !,
-    resolve_workspace_path(File, FullPath),
-    system:read_file_to_string(FullPath, Content, Options).
+    system:read_file_to_string(File, Content, Options).
 
 %% mi_call(read_file(File, Content), +StateIn, -StateOut)
 %% Simplified version without options
 mi_call(read_file(File, Content), StateIn, StateIn) :-
     !,
-    resolve_workspace_path(File, FullPath),
-    system:read_file_to_string(FullPath, Content, []).
+    system:read_file_to_string(File, Content, []).
 
 %% mi_call(write_file(File, Content), +StateIn, -StateOut)
 %% Write string content to a file
 mi_call(write_file(File, Content), StateIn, StateIn) :-
     !,
-    resolve_workspace_path(File, FullPath),
-    open(FullPath, write, Stream),
+    open(File, write, Stream),
     write(Stream, Content),
     close(Stream).
 
@@ -5108,8 +5086,7 @@ mi_call(write_file(File, Content), StateIn, StateIn) :-
 %% Append string content to a file
 mi_call(append_file(File, Content), StateIn, StateIn) :-
     !,
-    resolve_workspace_path(File, FullPath),
-    open(FullPath, append, Stream),
+    open(File, append, Stream),
     write(Stream, Content),
     close(Stream).
 
@@ -5117,8 +5094,7 @@ mi_call(append_file(File, Content), StateIn, StateIn) :-
 %% Open a file for reading/writing
 mi_call(open(File, Mode, Stream), StateIn, StateIn) :-
     !,
-    resolve_workspace_path(File, FullPath),
-    open(FullPath, Mode, Stream).
+    open(File, Mode, Stream).
 
 %% mi_call(close(Stream), +StateIn, -StateOut)
 mi_call(close(Stream), StateIn, StateIn) :-
@@ -5133,60 +5109,51 @@ mi_call(write(Stream, Content), StateIn, StateIn) :-
 %% mi_call(exists_file(File), +StateIn, -StateOut)
 mi_call(exists_file(File), StateIn, StateIn) :-
     !,
-    resolve_workspace_path(File, FullPath),
-    exists_file(FullPath).
+    exists_file(File).
 
 %% mi_call(exists_directory(Dir), +StateIn, -StateOut)
 mi_call(exists_directory(Dir), StateIn, StateIn) :-
     !,
-    resolve_workspace_path(Dir, FullPath),
-    exists_directory(FullPath).
+    exists_directory(Dir).
 
 %% mi_call(directory_files(Dir, Files), +StateIn, -StateOut)
 mi_call(directory_files(Dir, Files), StateIn, StateIn) :-
     !,
-    resolve_workspace_path(Dir, FullPath),
-    directory_files(FullPath, Files).
+    directory_files(Dir, Files).
 
 %% mi_call(make_directory(Dir), +StateIn, -StateOut)
 mi_call(make_directory(Dir), StateIn, StateIn) :-
     !,
-    resolve_workspace_path(Dir, FullPath),
-    make_directory(FullPath).
+    make_directory(Dir).
 
 %% mi_call(make_directory_path(Dir), +StateIn, -StateOut)
 mi_call(make_directory_path(Dir), StateIn, StateIn) :-
     !,
-    resolve_workspace_path(Dir, FullPath),
-    make_directory_path(FullPath).
+    make_directory_path(Dir).
 
 %% mi_call(delete_file(File), +StateIn, -StateOut)
 mi_call(delete_file(File), StateIn, StateIn) :-
     !,
-    resolve_workspace_path(File, FullPath),
-    delete_file(FullPath).
+    delete_file(File).
 
 %% mi_call(delete_directory(Dir), +StateIn, -StateOut)
 mi_call(delete_directory(Dir), StateIn, StateIn) :-
     !,
-    resolve_workspace_path(Dir, FullPath),
-    delete_directory(FullPath).
+    delete_directory(Dir).
 
 %% mi_call(size_file(File, Size), +StateIn, -StateOut)
 %% size_file/2 is a plain SWI builtin, so it would otherwise resolve `File`
 %% against the WASM process cwd (not the workspace) and demand `/workspace/...`.
 mi_call(size_file(File, Size), StateIn, StateIn) :-
     !,
-    resolve_workspace_path(File, FullPath),
-    size_file(FullPath, Size).
+    size_file(File, Size).
 
 %% mi_call(time_file(File, Time), +StateIn, -StateOut)
 %% Modifications time (seconds since epoch); same workspace-relative rule as
 %% size_file/2.
 mi_call(time_file(File, Time), StateIn, StateIn) :-
     !,
-    resolve_workspace_path(File, FullPath),
-    time_file(FullPath, Time).
+    time_file(File, Time).
 
 %% ============================================================
 %% Catch/Throw - STATE THREADED

@@ -13,7 +13,7 @@
  */
 import { mkdtemp, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { basename, join } from 'path';
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { createDeepClause, DeepClauseSDK } from '../src/index.js';
@@ -1828,7 +1828,7 @@ describe('File I/O Operations', () => {
 
       const code = `
         agent_main :-
-            directory_files("", Files),
+            directory_files(".", Files),
             include(not_dot, Files, CleanFiles),
             length(CleanFiles, Count),
             format(string(Result), "~w files", [Count]),
@@ -1867,39 +1867,62 @@ describe('File I/O Operations', () => {
     });
   });
 
-  describe('Security - Path Restrictions', () => {
-    it('should prevent directory traversal with ../', async () => {
-      const code = `
-        agent_main :-
-            read_file("../../../etc/passwd", Content),
-            answer(Content).
-      `;
+  describe('Path containment', () => {
+    // `/workspace` is a mount point (the host project). Everything above it is
+    // the VM's own in-memory filesystem, which is empty and per-session. So a
+    // traversal cannot reach the host — not because a path is rejected, but
+    // because there is nothing there. The canary is a real file next to the
+    // workspace on the host: if the mount ever leaked, this would find it.
+    it('cannot reach the host through ../', async () => {
+      const canary = join(testWorkspace, '..', `canary-${Date.now()}.txt`);
+      writeFileSync(canary, 'HOST-CANARY');
 
-      const events: any[] = [];
-      for await (const event of sdk.runDML(code, { workspacePath: testWorkspace })) {
-        events.push(event);
+      try {
+        for (const path of ['../' + basename(canary), '/workspace/../' + basename(canary)]) {
+          const code = `
+            agent_main :-
+                read_file("${path}", Content),
+                answer(Content).
+          `;
+
+          const events: any[] = [];
+          for await (const event of sdk.runDML(code, { workspacePath: testWorkspace })) {
+            events.push(event);
+          }
+
+          expect(events.find(e => e.type === 'answer')?.content).not.toBe('HOST-CANARY');
+        }
+      } finally {
+        rmSync(canary, { force: true });
       }
-
-      expect(events.some(e => e.type === 'error')).toBe(true);
-      const errorEvent = events.find(e => e.type === 'error');
-      expect(errorEvent?.content).toContain('traversal');
     });
 
-    it('should handle absolute paths by treating them as relative', async () => {
+    it('treats /workspace paths as the workspace, and other absolutes as ephemeral', async () => {
       writeFileSync(join(testWorkspace, 'abs.txt'), 'absolute path content');
 
-      const code = `
+      // The /workspace form is the recommended one and names the same file...
+      const ok: any[] = [];
+      for await (const event of sdk.runDML(`
+        agent_main :-
+            read_file("/workspace/abs.txt", Content),
+            answer(Content).
+      `, { workspacePath: testWorkspace })) {
+        ok.push(event);
+      }
+      expect(ok.find(e => e.type === 'answer')?.content).toBe('absolute path content');
+
+      // ...while a bare absolute path is the ephemeral VM filesystem, so it is
+      // simply not there. No rewriting, no silent re-rooting into the workspace.
+      const events: any[] = [];
+      for await (const event of sdk.runDML(`
         agent_main :-
             read_file("/abs.txt", Content),
             answer(Content).
-      `;
-
-      const events: any[] = [];
-      for await (const event of sdk.runDML(code, { workspacePath: testWorkspace })) {
+      `, { workspacePath: testWorkspace })) {
         events.push(event);
       }
-
-      expect(events.find(e => e.type === 'answer')?.content).toBe('absolute path content');
+      expect(events.find(e => e.type === 'answer')).toBeUndefined();
+      expect(events.some(e => e.type === 'error')).toBe(true);
     });
   });
 
