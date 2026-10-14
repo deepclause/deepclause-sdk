@@ -137,3 +137,30 @@ export type {
   MockAnswerSource,
   MockJudgeBackendOptions,
 } from './judge/index.js';
+
+// Session-scoped REPL processes: the L1 core and the L1↔L2 seam.
+// See docs/DML_REPL_PROCESSES_SPEC.md and docs/DML_REPL_PROCESSES_IMPLEMENTATION_PLAN.md.
+export {
+  LocalProcessHost,
+  ProcessExit,
+  NoProcError,
+  MailboxFullError,
+  labelForGoal,
+  copyMessage,
+  pidKey,
+} from './repl/processes.js';
+export type {
+  Pid,
+  NodeId,
+  ProcessInfo,
+  ProcessState,
+  ProcessPriority,
+  ProcessEvent,
+  ProcessContext,
+  ProcessBody,
+  ProcessHostOptions,
+  SpawnOptions,
+  ReceiveResult,
+  CapabilityBroker,
+  CapabilityContext,
+} from './repl/processes.js';
