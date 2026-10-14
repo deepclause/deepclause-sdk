@@ -125,4 +125,26 @@ describe('session-scoped subagents', () => {
     expect(listed.text).toContain('narrator');
     await tools.get('stop')!.execute({ target: 'narrator' });
   });
+
+  it('fans a worker over a list with swarm, preserving order', async () => {
+    await define('mark/2', 'mark(X, marked(X)).');
+    await define('run_swarm/1', 'run_swarm(Results) :- swarm(mark, [a, b, c], Results).');
+    const result = await repl.session.executeGoal('run_swarm(R)', 1);
+    expect(result.error).toBeUndefined();
+    const value = result.bindings.find((binding) => binding.name === 'R')?.value ?? '';
+    expect(value).toContain('ok(marked(a))');
+    expect(value).toContain('ok(marked(c))');
+    expect(value.indexOf('marked(a)')).toBeLessThan(value.indexOf('marked(b)'));
+    expect(value.indexOf('marked(b)')).toBeLessThan(value.indexOf('marked(c)'));
+  });
+
+  it('pmap returns bare values and fails on any failure', async () => {
+    await define('mark/2', 'mark(X, marked(X)).');
+    await define('run_pmap/1', 'run_pmap(Values) :- pmap(mark, [x, y], Values).');
+    const result = await repl.session.executeGoal('run_pmap(Vs)', 1);
+    expect(result.error).toBeUndefined();
+    const value = result.bindings.find((binding) => binding.name === 'Vs')?.value ?? '';
+    expect(value).toContain('marked(x)');
+    expect(value).not.toContain('ok(');
+  });
 });

@@ -4437,6 +4437,76 @@ service_await_reply(Ref, Reply, Timeout) :-
     ).
 
 %% ============================================================
+%% Swarm / pmap: fan a worker over a list concurrently
+%% ============================================================
+%% Each item runs in its own process (spawned through the host), calling
+%% call(Worker, Item, Value). Results preserve input order. `Concurrency` is
+%% accepted for compatibility and not yet enforced (the host's process limit is).
+
+proc_self(SessionId, Me) :-
+    engine_yield(request_proc(self)),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, self, Me),
+    retract(session_proc_result(SessionId, self, _)).
+
+%% mi_call(swarm(+Worker, +Items, -Results), ...)
+mi_call(swarm(Worker, Items, Results), StateIn, StateOut) :-
+    !,
+    mi_call(swarm(Worker, Items, Results, 4), StateIn, StateOut).
+
+%% mi_call(swarm(+Worker, +Items, -Results, +Concurrency), ...)
+mi_call(swarm(Worker, Items, Results, _Concurrency), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    proc_self(SessionId, Me),
+    length(Items, Count),
+    swarm_spawn(Items, 1, Worker, Me, SessionId),
+    swarm_collect(Count, Pairs, SessionId),
+    keysort(Pairs, Sorted),
+    swarm_values(Sorted, Results).
+
+swarm_spawn([], _, _, _, _).
+swarm_spawn([Item|Items], Index, Worker, Me, SessionId) :-
+    term_string(deepclause_mi:dc_swarm_item(Worker, Item, Me, Index), GoalText),
+    engine_yield(request_proc(spawn(GoalText))),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, spawn, SpawnResult),
+    retract(session_proc_result(SessionId, spawn, _)),
+    SpawnResult = ok(_Pid),
+    Next is Index + 1,
+    swarm_spawn(Items, Next, Worker, Me, SessionId).
+
+swarm_collect(0, [], _) :- !.
+swarm_collect(N, [Index-Value|Rest], SessionId) :-
+    engine_yield(request_proc(receive(0))),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, receive, R),
+    retract(session_proc_result(SessionId, receive, _)),
+    R = ok(swarm_result(Index, Value)),
+    N1 is N - 1,
+    swarm_collect(N1, Rest, SessionId).
+
+swarm_values([], []).
+swarm_values([_-Value|Rest], [Value|Values]) :- swarm_values(Rest, Values).
+
+%% dc_swarm_item(+Worker, +Item, +Parent, +Index) — the child goal.
+dc_swarm_item(Worker, Item, Parent, Index) :-
+    (   call(Worker, Item, Result)
+    ->  send(Parent, swarm_result(Index, ok(Result)))
+    ;   send(Parent, swarm_result(Index, failed))
+    ).
+
+%% mi_call(pmap(+Worker, +Items, -Values), ...)
+%% Like swarm/3, but fails if any item failed.
+mi_call(pmap(Worker, Items, Values), StateIn, StateIn) :-
+    !,
+    mi_call(swarm(Worker, Items, Results), StateIn, _),
+    pmap_ok(Results, Values).
+
+pmap_ok([], []).
+pmap_ok([ok(Value)|Rest], [Value|Values]) :- pmap_ok(Rest, Values).
+
+%% ============================================================
 %% Tool Scoping Predicates
 %% ============================================================
 %% These predicates allow manual control over which tools are available
@@ -5786,6 +5856,9 @@ is_mi_special_predicate(serve(_,_)).
 is_mi_special_predicate(service_cast(_,_)).
 is_mi_special_predicate(service_call(_,_,_)).
 is_mi_special_predicate(service_call(_,_,_,_)).
+is_mi_special_predicate(swarm(_,_,_)).
+is_mi_special_predicate(swarm(_,_,_,_)).
+is_mi_special_predicate(pmap(_,_,_)).
 is_mi_special_predicate(param(_,_)).
 is_mi_special_predicate(param(_,_,_)).
 %% Prompt predicates (like task but with fresh memory)
