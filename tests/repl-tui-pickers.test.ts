@@ -125,6 +125,7 @@ describe('autocomplete and the parser agree', () => {
   // shorter spellings users already know).
   const ALIASES = new Set([
     'exit', 'quit', 'reasoning-level', 'reasoning-summary', 'diagram', 'image', 'imagine',
+    'serve', 'processes', 'cast',
   ]);
 
   /** A command that needs an argument, probed with one so it can be classified. */
@@ -134,6 +135,12 @@ describe('autocomplete and the parser agree', () => {
     gen: '/gen a cat',
     image: '/image x.png',
     imagine: '/imagine a cat',
+    spawn: '/spawn keeper([])',
+    send: '/send keeper stop',
+    call: '/call keeper ping',
+    stop: '/stop keeper',
+    serve: '/serve keeper([])',
+    cast: '/cast keeper stop',
   };
   const probe = (name: string): string => PROBES[name] ?? `/${name}`;
 
@@ -142,6 +149,7 @@ describe('autocomplete and the parser agree', () => {
     'goal', 'listing', 'halt', 'help', 'reset', 'rollback', 'compact', 'export',
     'model', 'reasoning', 'show-reasoning', 'harness', 'freeze', 'unfreeze', 'params',
     'trace', 'notrace', 'viz', 'show', 'gen',
+    'spawn', 'ps', 'send', 'call', 'stop',
   ];
 
   it('advertises every command the parser accepts', async () => {
