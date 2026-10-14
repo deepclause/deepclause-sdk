@@ -10,6 +10,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { visibleWidth } from '@earendil-works/pi-tui';
 
+import { StatusBarComponent } from '../src/repl/tui/status-bar.js';
 import { TranscriptDocument } from '../src/repl/tui/document.js';
 import { SizedTerminal } from '../src/repl/tui/terminal.js';
 import { DmlToolPane } from '../src/repl/tui/tool-pane.js';
@@ -310,5 +311,84 @@ describe('tree indentation', () => {
       { type: 'stream', content: 'an answer', frameKind: 'run', depth: 0 },
     ]);
     expect(lines[0]).toMatch(/^run │ an answer/);
+  });
+});
+
+describe('status bar', () => {
+  const snapshot = () => ({
+    model: { id: 'deepseek-flash', provider: 'pi', reasoning: true, thinkingLevel: 'medium' },
+    totals: { inputTokens: 12500, outputTokens: 4200, cacheReadTokens: 8000, cacheWriteTokens: 100 },
+    byGroup: {
+      agent: { inputTokens: 9000, outputTokens: 3000, cacheReadTokens: 6000, cacheWriteTokens: 0 },
+      child: { inputTokens: 3500, outputTokens: 1200, cacheReadTokens: 2000, cacheWriteTokens: 100 },
+      judge: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    },
+    activeGroup: 'agent', activeDepth: 0, activeSlot: 'agent',
+    context: {
+      agent: { tokens: 9400, contextWindow: 128000, percent: 7 },
+      harness: { tokens: 0, contextWindow: 128000, percent: 0 },
+    },
+    activeContext: { tokens: 9400, contextWindow: 128000, percent: 7 },
+  } as never);
+
+  function bar(overrides: Record<string, unknown> = {}) {
+    return new StatusBarComponent({
+      getSnapshot: snapshot,
+      workspace: '/home/andreas/git/gh/deepclause-pi-dev/deepclause-sdk',
+      sessionId: 'repl_mv82il31_1',
+      harness: 'main',
+      backend: 'pi',
+      isFrozen: () => false,
+      isRunning: () => true,
+      ...overrides,
+    });
+  }
+
+  it('is two lines that fit the width, at every width', () => {
+    for (const width of [24, 32, 40, 60, 80, 100, 120, 200]) {
+      const lines = bar().render(width);
+      expect(lines).toHaveLength(2);
+      for (const line of lines) {
+        expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+      }
+    }
+  });
+
+  it('never cuts a segment in half', () => {
+    // The failure this replaced read `deepseek-flash · ` — a separator with nothing
+    // after it, which is indistinguishable from a short value.
+    for (const width of [24, 30, 40, 60, 80, 120]) {
+      for (const line of bar().render(width)) {
+        const visible = plain(line).trimEnd();
+        expect(visible.endsWith('·')).toBe(false);
+        expect(visible.endsWith('|')).toBe(false);
+        expect(visible.includes(' ·  · ')).toBe(false);
+      }
+    }
+  });
+
+  it('keeps the model, and drops the counters before it', () => {
+    // A run is identified by its model; the token counters are the least important
+    // thing on the line.
+    expect(plain(bar().render(40)[1])).toContain('deepseek-flash · medium');
+    expect(plain(bar().render(40)[1])).not.toContain('↑');
+    expect(plain(bar().render(80)[1])).toContain('↑21k');
+    expect(plain(bar().render(80)[1])).toContain('deepseek-flash · medium');
+  });
+
+  it('shortens the path and lets short segments through when it does not fit', () => {
+    const wide = plain(bar().render(120)[0]);
+    expect(wide).not.toContain('/home/andreas/git/gh');
+    expect(wide).toContain('deepclause-sdk');
+    expect(wide).toContain('harness main');
+
+    // At 24 columns the long path is skipped entirely rather than crowding out the
+    // one short segment that matters, which is how identity used to be lost.
+    const narrow = plain(bar().render(24)[0]).trim();
+    expect(narrow).toBe('running (type to steer)');
+  });
+
+  it('says when it is frozen', () => {
+    expect(plain(bar({ isFrozen: () => true }).render(120)[0])).toContain('FROZEN');
   });
 });

@@ -40,6 +40,14 @@
 
 ### Fixed
 
+- **The status bar cut segments in half and lost the useful ones.** It truncated the
+  last thing on the line to fit, so a narrow terminal showed `deepseek-flash · ` — a
+  separator with nothing after it — and the absolute workspace path won the space
+  fight, crowding out the model, session and running state. It now shows `~`-relative
+  paths (`…/gh/project` when long) and drops whole segments in priority order
+  (workspace, running, frozen, harness, backend, session; counters before the model),
+  so every row states what it can rather than trailing off. The model is always kept,
+  right-aligned, and is the last thing truncated.
 - **Tool panes broke the tree.** Nesting is expressed by the frame's prefix
   (`run │ ` at top level, `    │ ` for an `execute` child), and the panes ignored it
   while also adding a stem of their own — so a nested call showed two stems at
