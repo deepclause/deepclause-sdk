@@ -29,6 +29,15 @@
   from pi, and colours go through pi-tui's styler, so the terminal's colour mode is
   handled for us. A fallback palette is used if pi's theme cannot be resolved.
 
+### Changed
+
+- **Esc interrupts a turn; Ctrl-C exits.** Ctrl-C used to abort the turn and need a
+  second press to leave, which made it ambiguous whether a session was still alive.
+  Escape now interrupts (leaving its usual meaning alone while a completion list or
+  a search overlay owns it), and Ctrl-C exits the REPL — aborting a running turn
+  first so nothing keeps writing after the UI is gone. The readline path exits on
+  Ctrl-C too, since it has no raw key to tell Escape apart from an editing sequence.
+
 ### Fixed
 
 - **Tool panes broke the tree.** Nesting is expressed by the frame's prefix

@@ -975,22 +975,19 @@ async function executeLoad(runtime: ReplRuntime, files: string[]): Promise<numbe
 
 /** Non-interactive mode: read classified inputs line by line until EOF. */
 /**
- * Route Ctrl-C to the active turn. While a turn is running the first Ctrl-C
- * aborts it (the session then saves the harness to a temp file); a Ctrl-C while
- * idle exits.
+ * Ctrl-C exits, in every mode: this is the plain/readline path, where there is no
+ * raw key to distinguish Escape from an editing sequence, so the TUI's
+ * "Esc interrupts, Ctrl-C exits" cannot be mirrored exactly. A running turn is
+ * aborted first, so nothing keeps writing after the UI is gone.
  */
 function installSigint(
-  runtime: ReplRuntime,
   holder: { turn: AbortController | null },
   rl?: readline.Interface,
   onExit?: () => Promise<void>,
 ): () => void {
   const handler = () => {
-    if (holder.turn) {
-      holder.turn.abort(new Error('cancelled by user'));
-      runtime.renderer.writeErrorLine('(cancelling current turn… press Ctrl-C again to exit)');
-    } else if (onExit) {
-      // Save the harness before exiting (Ctrl-C while idle).
+    holder.turn?.abort(new Error('cancelled by user'));
+    if (onExit) {
       void onExit().finally(() => process.exit(130));
     } else {
       process.exit(130);
@@ -1012,7 +1009,7 @@ async function runNonInteractive(
   let exitCode = 0;
   const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   const holder: { turn: AbortController | null } = { turn: null };
-  const removeSigint = installSigint(runtime, holder, rl, onExit);
+  const removeSigint = installSigint(holder, rl, onExit);
   try {
     for await (const line of rl) {
       const input = classifyReplInput(line);
@@ -1084,7 +1081,7 @@ async function runInteractive(
   });
 
   const holder: { turn: AbortController | null } = { turn: null };
-  const removeSigint = installSigint(runtime, holder, rl, onExit);
+  const removeSigint = installSigint(holder, rl, onExit);
 
   try {
     while (true) {
@@ -1334,29 +1331,44 @@ export async function runTui(
     return answer === null ? undefined : answer;
   });
 
-  const cancelTurn = (): void => {
-    if (holder.turn) {
-      holder.turn.abort(new Error('cancelled by user'));
-      transcript.append('(cancelling current turn… press Ctrl-C again to exit)');
-      tui.requestRender();
-      return;
-    }
+  /** Interrupt the running turn, if any. Returns whether there was one. */
+  const interruptTurn = (): boolean => {
+    if (!holder.turn) return false;
+    holder.turn.abort(new Error('cancelled by user'));
+    transcript.append('(interrupted — Ctrl-C exits)');
+    tui.requestRender();
+    return true;
+  };
+
+  /** Leave the REPL, aborting anything still running so nothing outlives the UI. */
+  const exitRepl = (): void => {
+    holder.turn?.abort(new Error('cancelled by user'));
     void (onExit ? onExit() : Promise.resolve()).finally(() => {
       tui.stop();
       process.exit(130);
     });
   };
 
-  // Ctrl-C aborts the current turn; Ctrl-D (on an empty editor) exits. Use pi's
-  // key matcher so kitty/meta key encodings are recognized, not just raw bytes.
+  // Esc interrupts, Ctrl-C exits, Ctrl-D (on an empty editor) exits. Escape is
+  // left alone while a completion list or an overlay owns it, so it keeps its
+  // usual meaning there. Use pi's key matcher so kitty/meta encodings are
+  // recognized, not just raw bytes.
   tui.addInputListener((data) => {
     if (matchesKey(data, 'ctrl+c')) {
-      cancelTurn();
+      exitRepl();
       return { consume: true };
     }
     if (matchesKey(data, 'ctrl+d') && !holder.turn && (editor?.getText().length ?? 0) === 0) {
-      cancelTurn();
+      exitRepl();
       return { consume: true };
+    }
+    if (
+      matchesKey(data, 'escape')
+      && !tui.hasOverlay()
+      && !(editor?.isShowingAutocomplete() ?? false)
+    ) {
+      if (interruptTurn()) return { consume: true };
+      return undefined;
     }
     // ctrl+o expands or collapses the most recent tool call, the way pi reveals
     // full tool output on demand.
@@ -1366,8 +1378,9 @@ export async function runTui(
     }
     return undefined;
   });
-  // Fallback for terminals/raw-mode setups that deliver SIGINT instead of \x03.
-  process.on('SIGINT', cancelTurn);
+  // Fallback for terminals/raw-mode setups that deliver SIGINT instead of \x03:
+  // the terminal's own Ctrl-C, which now exits.
+  process.on('SIGINT', exitRepl);
 
   createEditor();
   for (const line of runtime.inputHistory) editor?.addToHistory(line);
@@ -1425,7 +1438,7 @@ export async function runTui(
     }
   } finally {
     tui.stop();
-    process.off('SIGINT', cancelTurn);
+    process.off('SIGINT', exitRepl);
     process.stdout.off('resize', onResize);
     working.stop();
     // Restore stdout so the exit footer and any later output are visible.
@@ -1496,7 +1509,7 @@ export async function startRepl(options: ReplCliOptions): Promise<number> {
     if (goals.length > 0) {
       let exitCode = 0;
       const controller = new AbortController();
-      const removeSigint = installSigint(runtime, { turn: controller });
+      const removeSigint = installSigint({ turn: controller });
       try {
         for (const goal of goals) {
           if (controller.signal.aborted) break;

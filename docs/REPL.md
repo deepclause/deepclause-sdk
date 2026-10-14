@@ -151,23 +151,28 @@ so a late failure does not lose earlier progress.
 
 ### Cancelling a turn
 
-Press **Ctrl-C** while a turn is running to abort it. The turn stays
+Press **Esc** while a turn is running to abort it. (Escape keeps its usual
+meaning while a completion list or a search or overlay is open.) The turn stays
 transactional: the harness is restored to its last committed state, and the
 *current* module (including any scratch `assert`/`execute` edits) is written to
 a temp `.dml` file so nothing is lost:
 
 ```text
-^C
-(cancelling current turn… press Ctrl-C again to exit)
+esc
+(interrupted — Ctrl-C exits)
 ERROR: turn aborted; current harness saved to /tmp/deepclause-repl-<id>-<ts>.dml
 ```
+
+**Ctrl-C** exits the REPL (aborting a running turn first, so nothing keeps
+writing after the UI is gone). In the plain/readline path there is no raw key to
+distinguish Escape from an editing sequence, so Ctrl-C exits there too.
 
 Load that file with `deepclause repl -l <file>` to resume. The same applies to
 `/goal` queries and `-g` runs.
 
 ### Saving on exit
 
-When you leave the REPL — `halt.`, **Ctrl-D**, or **Ctrl-C** while idle — the
+When you leave the REPL — `halt.`, **Ctrl-D**, or **Ctrl-C** — the
 harness (module + linked scripts, as a `.zip` bundle) is written to a temp file
 and the path is printed, so the work is preserved:
 
