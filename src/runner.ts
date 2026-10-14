@@ -204,7 +204,7 @@ export interface RunnerOptions {
 }
 
 export interface ProcessRequestPayload {
-  op: 'self' | 'spawn' | 'send' | 'receive' | 'exit' | 'process_info' | 'register' | 'whereis' | 'sleep';
+  op: 'self' | 'spawn' | 'send' | 'receive' | 'requeue' | 'exit' | 'process_info' | 'register' | 'whereis' | 'sleep';
   goal?: string;
   options?: string;
   to?: string;
@@ -218,7 +218,7 @@ export interface ProcessRequestPayload {
 
 /** A process primitive's reply: the result slot key and its raw Prolog term. */
 export interface ProcessRequestResult {
-  key: 'self' | 'spawn' | 'send' | 'receive' | 'exit' | 'process_info' | 'register' | 'whereis' | 'sleep';
+  key: 'self' | 'spawn' | 'send' | 'receive' | 'requeue' | 'exit' | 'process_info' | 'register' | 'whereis' | 'sleep';
   term: string;
 }
 

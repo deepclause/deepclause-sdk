@@ -2985,6 +2985,7 @@ proc_request_payload(spawn(Goal), payload{op: spawn, goal: Goal}) :- !.
 proc_request_payload(spawn(Goal, Options), payload{op: spawn, goal: Goal, options: Options}) :- !.
 proc_request_payload(send(To, Message), payload{op: send, to: To, message: Message}) :- !.
 proc_request_payload(receive(Timeout), payload{op: receive, timeout: Timeout}) :- !.
+proc_request_payload(requeue(Message), payload{op: requeue, message: Message}) :- !.
 proc_request_payload(exit(Reason), payload{op: exit, reason: Reason}) :- !.
 proc_request_payload(process_info(Pid), payload{op: process_info, pid: Pid}) :- !.
 proc_request_payload(register(Name, Pid), payload{op: register, name: Name, pid: Pid}) :- !.
@@ -4297,6 +4298,62 @@ mi_call(receive(Message, TimeoutMs), StateIn, StateIn) :-
     session_proc_result(SessionId, receive, ReceiveResult),
     retract(session_proc_result(SessionId, receive, _)),
     ReceiveResult = ok(Message).
+
+%% mi_call(receive_match(+Template, ?Message, +TimeoutMs), +StateIn, -StateOut)
+%% Selective receive: skip messages that do not unify with Template, requeue
+%% them in order, and fail on timeout. The template unifies in this process.
+mi_call(receive_match(Template, Message, TimeoutMs), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    proc_now_ms(Start),
+    receive_match_loop(Template, Message, TimeoutMs, Start, SessionId, []).
+
+%% A plain monotonic clock for helpers (now_ms/1 is a mi_call special predicate).
+proc_now_ms(Milliseconds) :-
+    get_time(Seconds),
+    Milliseconds is round(Seconds * 1000).
+
+receive_match_loop(Template, Message, TimeoutMs, Start, SessionId, Skipped) :-
+    proc_now_ms(Now),
+    (   TimeoutMs > 0
+    ->  Left is TimeoutMs - (Now - Start)
+    ;   Left = 0
+    ),
+    (   TimeoutMs > 0, Left =< 0
+    ->  requeue_skipped(Skipped, SessionId),
+        fail
+    ;   engine_yield(request_proc(receive(Left))),
+        get_next_signal(SessionId, _),
+        session_proc_result(SessionId, receive, Result),
+        retract(session_proc_result(SessionId, receive, _)),
+        (   Result = ok(Term),
+            (   copy_term(Template, Copy), Copy = Term
+            ->  requeue_skipped(Skipped, SessionId),
+                Template = Term,
+                Message = Term
+            ;   receive_match_loop(Template, Message, TimeoutMs, Start, SessionId, [Term|Skipped])
+            )
+        ;   requeue_skipped(Skipped, SessionId),
+            fail
+        )
+    ).
+
+requeue_skipped(Skipped, SessionId) :-
+    requeue_reversed(Skipped, [], Reversed),
+    requeue_all(Reversed, SessionId).
+
+%% Build the reversed list without library(lists) (deepclause_mi may not have it).
+requeue_reversed([], Acc, Acc).
+requeue_reversed([X|Xs], Acc, Out) :- requeue_reversed(Xs, [X|Acc], Out).
+
+requeue_all([], _).
+requeue_all([Message|Messages], SessionId) :-
+    term_string(Message, Text),
+    engine_yield(request_proc(requeue(Text))),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, requeue, _),
+    retract(session_proc_result(SessionId, requeue, _)),
+    requeue_all(Messages, SessionId).
 
 %% mi_call(exit(+Reason), +StateIn, -StateOut)
 %% Terminate this process. The host marks it killed; the frame is stopped by
@@ -5845,6 +5902,7 @@ is_mi_special_predicate(self(_)).
 is_mi_special_predicate(send(_,_)).
 is_mi_special_predicate(receive(_)).
 is_mi_special_predicate(receive(_,_)).
+is_mi_special_predicate(receive_match(_,_,_)).
 is_mi_special_predicate(exit(_)).
 is_mi_special_predicate(process_info(_,_)).
 is_mi_special_predicate(register(_,_)).

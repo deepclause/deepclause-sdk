@@ -148,6 +148,23 @@ describe('session-scoped subagents', () => {
     expect(value).not.toContain('ok(');
   });
 
+  it('selects a message by pattern with receive_match and requeues the rest', async () => {
+    await define('launch/0', 'launch :- self(Me), spawn(selective(Me), _), output("launched").');
+    await define('selective/1', 'selective(Parent) :- receive_match(wanted(X), _, 1000), receive(Next), send(Parent, got(X, Next)).');
+    await define('await_msg/1', 'await_msg(R) :- receive(R, 3000).');
+
+    await repl.session.executeGoal('launch', 1);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const proc = repl.session.processes().find((p) => p.name === 'selective');
+    expect(proc).toBeDefined();
+    repl.session.sendProcess(proc!.pid, 'other');
+    repl.session.sendProcess(proc!.pid, 'wanted(1)');
+
+    const result = await repl.session.executeGoal('await_msg(R)', 1);
+    const value = result.bindings.find((binding) => binding.name === 'R')?.value ?? '';
+    expect(value).toContain('got(1,other)');
+  });
+
   it('serializes concurrent input requests onto one channel', async () => {
     const order: string[] = [];
     let active = 0;

@@ -192,6 +192,15 @@ export class DmlProcessExecutor {
           : { key: 'receive', term: 'timeout' };
       }
 
+      case 'requeue': {
+        if (pidKey(pid) === pidKey(this.host.hostPid)) {
+          this.hostMailbox.unshift(String(request.message ?? 'true'));
+        } else {
+          this.host.requeue(pid, request.message ?? 'true');
+        }
+        return { key: 'requeue', term: 'ok' };
+      }
+
       case 'exit':
         this.host.stop(pid, request.reason ?? 'exit');
         return { key: 'exit', term: 'ok' };

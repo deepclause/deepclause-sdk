@@ -535,6 +535,15 @@ export class LocalProcessHost {
   }
 
   /**
+   * Put a message back at the front of the mailbox (selective receive).
+   */
+  requeue(pid: Pid, message: unknown): void {
+    const record = this.records.get(pidKey(pid));
+    if (!record || record.terminal) return;
+    record.mailbox.unshift(copyMessage(message));
+  }
+
+  /**
    * Send `{kind:'request', from, ref, value: message}` and await a
    * `{kind:'reply', ref, value}` from the target (the `library(service)`
    * protocol).
