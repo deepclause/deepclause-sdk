@@ -8,6 +8,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { createHarnessRepl, type HarnessRepl } from '../src/repl/index.js';
+import { createHarnessTools } from '../src/repl/harness-tools.js';
 import type { ProcessEvent } from '../src/repl/processes.js';
 
 let workspace: string;
@@ -113,5 +114,15 @@ describe('session-scoped subagents', () => {
 
     const service = repl.session.processes().find((p) => p.name === 'echo');
     expect(service).toBeDefined();
+  });
+
+  it('spawns and lists through the real harness tools', async () => {
+    await define('narrate/0', 'narrate :- output("via tool").');
+    const tools = createHarnessTools(repl.session);
+    const spawned = await tools.get('spawn')!.execute({ goal: 'narrate', name: 'narrator' });
+    expect(spawned).toMatchObject({ name: 'narrator' });
+    const listed = (await tools.get('ps')!.execute({})) as { text: string };
+    expect(listed.text).toContain('narrator');
+    await tools.get('stop')!.execute({ target: 'narrator' });
   });
 });

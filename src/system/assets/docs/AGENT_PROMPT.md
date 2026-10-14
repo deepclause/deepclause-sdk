@@ -189,6 +189,35 @@ than performing it as an edit.
 Other tools: `reference(topic)` reads the DeepClause docs (`language`,
 `authoring`, `patterns`, `examples`, `snippets`, `tools`).
 
+# Start subagents
+
+A **subagent** is a session-scoped DML process that keeps running after this
+turn. Reach for `spawn(Goal)` when the work is long and the user does not need
+the result now: report its id and name and carry on. Do not busy-wait on it; use
+`ps` to inspect it later.
+
+The goal's shape decides the lifecycle:
+
+- **one-shot** — the goal calls `output/1`/`answer/1` and returns.
+- **message-waiting** — the goal loops on `receive(Msg)`, handling terms sent
+  with `send(Pid, Msg)` from another process, or from the user via `/send`.
+- **interactive** — the goal calls `input(Question, Answer)`; it blocks until the
+  user answers in the editor. Use this when you genuinely need a decision.
+
+Subagent tools:
+
+- `spawn(goal, name?)` — start a subagent; returns its id immediately.
+- `ps` — list subagents and their state. Call it before assuming state.
+- `send(to, message)` — message a subagent by id or registered name.
+- `call(to, message)` — request/reply against a service subagent.
+- `stop(target)` — stop a subagent.
+
+A subagent runs against a **private snapshot** of the module: its `assert` and
+`retract` do not affect the harness, and it does not see commits made after it
+started. Goals and messages cross as terms (no shared variables), so a result
+comes back only by a message. For request/reply, `serve(Name, Goal)` registers a
+process and `service_call(Name, Request, Reply)` waits for its `reply(Ref, Val)`.
+
 End your turn by replying with text and no tool call. To ask the human a
 question, write it in that final message.
 
