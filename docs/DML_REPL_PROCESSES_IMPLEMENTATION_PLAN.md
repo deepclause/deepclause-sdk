@@ -21,7 +21,22 @@ Every phase below preserves them.
 | 3. REPL integration | ✅ harness tools, `/spawn` `/ps` `/send` `/call` `/stop`, event sink, status segment |
 | 4. Libraries | ✅ `serve/2`, `service_call/3,4`, `service_cast/2` built-ins (`library(swarm)` deferred) |
 | 5. Persistence | ✅ `services.jsonl` declarations/exits; resume replays declarations |
+| 4. Libraries | ✅ `serve/2`, `service_call/3,4`, `service_cast/2`, `swarm/3,4`, `pmap/3`, `receive_match/3`, `receive/1,2` |
+| 5. Persistence | ✅ `services.jsonl` declarations/exits; resume replays declarations |
 | 6. L2 seam | ✅ `--execution inline\|worker` flag + seam; worker host is the remaining implementation |
+
+### Remaining
+
+- **`WorkerProcessHost` (L2).** `--execution worker` currently prints a notice and
+  runs inline. Everything is behind `ProcessHost`/`CapabilityBroker`, so the
+  work is a worker entrypoint plus an RPC host/broker and a pid-routed
+  `send` — no change above the seam.
+- **Non-modal background input presentation.** A subagent's `input/2` is served
+  through the shared, serialized human channel and reuses the editor; there is
+  no separate queued/notification surface beyond the panel's `needs input`
+  marker.
+- **Enforced `swarm` concurrency.** `swarm/4` accepts a concurrency argument but
+  does not yet throttle spawns (the host's process limit still bounds it).
 
 ## Phase 1 — Process core
 
