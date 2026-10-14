@@ -19,6 +19,7 @@ import type {
 } from './types.js';
 import { mountWorkspace } from './prolog/loader.js';
 import { runAgentLoop } from './agent.js';
+import { validateToolArguments } from './repl/tool-arguments.js';
 import { judgeAnswersToValues, judgeCacheKey, normalizeJudgeState, parseJudgeQuestions, validateJudgeAnswers, valuesToPrologList } from './judge/marshal.js';
 import type { JudgeAnswer, JudgeCapabilities, JudgeSelection, JudgeUsage, JsonValue, JudgeQuestion } from './judge/types.js';
 import {
@@ -1533,7 +1534,11 @@ export class DMLRunner {
       ? this.internalAskUserTool(options)
       : options.tools.get(toolName);
     if (!tool) {
-      yield { type: 'log', content: `Tool '${toolName}' not found` };
+      // Emit start+failure so the renderer shows the reason. A lone `log` event
+      // is not rendered in goal mode, so an unknown tool used to fail with no
+      // explanation at all — just `false.`
+      yield buildToolStartEvent(toolName, {});
+      yield buildToolFailureEvent(toolName, {}, new Error(`Tool not found: ${toolName}`));
       this.postExecResult({ success: false, error: `Tool not found: ${toolName}` });
       return;
     }
@@ -1543,7 +1548,17 @@ export class DMLRunner {
     try {
       // Execute tool
       argsObj = this.argsToObject(args, tool);
-      
+
+      // A call that names a parameter the tool does not have cannot mean what it
+      // says, and dropping the key silently is how `stdin` looked like it worked.
+      const validation = validateToolArguments(toolName, tool.parameters, argsObj);
+      if (!validation.ok) {
+        yield buildToolStartEvent(toolName, argsObj);
+        yield buildToolFailureEvent(toolName, argsObj, new Error(validation.error));
+        this.postExecResult({ success: false, error: validation.error });
+        return;
+      }
+
       // Emit tool_call event before execution
       yield buildToolStartEvent(toolName, argsObj);
       
@@ -1947,12 +1962,21 @@ export class DMLRunner {
             const tool = registeredTools.get(execToolName);
             if (!tool) {
               // Tool not found - post failure and continue
+              onToolEvent?.(buildToolStartEvent(execToolName, {}));
+              onToolEvent?.(buildToolFailureEvent(execToolName, {}, new Error(`Tool not found: ${execToolName}`)));
               const postGoal = `deepclause_mi:post_exec_result('${this.sessionId}', failure, "Tool not found: ${execToolName}")`;
               this.query(postGoal);
             } else {
               let argsObj: Record<string, unknown> | null = null;
               try {
                 argsObj = this.argsToObject(execArgs, tool);
+                const validation = validateToolArguments(execToolName, tool.parameters, argsObj);
+                if (!validation.ok) {
+                  onToolEvent?.(buildToolStartEvent(execToolName, argsObj));
+                  onToolEvent?.(buildToolFailureEvent(execToolName, argsObj, new Error(validation.error)));
+                  this.query(`deepclause_mi:post_exec_result('${this.sessionId}', failure, ${JSON.stringify(validation.error)})`);
+                  continue;
+                }
                 onToolEvent?.(buildToolStartEvent(execToolName, argsObj));
                 const execResult = await tool.execute(argsObj, { signal: runContext.signal });
                 onToolEvent?.(buildToolCompletionEvent(execToolName, argsObj, execResult));

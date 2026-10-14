@@ -24,6 +24,7 @@ import type {
 import { createModelProvider, type RawProviderResponseSnapshot } from './prolog/bridge.js';
 import { readSystemPromptAsset } from './system/assets/index.js';
 import { describeCurrentTime, describeEnvironment } from './system/environment.js';
+import { validateToolArguments } from './repl/tool-arguments.js';
 import type { ExecutionEnvironment } from './system/runtime/shell-manager.js';
 
 /** Maximum number of retries for LLM error finish reasons */
@@ -637,7 +638,11 @@ function jsonSchemaToZod(schema: Record<string, unknown>): z.ZodTypeAny {
           }
           shape[key] = propZod;
         }
-        zodType = z.object(shape);
+        // `.strict()`: a plain object schema *strips* unknown keys, so a call
+        // naming a parameter that does not exist (e.g. `stdin` on bash) would be
+        // silently accepted with the extra key removed. Strict makes the AI SDK
+        // report it back to the model, which can then fix the call.
+        zodType = z.object(shape).strict();
       } else {
         zodType = z.record(z.unknown());
       }
@@ -845,10 +850,15 @@ async function runInjectedAgentLoop(
               : `Tool not found: ${call.name}`,
           };
         } else {
-          try {
-            result = cleanPrologMarkers(await tool.execute(call.arguments, { signal: options.signal }));
-          } catch (error) {
-            result = { error: error instanceof Error ? error.message : String(error) };
+          const validation = validateToolArguments(call.name, tool.parameters, call.arguments);
+          if (!validation.ok) {
+            result = { error: validation.error };
+          } else {
+            try {
+              result = cleanPrologMarkers(await tool.execute(call.arguments, { signal: options.signal }));
+            } catch (error) {
+              result = { error: error instanceof Error ? error.message : String(error) };
+            }
           }
         }
         if (!options.selfReportingTools?.has(call.name)) {
@@ -1013,6 +1023,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       description: tool.description,
       inputSchema: zodSchema,
       execute: async (input: unknown, execOptions?: { abortSignal?: AbortSignal }) => {
+        // The AI SDK validates the shape it was given, but the schema it was
+        // given is our JSON Schema converted to Zod; check the same rule here so
+        // both tool-calling paths report the same, specific error.
+        const validation = validateToolArguments(name, tool.parameters, input as Record<string, unknown>);
+        if (!validation.ok) return { error: validation.error };
         try {
           const result = await tool.execute(input as Record<string, unknown>, {
             signal: execOptions?.abortSignal ?? options.signal,

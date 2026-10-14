@@ -8,6 +8,7 @@
  */
 
 import { readAgentPromptAsset } from '../system/assets/index.js';
+import { validateToolArguments } from './tool-arguments.js';
 import { describeRuntimeContext } from '../system/environment.js';
 import type { ExecutionEnvironment } from '../system/runtime/shell-manager.js';
 import { loadProjectContext } from './project-context.js';
@@ -473,10 +474,16 @@ export class HarnessAgent {
           if (toolWake) { const resolve = toolWake; toolWake = null; resolve(); }
         };
         const toolStartedAt = Date.now();
-        const toolPromise = tool.execute(call.arguments, {
-          signal: options.signal,
-          onEvent: (event) => { toolEvents.push(event); wakeTool(); },
-        }).then(
+        // An unknown parameter cannot mean what it says; report it as this
+        // tool's result so the model can correct the call on its next turn.
+        const argumentError = validateToolArguments(call.name, tools.get(call.name)?.parameters, call.arguments);
+        const toolPromise = (argumentError.ok
+          ? tool.execute(call.arguments, {
+            signal: options.signal,
+            onEvent: (event) => { toolEvents.push(event); wakeTool(); },
+          })
+          : Promise.resolve({ error: argumentError.error })
+        ).then(
           (value) => { result = value; toolSettled = true; wakeTool(); },
           (error) => { toolFailure = error; toolSettled = true; wakeTool(); },
         );
