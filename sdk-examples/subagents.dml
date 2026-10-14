@@ -1,0 +1,34 @@
+%% sdk-examples/subagents.dml — session-scoped subagents for the REPL.
+%%
+%%   deepclause repl -l sdk-examples/subagents.dml
+%%   /spawn narrate("quantum error correction")
+%%   /spawn keeper([])
+%%   /spawn asker("Which deadline should I assume?")
+%%   /ps --watch
+%%   /send keeper "the migration finished"
+%%   /send keeper stop
+%%   /stop keeper
+%%
+%% No model call is needed: the goals use output/1, receive/1 and input/2.
+
+doc(narrate/1, "One-shot: report a topic and exit.").
+doc(keeper/1, "Message-waiting: collect messages; stop on the atom `stop`.").
+doc(asker/1, "Interactive: ask the user and echo the answer.").
+
+narrate(Topic) :-
+    output("narrating {Topic}"),
+    answer(done(Topic)).
+
+keeper(Notes) :-
+    receive(Msg),
+    (   Msg = stop ->
+        output("keeper stopping"),
+        answer(Notes)
+    ;   output(Msg),
+        keeper([Msg|Notes])
+    ).
+
+asker(Question) :-
+    input(Question, Answer),
+    output("user said: {Answer}"),
+    answer(Answer).

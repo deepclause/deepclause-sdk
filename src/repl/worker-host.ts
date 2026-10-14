@@ -8,6 +8,8 @@
  */
 
 import { Worker } from 'node:worker_threads';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import type { LLMBackendRequest, LLMBackendResponse } from '../types.js';
 import type { ProcessRequestPayload, ProcessRequestResult } from '../runner.js';
@@ -41,11 +43,20 @@ interface PendingRpc {
 function defaultWorkerFactory(init: WorkerInitData): WorkerLike {
   const here = import.meta.url;
   const isTypeScript = /\.ts(\?|$)/.test(here) || here.includes('/src/');
-  const url = new URL(isTypeScript ? './process-worker.ts' : './process-worker.js', here);
-  const worker = isTypeScript
-    ? new Worker(url, { workerData: init, execArgv: ['--import', 'tsx'] })
-    : new Worker(url, { workerData: init });
-  return worker as unknown as WorkerLike;
+  if (isTypeScript) {
+    // Running from source: prefer the built worker, whose relative `.js`
+    // imports resolve under plain Node. The TypeScript worker needs tsx inside
+    // the worker, which is not always resolvable; fall back to it only if the
+    // build is absent. Run `npm run build` after runtime changes.
+    const built = new URL('../../dist/repl/process-worker.js', here);
+    if (existsSync(fileURLToPath(built))) {
+      return new Worker(built, { workerData: init }) as unknown as WorkerLike;
+    }
+    const url = new URL('./process-worker.ts', here);
+    return new Worker(url, { workerData: init, execArgv: ['--import', 'tsx'] }) as unknown as WorkerLike;
+  }
+  const url = new URL('./process-worker.js', here);
+  return new Worker(url, { workerData: init }) as unknown as WorkerLike;
 }
 
 export class RemoteProcessHost implements ProcessBackend {
