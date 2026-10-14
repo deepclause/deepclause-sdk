@@ -227,6 +227,27 @@ literals from the request; an abstraction built for a single shape; a helper
 "framework" written before the first end-to-end run; a harness that does not run
 yet because the parts are still being made tidy.
 
+# Do not parse in DML
+
+Prolog string handling is the fiddliest part of this language, and a hand-rolled
+parser out of `sub_string/5`, `split_string/4`, `atom_concat/3`, `format/2` and an
+accumulator is the easiest way to write DML that looks right and is quietly wrong.
+Do not build one. Decide what the work is and put it where it belongs:
+
+- **Mechanical** — pull a field, change a format, count, filter, join: write a
+  **helper script** (`script_file/2`, run with `exec(bash(argv: [...]))`). It is a
+  real file you can test on its own, in a language built for text. Have it emit
+  **JSON** and read it with `json_get/3` / `json_gets/3` / `json_text/2`, rather
+  than splitting its stdout by hand.
+- **Meaning** — find the field named X, classify, summarise, decide: make it a
+  **model call** with a typed output: `task("…", list(string(Items)))`, `schema/2`,
+  or `choose`/`rate`/`verify` for a bounded judgment.
+
+`exec(bash(...))` takes `command` or `argv` (plus `timeoutMs`) — there is **no
+`stdin`**. Pass data as an `argv` element or through a workspace file. `argv` is
+quoted by the runtime, so an argument can contain quotes, spaces, `$` or newlines
+safely; `command` is for pipelines and redirection.
+
 # Keep DML simple: orchestration, not algorithms
 
 DML is an **orchestration and verification** layer. A skill should read as a
@@ -619,6 +640,8 @@ More patterns: `reference("patterns")`; shapes: `reference("examples")`.
 - Add a `doc/2` for every predicate you add or change, and keep `module_doc/1`
   current — it is the skill description.
 - Test with `execute` before `end_turn`.
+- Do not parse text in DML: shell out to a helper script for mechanical work, or
+  ask the model with a typed output. There is no `stdin` on `exec(bash(...))`.
 - Ship the smallest working version first and show the user; add the next piece when
   the next request asks for it. Do not build for cases nobody has raised.
 - After finishing, if the work revealed a reusable capability, say so and offer
@@ -991,8 +1014,11 @@ Or positional if the tool supports it:
 exec(get_time, CurrentTime)
 ```
 
-The `bash` tool accepts an optional wall-clock `timeoutMs` and always returns the
-wall-clock duration as `timeMs`:
+The `bash` tool takes exactly two inputs — `command` (a shell string) or `argv` (a
+list, quoted by the runtime) — plus an optional wall-clock `timeoutMs`. There is
+**no `stdin`**: pass data as an `argv` element, or write it to a workspace file and
+name the file. stdin is `/dev/null`, so a command that reads it sees EOF rather
+than waiting. It always returns the wall-clock duration as `timeMs`:
 
 ```prolog
 exec(bash(command: "sleep 30", timeoutMs: 5000), R),
@@ -1356,7 +1382,29 @@ exec(bash(argv: ["python3", Script, UserText]), R), get_dict(stdout, R, Text).
 
 It is the same shell underneath (and the same sandbox), so pipelines and redirection
 still work with `command`; `argv` is the way to pass *data*. Prefer it whenever an
-argument comes from a file, a model, or the user.
+argument comes from a file, a model, or the user. There is no `stdin` argument.
+
+#### Do not parse in DML — shell out or ask the model
+
+String handling is the fiddliest part of Prolog, and hand-rolled parsing is the
+easiest way to write DML that looks fine and is quietly wrong. Do not build a
+parser out of `sub_string/5`, `split_string/4`, `atom_concat/3`, `format/2` and an
+accumulator. Two better answers, depending on what the work actually is:
+
+- **Mechanical** (pull a field, change a format, count, filter, join): write a
+  **helper script** and run it. A script is a file the harness links with
+  `script_file/2`, it is testable on its own, and Python/jq/sed are built for this.
+  Have it emit **JSON** and read the result with `json_get/3` / `json_gets/3` /
+  `json_text/2`, rather than splitting its stdout by hand.
+- **Meaning** (find the field named X, classify, summarise, decide): make it a
+  **model call** with a typed output — `task("…", list(string(Items)))`,
+  `schema/2`, or `choose`/`rate`/`verify` for a bounded judgment. The model is the
+  right tool for understanding text; Prolog is the right tool for *sequencing and
+  checking* it.
+
+So `exec(bash(command: "cat", stdin: "…"), R), get_dict(stdout, R, O)` has no
+place here on either count: there is no stdin, and the structured reading of the
+result is a job for a script or a model, not for the DML around the call.
 
 ### File I/O and paths — prefer the shell
 

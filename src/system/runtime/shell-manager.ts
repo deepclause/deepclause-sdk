@@ -115,6 +115,11 @@ export class HostShellManager implements ShellManager {
         cwd: this.workspacePath,
         env: launchPlan.env,
         detached: process.platform !== 'win32',
+        // stdin is /dev/null, so a command that reads it sees EOF instead of a
+        // pipe nobody writes to. Without this, `cat` (or anything that reads
+        // stdin) blocks until the idle timeout kills it — a runtime with no
+        // stdin is not a reason to hang for 30 seconds.
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
 
       observer?.onStart?.({

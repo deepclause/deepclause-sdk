@@ -77,4 +77,26 @@ describe('the authoring prompt and the language reference', () => {
     expect(guide).toContain('**Start small, then improve.**');
     expect(guide).toContain('Signs you are overengineering');
   });
+
+  it('says not to parse in DML, and that exec has no stdin', () => {
+    const prefix = behaviouralPrefix(prompt);
+    expect(prefix).toContain('Do not parse in DML');
+    // The two alternatives, in order of what the work is.
+    expect(prefix).toContain('helper script');
+    expect(prefix).toContain('model call');
+    // And the specific trap: a plausible `stdin` argument that does nothing.
+    expect(prefix).toContain('no `stdin`');
+    expect(prefix).toMatch(/argv/);
+  });
+
+  it('carries the same rule in the authoring guide', () => {
+    const guide = readFileSync(join(DOCS, 'DML_AUTHORING.md'), 'utf8');
+    expect(guide).toContain('**Do not parse in DML — shell out or ask the model.**');
+  });
+
+  it('documents the accepted bash inputs in the reference', () => {
+    const reference = readFileSync(join(DOCS, 'DML_REFERENCE.md'), 'utf8');
+    expect(reference).toContain('There is\n**no `stdin`**');
+    expect(reference).toContain('#### Do not parse in DML');
+  });
 });

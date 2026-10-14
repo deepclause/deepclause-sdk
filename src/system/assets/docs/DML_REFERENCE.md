@@ -363,8 +363,11 @@ Or positional if the tool supports it:
 exec(get_time, CurrentTime)
 ```
 
-The `bash` tool accepts an optional wall-clock `timeoutMs` and always returns the
-wall-clock duration as `timeMs`:
+The `bash` tool takes exactly two inputs — `command` (a shell string) or `argv` (a
+list, quoted by the runtime) — plus an optional wall-clock `timeoutMs`. There is
+**no `stdin`**: pass data as an `argv` element, or write it to a workspace file and
+name the file. stdin is `/dev/null`, so a command that reads it sees EOF rather
+than waiting. It always returns the wall-clock duration as `timeMs`:
 
 ```prolog
 exec(bash(command: "sleep 30", timeoutMs: 5000), R),
@@ -728,7 +731,29 @@ exec(bash(argv: ["python3", Script, UserText]), R), get_dict(stdout, R, Text).
 
 It is the same shell underneath (and the same sandbox), so pipelines and redirection
 still work with `command`; `argv` is the way to pass *data*. Prefer it whenever an
-argument comes from a file, a model, or the user.
+argument comes from a file, a model, or the user. There is no `stdin` argument.
+
+#### Do not parse in DML — shell out or ask the model
+
+String handling is the fiddliest part of Prolog, and hand-rolled parsing is the
+easiest way to write DML that looks fine and is quietly wrong. Do not build a
+parser out of `sub_string/5`, `split_string/4`, `atom_concat/3`, `format/2` and an
+accumulator. Two better answers, depending on what the work actually is:
+
+- **Mechanical** (pull a field, change a format, count, filter, join): write a
+  **helper script** and run it. A script is a file the harness links with
+  `script_file/2`, it is testable on its own, and Python/jq/sed are built for this.
+  Have it emit **JSON** and read the result with `json_get/3` / `json_gets/3` /
+  `json_text/2`, rather than splitting its stdout by hand.
+- **Meaning** (find the field named X, classify, summarise, decide): make it a
+  **model call** with a typed output — `task("…", list(string(Items)))`,
+  `schema/2`, or `choose`/`rate`/`verify` for a bounded judgment. The model is the
+  right tool for understanding text; Prolog is the right tool for *sequencing and
+  checking* it.
+
+So `exec(bash(command: "cat", stdin: "…"), R), get_dict(stdout, R, O)` has no
+place here on either count: there is no stdin, and the structured reading of the
+result is a job for a script or a model, not for the DML around the call.
 
 ### File I/O and paths — prefer the shell
 

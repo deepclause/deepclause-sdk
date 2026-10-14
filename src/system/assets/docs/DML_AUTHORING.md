@@ -86,6 +86,18 @@ A small change is also easier to trust: each commit is one reviewable unit, the
 that is incomplete but working is a better answer than one that is complete and
 unverified.
 
+**Do not parse in DML — shell out or ask the model.** Prolog string handling is
+the fiddliest thing here, and a hand-rolled parser (`sub_string/5`,
+`split_string/4`, `atom_concat/3`, `format/2`, an accumulator) is the easiest way
+to write DML that looks right and is quietly wrong. Split the work by what it is.
+Mechanical work — pull a field, change a format, count, filter — belongs in a
+**helper script** (`script_file/2` + `exec(bash(argv: [...]))`), which is testable
+outside DML and written in a language made for text; have it emit **JSON** and read
+it with `json_get/3`/`json_gets/3`/`json_text/2` instead of splitting stdout.
+Work that needs *understanding* — find the field named X, classify, summarise —
+belongs in a **model call** with a typed output (`task("…", list(string(Items)))`,
+`schema/2`, `choose`/`rate`/`verify`). DML sequences and checks; it does not parse.
+
 **Prefer orchestration over algorithms.** A skill should read as a short
 sequence of steps. Describe each step with `task/N` (which sees the conversation
 memory) or `prompt/N` (fresh context) and let the model extract, classify,
