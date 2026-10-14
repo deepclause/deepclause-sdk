@@ -2308,6 +2308,45 @@ repl_rollback(SessionId, Source, Result) :-
         format(atom(Result), 'error(~w)', [RollbackError])
     ).
 
+%% repl_harness_view(+SessionId, -Rows)
+%% One row per predicate of the harness, for the live side view:
+%%   "Name/Arity|ClauseCount|flag,flag"
+%% Text rather than terms, so the host does not have to decode compound terms through
+%% the bridge — the view needs identity (to diff) and a little detail, not structure.
+repl_harness_view(SessionId, Rows) :-
+    repl_user_predicates(SessionId, Preds),
+    findall(Row,
+        (   member(Name/Arity, Preds),
+            repl_predicate_clause_count(SessionId, Name, Arity, Clauses),
+            repl_harness_flags(SessionId, Name, Arity, Flags),
+            (   Flags == []
+            ->  FlagText = ""
+            ;   atomic_list_concat(Flags, ',', FlagText)
+            ),
+            format(atom(Row), "~w/~w|~w|~w", [Name, Arity, Clauses, FlagText])
+        ),
+        Rows).
+
+repl_predicate_clause_count(SessionId, Name, Arity, Count) :-
+    functor(Head, Name, Arity),
+    findall(x, clause(SessionId:Head, _), All),
+    length(All, Count).
+
+repl_harness_flags(SessionId, Name, Arity, Flags) :-
+    findall(Flag,
+        (   member(Flag, [entry, tool, doc, touched]),
+            repl_harness_flag(SessionId, Name, Arity, Flag)
+        ),
+        Flags).
+
+repl_harness_flag(_SessionId, agent_main, _Arity, entry).
+repl_harness_flag(SessionId, Name, _Arity, tool) :-
+    session_user_tools(SessionId, Name).
+repl_harness_flag(SessionId, Name, Arity, doc) :-
+    catch(SessionId:doc(Name/Arity, _), _, fail).
+repl_harness_flag(SessionId, Name, Arity, touched) :-
+    session_edit_touched(SessionId, Name/Arity).
+
 %% repl_user_predicates(+SessionId, -Preds)
 %% Sorted Name/Arity list of the harness's own predicates.
 repl_user_predicates(SessionId, Preds) :-

@@ -19,6 +19,7 @@ import { resolveReplJudgeSelection } from '../repl/judge.js';
 import { ReplRenderer, type RenderMode, type ReplEventRenderer } from '../repl/render.js';
 import { TranscriptDocument } from '../repl/tui/document.js';
 import { ChoicePicker } from '../repl/tui/picker.js';
+import { HarnessView } from '../repl/tui/harness-view.js';
 import { TuiRenderer } from '../repl/tui/renderer.js';
 import { WorkingLine } from '../repl/tui/working-line.js';
 import { createReplAutocomplete } from '../repl/tui/autocomplete.js';
@@ -28,6 +29,7 @@ import { ReplStatusTracker, type ReplStatusSnapshot } from '../repl/status.js';
 import { StatusBarComponent } from '../repl/tui/status-bar.js';
 import {
   Container,
+  HStack,
   ScrollView,
   Spacer,
   TuiAltScreen,
@@ -93,6 +95,8 @@ export interface ReplCliOptions {
   sandbox?: boolean;
   /** Refuse to start unless the effective shell backend is a sandbox. */
   requireSandbox?: boolean;
+  /** Start with the live harness side view open (experiment; `/harness` toggles). */
+  harnessView?: boolean;
   noAsk?: boolean;
   answer?: string;
   interactiveInput?: boolean;
@@ -114,6 +118,7 @@ export type ReplInput =
   | { kind: 'rollback' }
   | { kind: 'compact'; instructions?: string }
   | { kind: 'model'; model?: string }
+  | { kind: 'harness' }
   | { kind: 'reasoning'; level?: string }
   | { kind: 'show-reasoning' }
   | { kind: 'export'; path?: string }
@@ -213,6 +218,9 @@ export function classifyReplInput(line: string): ReplInput {
         return { kind: 'export', path: arg || undefined };
       case 'model':
         return { kind: 'model', model: arg || undefined };
+      case 'harness':
+      case 'side':
+        return { kind: 'harness' };
       case 'reasoning':
       case 'reasoning-level':
         return { kind: 'reasoning', level: arg || undefined };
@@ -1536,6 +1544,21 @@ export async function runTui(
     await persistSetting({ backend: { kind: 'pi', model: picked } }, 'model');
     renderer.writeLine(`default model set to ${picked} (takes effect on the next start)`);
   };
+  // The experiment: a live side view of the harness, beside the transcript. It reads
+  // the session module (so uncommitted edits show) and refreshes after anything that
+  // can change it. Hidden on a narrow terminal, where there is no room for a column.
+  const harnessView = new HarnessView(() => runtime.repl.session.harnessView());
+  harnessView.refresh();
+  let harnessVisible = options.harnessView ?? false;
+  const refreshHarness = (): void => {
+    if (!harnessVisible) return;
+    harnessView.refresh();
+    tui.requestRender();
+  };
+  // Poll while the view is open. It is meant to be watched, and a change has to be
+  // visible when it happens, not at the next turn boundary.
+  const harnessTimer = setInterval(refreshHarness, 600);
+
   // Transcript grows and scrolls; everything below it stays put.
   const scroll = new ScrollView(document, {
     follow: 'end',
@@ -1554,9 +1577,20 @@ export async function runTui(
     { component: editorContainer, basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
     { component: statusBar, basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
   ]);
+  const columns = new HStack([
+    { component: scroll, basis: 0, grow: 1, shrink: 1, minSize: 20 },
+    {
+      component: harnessView,
+      basis: 34,
+      grow: 0,
+      shrink: 0,
+      minSize: 24,
+      visible: (viewport) => harnessVisible && viewport.width >= 96,
+    },
+  ], { gap: 1 });
   tui.setLayoutRoot(new VStack([
     { component: new Spacer(1), basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
-    { component: scroll, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+    { component: columns, basis: 0, grow: 1, shrink: 1, minSize: 1 },
     { component: dock, basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
   ]));
   tui.start();
@@ -1575,6 +1609,14 @@ export async function runTui(
       if (input.kind === 'model' && !input.model) { await pickModel(); continue; }
       if (input.kind === 'reasoning') { await pickReasoningLevel(input.level); continue; }
       if (input.kind === 'show-reasoning') { await pickReasoningMode(); continue; }
+      if (input.kind === 'harness') {
+        harnessVisible = !harnessVisible;
+        if (harnessVisible) harnessView.refresh();
+        tui.invalidate();
+        tui.requestRender();
+        renderer.writeLine(`harness view ${harnessVisible ? 'on' : 'off'}`);
+        continue;
+      }
 
       const controller = new AbortController();
       holder.turn = controller;
@@ -1603,6 +1645,7 @@ export async function runTui(
     tui.stop();
     process.off('SIGINT', exitRepl);
     process.stdout.off('resize', onResize);
+    clearInterval(harnessTimer);
     working.stop();
     // Restore stdout so the exit footer and any later output are visible.
     runtime.renderer.setSink(
@@ -1762,6 +1805,7 @@ export function registerReplCommand(program: Command): void {
     .option('--no-tools', 'register no capability host tools')
     .option('--sandbox', 'run shell tools in AgentVM')
     .option('--require-sandbox', 'refuse to run unless the shell is sandboxed (bwrap/AgentVM/sandbox-exec)')
+    .option('--harness-view', 'open the live harness side view (experiment)')
     .option('--no-ask', 'make ask_user / input/2 fail instead of prompting')
     .option('--image-model <provider:id>', 'image model for generation (default: first available)')
     .option('--no-open', 'do not hand images to the OS viewer on terminals without inline images')
@@ -1807,6 +1851,7 @@ export function registerReplCommand(program: Command): void {
         noTools: options.tools === false,
         sandbox: options.sandbox,
         requireSandbox: options.requireSandbox,
+        harnessView: options.harnessView,
         noAsk: options.ask === false,
         imageModel: options.imageModel,
         open: options.open,

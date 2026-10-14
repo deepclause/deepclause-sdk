@@ -25,6 +25,7 @@ import {
 } from '../system/runtime/shell-manager.js';
 import { getWorkspaceDocAssetPath } from '../system/assets/index.js';
 import { DMLRunner, toJsValue, type Frame, type InternalRunOptions, type RunnerOptions } from '../runner.js';
+import type { HarnessSnapshot, HarnessPredicate } from './tui/harness-view.js';
 import {
   compactMemory,
   estimateMemoryTokens,
@@ -348,6 +349,45 @@ export class DMLSession {
 
   getSessionId(): string {
     return this.sessionId;
+  }
+
+  /**
+   * The live harness, for the side view: what predicates exist right now, how big
+   * each is, and what the open transaction has touched.
+   *
+   * Read from the session module rather than from the last commit, so a side view
+   * shows the harness *being built* — including uncommitted edits.
+   */
+  harnessView(): HarnessSnapshot {
+    const result = this.prologQuery(`deepclause_mi:repl_harness_view('${this.sessionId}', Rows)`);
+    const raw = toJsValue(result?.Rows);
+    const predicates: HarnessPredicate[] = Array.isArray(raw)
+      ? raw
+        .map((row) => String(row).split('|'))
+        .filter((parts) => parts.length === 3)
+        .map(([indicator, clauses, flags]) => {
+          const [name, arityText] = indicator.split('/');
+          return {
+            indicator: indicator.trim(),
+            name: String(name).trim(),
+            arity: Number(arityText),
+            clauses: Number(clauses),
+            flags: String(flags).split(',').map((flag) => flag.trim()).filter(Boolean),
+          };
+        })
+      : [];
+    const versionResult = this.prologQuery(
+      `( current_predicate(${this.sessionId}:harness_head/4)`
+      + ` -> ${this.sessionId}:harness_head(V, _, _, _) ; V = none )`,
+    );
+    const version = plainValue(versionResult?.V);
+    return {
+      predicates: predicates.sort((a, b) => a.indicator.localeCompare(b.indicator)),
+      version: version === 'none' ? undefined : Number(version),
+      transactionOpen: this.transactionBefore !== null,
+      touched: this.editTouched(),
+      lastCommit: this.lastTurnCommitted,
+    };
   }
 
   /**
