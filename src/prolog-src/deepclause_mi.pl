@@ -148,6 +148,7 @@
 :- dynamic session_trace_log/2.    % session_trace_log(SessionId, TraceLog) - accumulated trace entries
 :- dynamic session_trace_enabled/2. % session_trace_enabled(SessionId, true/false)
 :- dynamic session_pending_signal/2. % session_pending_signal(SessionId, Signal) - fallback for engine_fetch
+:- dynamic session_proc_result/3.  % session_proc_result(SessionId, Key, Value) - process primitive results
 :- dynamic session_user_input/2.   % session_user_input(SessionId, Input) - for ask_user tool
 :- dynamic session_input_cancelled/1. % session_input_cancelled(SessionId) - input/2 should fail (non-interactive)
 
@@ -957,7 +958,11 @@ step_engine_handle(SessionId, Engine, Status, Content, Payload) :-
             )
         ),
         Error,
-        (   format(atom(ErrMsg), 'Engine error: ~w', [Error]),
+        (   Error = process_exit(_)
+        ->  Status = finished,
+            Content = '',
+            Payload = none
+        ;   format(atom(ErrMsg), 'Engine error: ~w', [Error]),
             Status = error,
             Content = ErrMsg,
             (   session_trace_enabled(SessionId, true),
@@ -2969,6 +2974,22 @@ process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory), request_age
     payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: none, reasoningEffort: none, recipeContext: ""}) :- !.
 process_engine_result(request_exec(Tool, Args), request_exec, '',
     payload{toolName: Tool, args: Args}) :- !.
+%% Process primitives (spawn/send/receive/...) are yielded to the host, which
+%% owns identity, mailboxes, links, monitors, and naming.
+process_engine_result(request_proc(Request), request_proc, '', Payload) :-
+    proc_request_payload(Request, Payload).
+
+%% proc_request_payload(+Request, -Payload)
+proc_request_payload(self, payload{op: self}) :- !.
+proc_request_payload(spawn(Goal), payload{op: spawn, goal: Goal}) :- !.
+proc_request_payload(spawn(Goal, Options), payload{op: spawn, goal: Goal, options: Options}) :- !.
+proc_request_payload(send(To, Message), payload{op: send, to: To, message: Message}) :- !.
+proc_request_payload(receive(Timeout), payload{op: receive, timeout: Timeout}) :- !.
+proc_request_payload(exit(Reason), payload{op: exit, reason: Reason}) :- !.
+proc_request_payload(process_info(Pid), payload{op: process_info, pid: Pid}) :- !.
+proc_request_payload(register(Name, Pid), payload{op: register, name: Name, pid: Pid}) :- !.
+proc_request_payload(whereis(Name), payload{op: whereis, name: Name}) :- !.
+proc_request_payload(sleep(Milliseconds), payload{op: sleep, ms: Milliseconds}) :- !.
 process_engine_result(request_sample_token(Prompt, Allowed, ModelSpec), request_sample_token, '',
     payload{prompt: Prompt, allowedTokens: Allowed, modelSpec: ModelSpec}) :- !.
 process_engine_result(request_sample_token(Prompt, Allowed), request_sample_token, '',
@@ -3056,6 +3077,13 @@ post_exec_result(SessionId, Status, Result) :-
     retractall(session_exec_result(SessionId, _)),
     assertz(session_exec_result(SessionId, result{status: Status, result: Result})),
     post_signal_to_engine(SessionId, exec_done).
+
+%% post_proc_result(+SessionId, +Key, +Value)
+%% Reply to a process primitive (spawn/send/receive/...). Key names the result.
+post_proc_result(SessionId, Key, Value) :-
+    retractall(session_proc_result(SessionId, Key, _)),
+    assertz(session_proc_result(SessionId, Key, Value)),
+    post_signal_to_engine(SessionId, proc_done).
 
 %% post_sample_token_result(+SessionId, +Status, +TokenOrError)
 post_sample_token_result(SessionId, Status, TokenOrError) :-
@@ -4190,6 +4218,154 @@ mi_call(exec(ToolCall, Output), StateIn, StateOut) :-
     ;   add_trace_entry(SessionId, fail, ToolName, Args, Depth),
         fail
     ).
+
+%% ============================================================
+%% Process Primitives (session-scoped subagents)
+%% ============================================================
+%% These yield to the TypeScript host, which owns process identity, mailboxes,
+%% links, monitors, and naming. See docs/DML_REPL_PROCESSES_SPEC.md.
+%% Goals and messages cross the boundary as canonical term strings, so a
+%% process never shares a variable with its spawner (invariant A).
+
+%% mi_call(self(?Pid), +StateIn, -StateOut)
+mi_call(self(Pid), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    engine_yield(request_proc(self)),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, self, Pid),
+    retract(session_proc_result(SessionId, self, _)).
+
+%% mi_call(spawn(+Goal, -Pid), +StateIn, -StateOut)
+mi_call(spawn(Goal, Pid), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    copy_term(Goal, GoalCopy),
+    term_string(GoalCopy, GoalText),
+    engine_yield(request_proc(spawn(GoalText))),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, spawn, SpawnResult),
+    retract(session_proc_result(SessionId, spawn, _)),
+    (   SpawnResult = ok(Pid)
+    ->  true
+    ;   throw(error(process_spawn_failed(SpawnResult), spawn/2))
+    ).
+
+%% mi_call(spawn_opt(+Goal, -Pid, +Options), +StateIn, -StateOut)
+mi_call(spawn_opt(Goal, Pid, Options), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    copy_term(Goal, GoalCopy),
+    term_string(GoalCopy, GoalText),
+    (   is_dict(Options) -> term_string(Options, OptionsText) ; OptionsText = "{}" ),
+    engine_yield(request_proc(spawn(GoalText, OptionsText))),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, spawn, SpawnResult),
+    retract(session_proc_result(SessionId, spawn, _)),
+    (   SpawnResult = ok(Pid)
+    ->  true
+    ;   throw(error(process_spawn_failed(SpawnResult), spawn_opt/3))
+    ).
+
+%% mi_call(send(+Target, +Message), +StateIn, -StateOut)
+mi_call(send(To, Message), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    term_string(To, ToText),
+    term_string(Message, MessageText),
+    engine_yield(request_proc(send(ToText, MessageText))),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, send, SendResult),
+    retract(session_proc_result(SessionId, send, _)),
+    (   SendResult == ok
+    ->  true
+    ;   throw(error(process_send_failed(SendResult), send/2))
+    ).
+
+%% mi_call(receive(?Message), +StateIn, -StateOut)
+mi_call(receive(Message), StateIn, StateIn) :-
+    !,
+    mi_call(receive(Message, 0), StateIn, StateIn).
+
+%% mi_call(receive(?Message, +TimeoutMs), +StateIn, -StateOut)
+%% Fails on timeout, so a caller can branch on it.
+mi_call(receive(Message, TimeoutMs), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    engine_yield(request_proc(receive(TimeoutMs))),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, receive, ReceiveResult),
+    retract(session_proc_result(SessionId, receive, _)),
+    ReceiveResult = ok(Message).
+
+%% mi_call(exit(+Reason), +StateIn, -StateOut)
+%% Terminate this process. The host marks it killed; the frame is stopped by
+%% the throw below, which the runner maps to a clean termination.
+mi_call(exit(Reason), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    term_string(Reason, ReasonText),
+    engine_yield(request_proc(exit(ReasonText))),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, exit, _),
+    retract(session_proc_result(SessionId, exit, _)),
+    throw(process_exit(Reason)).
+
+%% mi_call(process_info(+Pid, -Info), +StateIn, -StateOut)
+mi_call(process_info(Pid, Info), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    term_string(Pid, PidText),
+    engine_yield(request_proc(process_info(PidText))),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, process_info, Info),
+    retract(session_proc_result(SessionId, process_info, _)).
+
+%% mi_call(register(+Name, +Pid), +StateIn, -StateOut)
+mi_call(register(Name, Pid), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    term_string(Name, NameText),
+    term_string(Pid, PidText),
+    engine_yield(request_proc(register(NameText, PidText))),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, register, RegisterResult),
+    retract(session_proc_result(SessionId, register, _)),
+    (   RegisterResult == ok
+    ->  true
+    ;   throw(error(process_register_failed(RegisterResult), register/2))
+    ).
+
+%% mi_call(whereis(+Name, ?Pid), +StateIn, -StateOut)
+mi_call(whereis(Name, Pid), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    term_string(Name, NameText),
+    engine_yield(request_proc(whereis(NameText))),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, whereis, WhereResult),
+    retract(session_proc_result(SessionId, whereis, _)),
+    WhereResult = ok(Pid).
+
+%% mi_call(sleep(+Milliseconds), +StateIn, -StateOut)
+mi_call(sleep(Milliseconds), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    engine_yield(request_proc(sleep(Milliseconds))),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, sleep, _),
+    retract(session_proc_result(SessionId, sleep, _)).
+
+%% mi_call(make_ref(-Ref), +StateIn, -StateOut)
+mi_call(make_ref(Ref), StateIn, StateIn) :-
+    !,
+    gensym(ref_, Ref).
+
+%% mi_call(now_ms(-Milliseconds), +StateIn, -StateOut)
+mi_call(now_ms(Milliseconds), StateIn, StateIn) :-
+    !,
+    get_time(Seconds),
+    Milliseconds is round(Seconds * 1000).
 
 %% ============================================================
 %% Tool Scoping Predicates
@@ -5524,6 +5700,19 @@ is_mi_special_predicate(task_named(_,_,_)).   %% Transformed form of task/N
 is_mi_special_predicate(sample_token(_,_)).
 is_mi_special_predicate(sample_token(_,_,_)).
 is_mi_special_predicate(exec(_,_)).
+is_mi_special_predicate(spawn(_,_)).
+is_mi_special_predicate(spawn_opt(_,_,_)).
+is_mi_special_predicate(self(_)).
+is_mi_special_predicate(send(_,_)).
+is_mi_special_predicate(receive(_)).
+is_mi_special_predicate(receive(_,_)).
+is_mi_special_predicate(exit(_)).
+is_mi_special_predicate(process_info(_,_)).
+is_mi_special_predicate(register(_,_)).
+is_mi_special_predicate(whereis(_,_)).
+is_mi_special_predicate(sleep(_)).
+is_mi_special_predicate(make_ref(_)).
+is_mi_special_predicate(now_ms(_)).
 is_mi_special_predicate(param(_,_)).
 is_mi_special_predicate(param(_,_,_)).
 %% Prompt predicates (like task but with fresh memory)

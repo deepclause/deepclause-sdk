@@ -24,7 +24,9 @@ import {
   type ExecutionEnvironment,
 } from '../system/runtime/shell-manager.js';
 import { getWorkspaceDocAssetPath } from '../system/assets/index.js';
-import { DMLRunner, toJsValue, type Frame, type InternalRunOptions, type RunnerOptions } from '../runner.js';
+import { DMLRunner, toJsValue, type Frame, type InternalRunOptions, type ProcessRequestPayload, type ProcessRequestResult, type RunnerOptions } from '../runner.js';
+import type { DmlProcessExecutor } from './process-executor.js';
+import type { Pid, ProcessEvent, ProcessInfo, SpawnOptions } from './processes.js';
 import type { HarnessSnapshot, HarnessPredicate } from './tui/harness-view.js';
 import {
   compactMemory,
@@ -150,12 +152,20 @@ export interface DMLSessionOptions {
   autoLoadHarness?: boolean;
 }
 
+/** Binds a running process to the host primitives it may call (spec §4). */
+export interface ProcessBinding {
+  pid: Pid;
+  handle(request: ProcessRequestPayload, signal?: AbortSignal): Promise<ProcessRequestResult>;
+}
+
 export interface DMLQueryOptions {
   tools?: Map<string, ToolDefinition>;
   toolPolicy?: ToolPolicy | null;
   onInputRequired?: (prompt: string) => Promise<string>;
   /** Per-run override of the unified input channel. */
   onInput?: (prompt: string, options?: string[]) => Promise<string | undefined>;
+  /** Process primitives (spawn/send/receive/...) resolve through this host. */
+  process?: ProcessBinding;
   signal?: AbortSignal;
   gasLimit?: number;
   /** Frame kind for the query (defaults to `object`). */
@@ -226,6 +236,11 @@ export class DMLSession {
   /** Full resolution for the backend, for the agent's environment block. */
   readonly executionEnvironment: ExecutionEnvironment;
   private readonly autoLoadHarness: boolean;
+  /** Original options, used to create per-process child sessions. */
+  private readonly openOptions: DMLSessionOptions;
+  /** Session-scoped subagents (spec §2). */
+  private processExecutor?: DmlProcessExecutor;
+  private processEventSink?: (event: ProcessEvent) => void;
   /** Monotonic per-session turn counter used by history records. */
   private turnCounter = 0;
   private historyWarned = false;
@@ -256,6 +271,7 @@ export class DMLSession {
       this.executionBackend === 'agentvm' ? {} : { wrapper: this.executionBackend },
     );
     this.autoLoadHarness = options.autoLoadHarness ?? true;
+    this.openOptions = options;
     this.compactionSettings = options.compaction?.settings;
     this.compactionAuto = options.compaction?.auto ?? false;
     this.contextWindow = options.contextWindow;
@@ -388,6 +404,80 @@ export class DMLSession {
       touched: this.editTouched(),
       lastCommit: this.lastTurnCommitted,
     };
+  }
+
+  // ---- Session-scoped subagents (spec §2) --------------------------------
+
+  /** Register the sink that receives process lifecycle and output events. */
+  setProcessEventSink(sink: ((event: ProcessEvent) => void) | undefined): void {
+    this.processEventSink = sink;
+  }
+
+  private async ensureProcessExecutor(): Promise<DmlProcessExecutor> {
+    if (this.processExecutor) return this.processExecutor;
+    const { DmlProcessExecutor } = await import('./process-executor.js');
+    this.processExecutor = new DmlProcessExecutor(this, {
+      onEvent: (event) => this.processEventSink?.(event),
+    });
+    return this.processExecutor;
+  }
+
+  /** Start a session-scoped subagent running `goal`; returns immediately. */
+  async spawnProcess(goal: string, options: SpawnOptions = {}): Promise<Pid> {
+    const executor = await this.ensureProcessExecutor();
+    return executor.host.spawn(goal, options);
+  }
+
+  /** The whole system state: every process this session owns. */
+  processes(): ProcessInfo[] {
+    return this.processExecutor?.host.processes() ?? [];
+  }
+
+  processInfo(pid: Pid): ProcessInfo | undefined {
+    return this.processExecutor?.host.info(pid);
+  }
+
+  /** Stop one process (or every process when `pid` is omitted). */
+  async stopProcess(pid: Pid, reason: unknown = 'shutdown'): Promise<void> {
+    this.processExecutor?.host.stop(pid, reason);
+  }
+
+  /** Copy a message term into a process's mailbox. */
+  sendProcess(to: Pid | string, messageTerm: string): void {
+    this.processExecutor?.host.send(to, messageTerm);
+  }
+
+  /** Request/reply against a service process (library(service) protocol). */
+  async callProcess(to: Pid | string, messageTerm: string, timeoutMs = 300_000): Promise<string> {
+    const executor = this.processExecutor;
+    if (!executor) throw new Error('no process host is running');
+    return String(await executor.callTerm(to, messageTerm, timeoutMs));
+  }
+
+  /** The living module as loadable DML source, for a process snapshot. */
+  async harnessText(): Promise<string> {
+    const result = this.prologQuery(
+      `deepclause_mi:export_harness('${this.sessionId}', '', Text)`,
+    );
+    return String(plainValue(result?.Text) ?? '');
+  }
+
+  /** A private child session carrying a snapshot of this harness (invariant C). */
+  async createProcessSession(): Promise<DMLSession> {
+    const text = await this.harnessText();
+    const child = await DMLSession.open({
+      ...this.openOptions,
+      sessionId: undefined,
+      resume: false,
+      history: undefined,
+      autoLoadHarness: false,
+      tools: this.tools,
+      toolPolicy: this.toolPolicy,
+      onInput: this.inputHandler,
+      onInputRequired: undefined,
+    });
+    if (text.trim()) await child.loadCode(text);
+    return child;
   }
 
   /**
@@ -1069,6 +1159,7 @@ export class DMLSession {
     onEvent?: (event: DMLEvent) => void,
     signal?: AbortSignal,
     bindingMode: BindingMode = 'full',
+    process?: ProcessBinding,
   ): Promise<HarnessExecuteResult> {
     const startedAt = Date.now();
     const elapsed = (): number => Date.now() - startedAt;
@@ -1104,7 +1195,7 @@ export class DMLSession {
     let runError: string | undefined;
     this.frameDepth = childDepth;
     try {
-      for await (const event of this.runner.runFrame(frame.id, this.buildRunOptions({ signal }))) {
+      for await (const event of this.runner.runFrame(frame.id, this.buildRunOptions({ signal, process }))) {
         onEvent?.(event);
         if (event.type === 'solution') {
           if (solutions.length < limit) {
@@ -1678,6 +1769,13 @@ export class DMLSession {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    if (this.processExecutor) {
+      try {
+        await this.processExecutor.host.shutdown();
+      } catch {
+        // teardown is best-effort
+      }
+    }
     if (this.history) {
       try {
         await this.persistSessionHarness(this.history.currentVersion);
@@ -1703,6 +1801,9 @@ export class DMLSession {
         : async () => undefined,
       signal: options.signal,
       onModelCall: () => this.reserveModelCall(),
+      onProcessRequest: options.process
+        ? (request, signal) => options.process!.handle(request, signal)
+        : undefined,
     };
   }
 

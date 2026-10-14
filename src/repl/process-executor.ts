@@ -1,0 +1,253 @@
+/**
+ * The DML process executor: turns a spawned goal into a `ProcessBody`.
+ *
+ * Each process runs in a **private child session** carrying a snapshot of the
+ * living module (invariant C), and resolves its primitives (spawn/send/receive/…)
+ * through the shared `LocalProcessHost`. Goals and messages cross the boundary as
+ * canonical Prolog term strings, so no variable or term is shared (invariant A).
+ *
+ * This is the L1 executor. At L2 the host is replaced by a worker-backed one and
+ * this file's role moves into the worker; nothing above it changes.
+ */
+
+import type { DMLEvent } from '../types.js';
+import type { ProcessRequestPayload, ProcessRequestResult } from '../runner.js';
+import type { DMLSession } from './session.js';
+import {
+  LocalProcessHost,
+  parsePidTerm,
+  pidTermText,
+  prologAtom,
+  type Pid,
+  type ProcessBody,
+  type ProcessContext,
+  type ProcessEvent,
+  type ProcessInfo,
+  type SpawnOptions,
+} from './processes.js';
+
+export interface DmlProcessExecutorOptions {
+  onEvent?: (event: ProcessEvent) => void;
+  maxProcesses?: number;
+  maxMailbox?: number;
+}
+
+/** A minimal parser for the `spawn_opt/3` options dict (keys are lowercase atoms). */
+function parseSpawnOptions(text: string | undefined): SpawnOptions {
+  const options: SpawnOptions = {};
+  if (!text) return options;
+  const grab = (key: string): string | undefined => {
+    const match = new RegExp(`(?:^|[,\\s{])${key}\\s*:\\s*([^,}]+)`).exec(text);
+    return match?.[1]?.trim();
+  };
+  const name = grab('name');
+  if (name && name !== '_') options.name = name.replace(/^'(.*)'$/s, '$1');
+  const priority = grab('priority');
+  if (priority === 'foreground' || priority === 'interactive' || priority === 'background') {
+    options.priority = priority;
+  }
+  const timeout = grab('timeout');
+  if (timeout && /^\d+$/.test(timeout)) options.timeoutMs = Number(timeout);
+  const code = grab('code');
+  if (code) options.codeVersion = code;
+  return options;
+}
+
+/** Render a process's info as a Prolog dict for `process_info/2`. */
+function infoTerm(info: ProcessInfo | undefined): string {
+  if (!info) return 'info{state:dead}';
+  const usage = info.usage;
+  return 'info{'
+    + `pid:${pidTermText(info.pid)},`
+    + `name:${prologAtom(info.name)},`
+    + `state:${info.state},`
+    + `priority:${info.priority},`
+    + `mailbox:${info.mailboxDepth},`
+    + `restarts:${info.restarts},`
+    + `usage:usage{input:${usage.inputTokens},output:${usage.outputTokens},total:${usage.totalTokens}}`
+    + '}';
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('aborted'));
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => {
+      clearTimeout(timer);
+      reject(new Error('aborted'));
+    }, { once: true });
+  });
+}
+
+export class DmlProcessExecutor {
+  readonly host: LocalProcessHost;
+  private readonly pidTerms = new Map<string, Pid>();
+  private readonly pendingReplies = new Map<string, (value: string) => void>();
+  private replyCounter = 0;
+
+  constructor(private readonly parent: DMLSession, options: DmlProcessExecutorOptions = {}) {
+    this.host = new LocalProcessHost({
+      sessionId: parent.getSessionId(),
+      resolveBody: (goal) => this.resolveBody(goal),
+      onEvent: options.onEvent,
+      onHostMessage: (message) => {
+        if (typeof message === 'string') this.handleHostMessage(message);
+      },
+      maxProcesses: options.maxProcesses,
+      maxMailbox: options.maxMailbox,
+    });
+  }
+
+  /** The body for a spawned goal: run it in a private child session. */
+  resolveBody(goal: string): ProcessBody {
+    return (ctx) => this.run(goal, ctx);
+  }
+
+  private async run(goal: string, ctx: ProcessContext): Promise<unknown> {
+    const child = await this.parent.createProcessSession();
+    const process = {
+      pid: ctx.pid,
+      handle: (request: ProcessRequestPayload, signal?: AbortSignal) =>
+        this.handleRequest(ctx.pid, request, signal),
+    };
+    try {
+      const result = await child.executeGoal(
+        goal,
+        1,
+        (event) => this.forwardEvent(ctx, event),
+        ctx.signal,
+        'full',
+        process,
+      );
+      if (result.error) throw new Error(result.error);
+      const output = result.output.trim();
+      if (output) return output;
+      if (result.bindings.length > 0) {
+        return result.bindings.map((binding) => `${binding.name} = ${binding.value}`).join(', ');
+      }
+      return result.solutions.length > 0 ? 'ok' : 'ok';
+    } finally {
+      await child.dispose();
+    }
+  }
+
+  private forwardEvent(ctx: ProcessContext, event: DMLEvent): void {
+    if (event.type === 'output' || event.type === 'answer') {
+      if (event.content) ctx.emit({ type: 'output', content: event.content });
+    }
+  }
+
+  /** Resolve one process primitive against the shared host (spec §4). */
+  async handleRequest(
+    pid: Pid,
+    request: ProcessRequestPayload,
+    signal?: AbortSignal,
+  ): Promise<ProcessRequestResult> {
+    switch (request.op) {
+      case 'self':
+        return { key: 'self', term: pidTermText(pid) };
+
+      case 'spawn': {
+        const options = parseSpawnOptions(request.options);
+        const childPid = this.host.spawn(request.goal ?? 'true', { ...options, parent: pid });
+        this.pidTerms.set(pidTermText(childPid), childPid);
+        return { key: 'spawn', term: `ok(${pidTermText(childPid)})` };
+      }
+
+      case 'send': {
+        const target = this.resolveTarget(request.to, pid);
+        this.host.send(target, request.message ?? 'true');
+        return { key: 'send', term: 'ok' };
+      }
+
+      case 'receive': {
+        const timeout = Number(request.timeout ?? 0);
+        const result = await this.host.receive<string>(pid, timeout > 0 ? timeout : undefined);
+        return result.ok
+          ? { key: 'receive', term: `ok(${result.message})` }
+          : { key: 'receive', term: 'timeout' };
+      }
+
+      case 'exit':
+        this.host.stop(pid, request.reason ?? 'exit');
+        return { key: 'exit', term: 'ok' };
+
+      case 'process_info': {
+        const target = this.resolveTarget(request.pid, pid);
+        const resolved = typeof target === 'string' ? this.host.whereis(target) : target;
+        return { key: 'process_info', term: infoTerm(resolved ? this.host.info(resolved) : undefined) };
+      }
+
+      case 'register': {
+        const target = this.resolveTarget(request.pid, pid);
+        const resolved = typeof target === 'string' ? this.host.whereis(target) : target;
+        if (!resolved) throw new Error(`cannot resolve pid for register: ${request.pid ?? '(self)'}`);
+        this.host.register(String(request.name ?? ''), resolved);
+        return { key: 'register', term: 'ok' };
+      }
+
+      case 'whereis': {
+        const found = this.host.whereis(String(request.name ?? ''));
+        return { key: 'whereis', term: found ? `ok(${pidTermText(found)})` : 'none' };
+      }
+
+      case 'sleep': {
+        await delay(Math.max(0, Number(request.ms ?? 0)), signal);
+        return { key: 'sleep', term: 'ok' };
+      }
+    }
+  }
+
+  /** Resolve a pid term, a registered name, or fall back to `fallback`. */
+  private resolveTarget(text: string | undefined, fallback: Pid): Pid | string {
+    if (!text) return fallback;
+    const trimmed = text.trim();
+    const mapped = this.pidTerms.get(trimmed);
+    if (mapped) return mapped;
+    const parsed = parsePidTerm(trimmed);
+    if (parsed) return parsed;
+    // A registered name arrives as a (possibly quoted) atom.
+    return trimmed.replace(/^'(.*)'$/s, '$1');
+  }
+
+  /**
+   * Host-side request/reply used by `/call` and the `call` tool. Sends
+   * `request(HostPid, Ref, Message)` and waits for `reply(Ref, Value)`.
+   */
+  async callTerm(to: Pid | string, messageTerm: string, timeoutMs: number): Promise<string> {
+    const ref = `hc${++this.replyCounter}`;
+    const request = `request(${pidTermText(this.host.hostPid)},${ref},${messageTerm})`;
+    return new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingReplies.delete(ref);
+        reject(new Error(`call timed out after ${timeoutMs} ms`));
+      }, timeoutMs);
+      this.pendingReplies.set(ref, (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      });
+      try {
+        const target = this.resolveTarget(typeof to === 'string' ? to : pidTermText(to), this.host.hostPid);
+        this.host.send(target, request);
+      } catch (error) {
+        clearTimeout(timer);
+        this.pendingReplies.delete(ref);
+        reject(error);
+      }
+    });
+  }
+
+  /** Resolve a `reply(Ref, Value)` term addressed to the host. */
+  private handleHostMessage(message: string): void {
+    const match = /^reply\(\s*([^,]+?)\s*,\s*([\s\S]*)\)$/.exec(message.trim());
+    if (!match) return;
+    const resolver = this.pendingReplies.get(match[1]);
+    if (resolver) {
+      this.pendingReplies.delete(match[1]);
+      resolver(match[2].trim());
+    }
+  }
+}

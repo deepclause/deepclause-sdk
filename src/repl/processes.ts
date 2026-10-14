@@ -37,6 +37,28 @@ export function pidKey(pid: Pid): string {
   return `${pid.node}:${pid.session}:${pid.id}`;
 }
 
+/** Quote a string as a Prolog atom when it is not a plain lowercase atom. */
+export function prologAtom(text: string): string {
+  return /^[a-z][A-Za-z0-9_]*$/.test(text) ? text : `'${text.replace(/'/g, "''")}'`;
+}
+
+/** The canonical Prolog term for a pid: `proc(Node,Session,Id)`. */
+export function pidTermText(pid: Pid): string {
+  return `proc(${prologAtom(pid.node)},${prologAtom(pid.session)},${prologAtom(pid.id)})`;
+}
+
+/** Parse `proc(Node,Session,Id)` back to a pid, or undefined. */
+export function parsePidTerm(text: string): Pid | undefined {
+  const match = /^proc\(([^,]+),([^,]+),([^)]+)\)$/.exec(text.trim());
+  if (!match) return undefined;
+  const unquote = (part: string): string => {
+    const trimmed = part.trim();
+    const quoted = /^'(.*)'$/s.exec(trimmed);
+    return quoted ? quoted[1].replace(/''/g, "'") : trimmed;
+  };
+  return { node: unquote(match[1]), session: unquote(match[2]), id: unquote(match[3]) };
+}
+
 export type ProcessPriority = 'foreground' | 'interactive' | 'background';
 
 export type ProcessState =
@@ -121,12 +143,13 @@ export class MailboxFullError extends Error {
 
 /** Plain-data lifecycle event for the service sink (spec §8.4). */
 export interface ProcessEvent {
-  type: 'started' | 'state' | 'activity' | 'answer' | 'exited';
+  type: 'started' | 'state' | 'activity' | 'answer' | 'output' | 'exited';
   at: number;
   pid: Pid;
   name: string;
   state?: ProcessState;
   activity?: string;
+  content?: string;
   answer?: unknown;
   reason?: unknown;
   error?: string;
@@ -173,6 +196,8 @@ export interface ProcessHostOptions {
   /** Resolve a spawned goal to a body. */
   resolveBody?: (goal: string) => ProcessBody | undefined;
   onEvent?: (event: ProcessEvent) => void;
+  /** Called when a message is addressed to the synthetic host pid. */
+  onHostMessage?: (message: unknown) => void;
   maxProcesses?: number;
   maxMailbox?: number;
   now?: () => number;
@@ -265,6 +290,7 @@ export class LocalProcessHost {
   private readonly node: NodeId;
   private readonly resolveBody?: (goal: string) => ProcessBody | undefined;
   private readonly onEvent?: (event: ProcessEvent) => void;
+  private readonly onHostMessage?: (message: unknown) => void;
   private readonly maxProcesses: number;
   private readonly maxMailbox: number;
   private readonly now: () => number;
@@ -285,6 +311,7 @@ export class LocalProcessHost {
     this.node = options.node ?? 'main';
     this.resolveBody = options.resolveBody;
     this.onEvent = options.onEvent;
+    this.onHostMessage = options.onHostMessage;
     this.maxProcesses = options.maxProcesses ?? 16;
     this.maxMailbox = options.maxMailbox ?? 1000;
     this.now = options.now ?? Date.now;
@@ -451,6 +478,7 @@ export class LocalProcessHost {
     // The host is a synthetic endpoint for request/reply.
     if (pidKey(pid) === pidKey(this.hostPid)) {
       const copied = copyMessage(message);
+      this.onHostMessage?.(copied);
       const ref = typeof copied === 'object' && copied !== null && 'ref' in copied
         ? String((copied as { ref: unknown }).ref)
         : undefined;

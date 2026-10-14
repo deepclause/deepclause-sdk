@@ -203,6 +203,25 @@ export interface RunnerOptions {
   environment?: import('./system/runtime/shell-manager.js').ExecutionEnvironment;
 }
 
+export interface ProcessRequestPayload {
+  op: 'self' | 'spawn' | 'send' | 'receive' | 'exit' | 'process_info' | 'register' | 'whereis' | 'sleep';
+  goal?: string;
+  options?: string;
+  to?: string;
+  message?: string;
+  timeout?: number;
+  reason?: string;
+  pid?: string;
+  name?: string;
+  ms?: number;
+}
+
+/** A process primitive's reply: the result slot key and its raw Prolog term. */
+export interface ProcessRequestResult {
+  key: 'self' | 'spawn' | 'send' | 'receive' | 'exit' | 'process_info' | 'register' | 'whereis' | 'sleep';
+  term: string;
+}
+
 export interface InternalRunOptions {
   args?: unknown[];
   params?: Record<string, unknown>;
@@ -212,6 +231,11 @@ export interface InternalRunOptions {
   toolPolicy: ToolPolicy | null;
   /** Returns the answer, or undefined to cancel/fail the input request. */
   onInputRequired: (prompt: string) => Promise<string | undefined>;
+  /** Handles a DML process primitive (spawn/send/receive/...). */
+  onProcessRequest?: (
+    request: ProcessRequestPayload,
+    signal?: AbortSignal,
+  ) => Promise<ProcessRequestResult>;
   signal?: AbortSignal;
   initialMessages?: MemoryMessage[];
   /** Per-run default judgment backend name override. */
@@ -577,6 +601,24 @@ export class DMLRunner {
             options
           );
           break;
+
+        case 'request_proc': {
+          // A DML process primitive. The host supplies the result term so the
+          // process layer owns all encoding (spec §4).
+          const payload = (step.payload ?? {}) as ProcessRequestPayload;
+          if (!options.onProcessRequest) {
+            this.postProcessResult(String(payload.op), 'error(no_process_host)');
+            break;
+          }
+          try {
+            const result = await options.onProcessRequest(payload, options.signal);
+            this.postProcessResult(result.key, result.term);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.postProcessResult(String(payload.op), `error(${JSON.stringify(message)})`);
+          }
+          break;
+        }
 
         case 'request_sample_token':
           yield* this.handleSampleToken(step.payload, options);
@@ -2485,6 +2527,15 @@ export class DMLRunner {
     this.query(
       `deepclause_mi:post_agent_result('${this.sessionId}', ${result.success}, vars{${varsStr}}, [${messagesStr}], [${fullMemoryStr}])`
     );
+  }
+
+  /**
+   * Post a process primitive result back to Prolog under a named slot.
+   * `term` is a raw Prolog term string, so the caller controls encoding.
+   */
+  private postProcessResult(key: string, term: string): void {
+    const atom = /^[a-z][A-Za-z0-9_]*$/.test(key) ? key : `'${key.replace(/'/g, "''")}'`;
+    this.query(`deepclause_mi:post_proc_result('${this.sessionId}', ${atom}, ${term})`);
   }
 
   /**
