@@ -1710,6 +1710,8 @@ repl_assert(SessionId, ClauseText, Result) :-
         (   guard_not_frozen(SessionId),
             repl_prepare_single(SessionId, ClauseText, PreparedTerms),
             forall(member(PreparedTerm, PreparedTerms),
+                repl_require_new_predicate(SessionId, PreparedTerm)),
+            forall(member(PreparedTerm, PreparedTerms),
                 repl_assert_clause(PreparedTerm, SessionId)),
             Result = ok
         ),
@@ -1815,6 +1817,9 @@ repl_assert_many(SessionId, ClausesText, Result) :-
     catch(
         (   guard_not_frozen(SessionId),
             repl_parse_clauses(SessionId, ClausesText, Terms),
+            % assert appends; against an existing predicate that leaves both
+            % versions live with their clauses interleaved.
+            forall(member(Term, Terms), repl_require_new_predicate(SessionId, Term)),
             repl_commit_terms(SessionId, Terms),
             repl_note_touched(SessionId, Terms),
             Result = ok
@@ -1838,10 +1843,104 @@ repl_term_indicator(Term, Name/Arity) :-
 %% Record the predicate indicators a term list defines, for history recording.
 repl_note_touched(SessionId, Terms) :-
     forall(( member(Term, Terms), repl_term_indicator(Term, Name/Arity) ),
-        (   session_edit_touched(SessionId, Name/Arity)
-        ->  true
-        ;   assertz(session_edit_touched(SessionId, Name/Arity))
+        repl_note_indicator(SessionId, Name/Arity)).
+
+repl_note_indicator(SessionId, Name/Arity) :-
+    (   session_edit_touched(SessionId, Name/Arity)
+    ->  true
+    ;   assertz(session_edit_touched(SessionId, Name/Arity))
+    ).
+
+%% repl_require_new_predicate(+SessionId, +Term)
+%% `assert`/`assert_many` append. Against a predicate that already has clauses
+%% that mixes the old and the new version — both stay live, clause order
+%% interleaves them, and nothing says so. Refuse instead, and name the remedy.
+repl_require_new_predicate(SessionId, Term) :-
+    repl_term_indicator(Term, Name/Arity),
+    findall(x,
+        (   functor(Head, Name, Arity),
+            clause(SessionId:Head, _)
+        ),
+        Existing),
+    Existing \== [],
+    !,
+    length(Existing, Count),
+    format(atom(Message),
+        '~w/~w already has ~w clause(s). assert appends, so the old and the new clauses would both be present and clause order would interleave them. Use define("~w/~w", "...") to replace the predicate, or delete("~w/~w") first.',
+        [Name, Arity, Count, Name, Arity, Name, Arity]),
+    throw(error(permission_error(modify, existing_predicate, Name/Arity),
+                context(repl_require_new_predicate/2, Message))).
+repl_require_new_predicate(_SessionId, _Term).
+
+%% repl_forget_tool(+SessionId, +Name)
+%% Drop the tool annotation that belonged to a predicate being removed.
+repl_forget_tool(SessionId, Name) :-
+    (   session_user_tools(SessionId, Name)
+    ->  retractall(session_user_tools(SessionId, Name)),
+        retractall(session_user_tool_schema(SessionId, Name, _)),
+        catch(retractall(SessionId:tool_source(Name, _)), _, true)
+    ;   true
+    ).
+
+%% repl_capture_predicates(+SessionId, +Indicators, -Captured)
+%% Copy the clauses and tool bookkeeping a replacement is about to destroy, so
+%% a failure part-way through can put them back.
+repl_capture_predicates(SessionId, Indicators, Captured) :-
+    findall(indicator(Name, Arity, Clauses, tool(IsTool, Schema, Source)),
+        (   member(Name/Arity, Indicators),
+            findall(Stored,
+                (   functor(Head, Name, Arity),
+                    clause(SessionId:Head, Body),
+                    (   Body == true
+                    ->  Stored = Head
+                    ;   Stored = (Head :- Body)
+                    )
+                ),
+                Clauses),
+            (   session_user_tools(SessionId, Name)
+            ->  IsTool = true
+            ;   IsTool = false
+            ),
+            (   session_user_tool_schema(SessionId, Name, Found)
+            ->  Schema = Found
+            ;   Schema = none
+            ),
+            (   current_predicate(SessionId:tool_source/2),
+                SessionId:tool_source(Name, FoundSource)
+            ->  Source = FoundSource
+            ;   Source = none
+            )
+        ),
+        Captured).
+
+%% repl_restore_captured(+SessionId, +Captured)
+repl_restore_captured(SessionId, Captured) :-
+    forall(member(indicator(Name, Arity, Clauses, tool(IsTool, Schema, Source)), Captured),
+        (   catch(abolish(SessionId:Name/Arity), _, true),
+            repl_forget_tool(SessionId, Name),
+            forall(member(Clause, Clauses), assertz(SessionId:Clause)),
+            (   IsTool == true
+            ->  assertz(session_user_tools(SessionId, Name))
+            ;   true
+            ),
+            (   Schema == none
+            ->  true
+            ;   assertz(session_user_tool_schema(SessionId, Name, Schema))
+            ),
+            (   Source == none
+            ->  true
+            ;   assertz(SessionId:tool_source(Name, Source))
+            )
         )).
+
+%% repl_replace_predicates(+SessionId, +Indicators, +Terms)
+%% The destructive half of define: abolish the targets, then assert the block.
+repl_replace_predicates(SessionId, Indicators, Terms) :-
+    forall(member(Name/Arity, Indicators),
+        (   catch(abolish(SessionId:Name/Arity), _, true),
+            repl_forget_tool(SessionId, Name)
+        )),
+    repl_commit_terms(SessionId, Terms).
 
 %% repl_edit_touched(+SessionId, -Indicators)
 %% Predicates touched by edit tools since the last clear (sorted, unique).
@@ -1873,7 +1972,13 @@ repl_system_functor(Name/_) :-
     member(Name, ['.', ',', ';', ':-', '->', ':', '|', '!', '\\+', '=', 'is']).
 
 %% repl_retract(+SessionId, +ClausePattern, -Result)
-%% Retracts matching user clauses. Reserved names are protected.
+%% Removes the clauses that match the pattern, and says how many.
+%%
+%% This used to build a fresh head with `functor/3` and call `retractall/1`, so
+%% the pattern's *arguments were discarded*: `retract("g(1)")` removed every
+%% g/1 clause and reported `ok`. It now retracts what was asked for, and fails
+%% loudly when nothing matched — a silent no-op is how an agent concludes a
+%% clause is gone when it never was.
 repl_retract(SessionId, ClauseText, Result) :-
     catch(
         (   guard_not_frozen(SessionId),
@@ -1885,19 +1990,29 @@ repl_retract(SessionId, ClauseText, Result) :-
                         context(repl_retract/3, 'cannot retract a reserved predicate')))
             ;   true
             ),
-            functor(Head, Name, Arity),
-            retractall(SessionId:Head),
-            (   session_user_tools(SessionId, Name)
-            ->  retractall(session_user_tools(SessionId, Name)),
-                retractall(session_user_tool_schema(SessionId, Name, _)),
-                retractall(SessionId:tool_source(Name, _))
+            findall(x, retract(SessionId:Pattern), Removed),
+            length(Removed, RemovedCount),
+            (   RemovedCount =:= 0
+            ->  format(atom(Message),
+                    'no clause of ~w/~w matched ~w, so nothing was removed',
+                    [Name, Arity, Clause]),
+                throw(error(existence_error(clause, Clause),
+                            context(repl_retract/3, Message)))
             ;   true
             ),
-            (   session_edit_touched(SessionId, Name/Arity)
+            % Only drop the tool annotation when the predicate is really gone;
+            % other clauses of it may still be live.
+            (   functor(Head, Name, Arity),
+                clause(SessionId:Head, _)
             ->  true
-            ;   assertz(session_edit_touched(SessionId, Name/Arity))
+            ;   repl_forget_tool(SessionId, Name)
             ),
-            Result = ok
+            repl_note_indicator(SessionId, Name/Arity),
+            (   RemovedCount =:= 1
+            ->  Suffix = ''
+            ;   Suffix = 's'
+            ),
+            format(atom(Result), 'ok(removed ~w clause~w)', [RemovedCount, Suffix])
         ),
         RetractError,
         format(atom(Result), 'error(~w)', [RetractError])
@@ -1933,39 +2048,86 @@ repl_delete_predicate(SessionId, Name, Arity, Result) :-
     ).
 
 %% repl_define(+SessionId, +HeadPatternText, +ClausesText, -Result)
-%% Replace every predicate the clause block defines. It parses the block,
-%% computes its indicators (plus the head pattern's), abolishes each, then
-%% asserts the block. This makes `define` safe no matter how many predicates a
-%% block spans, so a multi-predicate block cannot append duplicate clauses.
+%% Replace every predicate the clause block defines, all or nothing.
+%%
+%% The order matters and used to be wrong. Abolishing first and asserting after
+%% means any failure in between leaves the target *destroyed*: a block with one
+%% reserved name in it removed the predicate it was replacing and reported an
+%% error, and a following `end_turn` then committed the deletion as a version.
+%% So everything that can fail is checked before anything is touched, and the
+%% clauses being replaced are copied first so a failure can still put them back.
 repl_define(SessionId, HeadPatternText, ClausesText, Result) :-
     catch(
         (   guard_not_frozen(SessionId),
-            repl_read_clause(SessionId, HeadPatternText, Pattern),
-            repl_head_of(Pattern, HeadClause),
-            repl_callable_indicator(HeadClause, HeadName, HeadArity),
+            repl_define_target(SessionId, HeadPatternText, HeadName, HeadArity),
             repl_parse_clauses(SessionId, ClausesText, Terms),
             findall(Name/Arity,
                 ( member(Term, Terms), repl_term_indicator(Term, Name/Arity) ),
                 BlockIndicators0),
-            sort([HeadName/HeadArity|BlockIndicators0], Indicators),
-            forall(member(Name/Arity, Indicators),
-                (   repl_protected_name(Name)
-                ->  throw(error(permission_error(modify, reserved_name, Name/Arity),
-                            context(repl_define/4, 'cannot define a reserved predicate')))
-                ;   catch(abolish(SessionId:Name/Arity), _, true),
-                    (   session_user_tools(SessionId, Name)
-                    ->  retractall(session_user_tools(SessionId, Name)),
-                        retractall(session_user_tool_schema(SessionId, Name, _)),
-                        retractall(SessionId:tool_source(Name, _))
-                    ;   true
-                    )
-                )),
-            repl_commit_terms(SessionId, Terms),
+            sort(BlockIndicators0, BlockIndicators),
+            % The head names the predicate being replaced. If it is not one of
+            % them the target is almost certainly a typo, and silently replacing
+            % a *different* predicate is worse than refusing.
+            (   BlockIndicators \== [],
+                \+ member(HeadName/HeadArity, BlockIndicators)
+            ->  format(atom(TargetMessage),
+                    'define was told to replace ~w/~w, but the clause block defines ~w. Pass the predicate you are replacing as the head.',
+                    [HeadName, HeadArity, BlockIndicators]),
+                throw(error(domain_error(define_target, HeadName/HeadArity),
+                            context(repl_define/4, TargetMessage)))
+            ;   true
+            ),
+            sort([HeadName/HeadArity|BlockIndicators], Indicators),
+            % Validate everything that can fail, before anything is removed.
+            forall(member(Term, Terms), repl_require_committable(SessionId, Term)),
+            forall(member(Name/Arity, Indicators), repl_require_not_reserved(SessionId, Name/Arity)),
+            repl_capture_predicates(SessionId, Indicators, Captured),
+            (   catch(repl_replace_predicates(SessionId, Indicators, Terms), ReplaceError,
+                    (   repl_restore_captured(SessionId, Captured),
+                        throw(ReplaceError)
+                    ))
+            ),
             repl_note_touched(SessionId, Terms),
             Result = ok
         ),
         DefineError,
         format(atom(Result), 'error(~w)', [DefineError])
+    ).
+
+%% repl_define_target(+SessionId, +HeadText, -Name, -Arity)
+%% The first argument of `define` names the predicate being replaced, written as
+%% an indicator (`f/1`) or as a clause head (`f(_)`).
+%%
+%% It has to be decomposed explicitly: `f/1` *reads* as the operator term
+%% `/(f, 1)`, so treating it as a clause head yields the functor `//2`. That is
+%% what used to happen — the target was silently ignored and the clause block
+%% alone decided what got replaced, so `define` accepted any name at all.
+repl_define_target(SessionId, HeadText, Name, Arity) :-
+    repl_read_clause(SessionId, HeadText, Pattern),
+    (   Pattern = IndicatorName/IndicatorArity,
+        atom(IndicatorName),
+        integer(IndicatorArity),
+        IndicatorArity >= 0
+    ->  Name = IndicatorName,
+        Arity = IndicatorArity
+    ;   repl_head_of(Pattern, HeadClause),
+        repl_callable_indicator(HeadClause, Name, Arity)
+    ).
+
+%% repl_require_committable(+SessionId, +Term)
+repl_require_committable(_SessionId, Term) :-
+    (   repl_protected_clause(Term)
+    ->  throw(error(permission_error(modify, reserved_name, Term),
+                context(repl_define/4, 'cannot define a reserved predicate')))
+    ;   true
+    ).
+
+%% repl_require_not_reserved(+SessionId, +Indicator)
+repl_require_not_reserved(_SessionId, Name/Arity) :-
+    (   repl_protected_name(Name)
+    ->  throw(error(permission_error(modify, reserved_name, Name/Arity),
+                context(repl_define/4, 'cannot define a reserved predicate')))
+    ;   true
     ).
 
 %% repl_extract_code(+Text, -Source)

@@ -51,7 +51,12 @@ end at the invariants listed at the end of this section.
 1. **Read the current behaviour** — `listing(Name/Arity)`, its `doc/2`,
    `module_doc/1`. Do not edit from memory, or from what the name suggests.
 2. **Reproduce it** with `execute`, and keep the actual output. A fix for
-   something you cannot reproduce is a guess.
+   something you cannot reproduce is a guess. When it is not obvious where the
+   chain goes wrong, add intermediate `output/1` calls —
+   `format(string(M), "after step 2: ~w", [X]), output(M)` — to see how far it
+   gets and what the values are. They are invisible to the model, so they are the
+   cheap way to find the broken step; take them out (or keep the ones that read
+   as progress) before you finish.
 3. **Say what you will change and why**, in a line or two, before editing. If the
    right change is not obvious — the behaviour is right in one case and wrong in
    another, or the fix would alter a contract other predicates rely on — **ask the
@@ -145,9 +150,14 @@ Editing is a **transaction**:
 - `begin_turn` — open a transaction (snapshot the module). **Required before any
   edit.**
 - `define(head, clauses)` — replace the predicate(s) the clause block defines.
-- `assert(clause)` — add one clause (new predicates only).
-- `assert_many(clauses)` — add a block of clauses in written order.
-- `retract(clause)` / `delete("Name/Arity")` — remove clauses / a whole predicate.
+- `assert(clause)` / `assert_many(clauses)` — add clauses to a **new**
+  predicate, in written order. Refused when the predicate already has clauses:
+  appending would leave both versions live with their clauses interleaved. Use
+  `define` to change an existing predicate.
+- `retract(clause)` — remove the clauses **matching** a pattern, e.g.
+  `retract("f(1)")` or `retract("f(X) :- g(X)")`; it reports how many were
+  removed and fails when none matched.
+- `delete("Name/Arity")` — remove a whole predicate.
 - `end_turn` — validate and commit the change (records a version). It also
   probes the predicates you changed and returns a `warnings` list (shown as `⚠`)
   when a helper looks nondeterministic — e.g. yields many solutions on fresh
@@ -1558,6 +1568,25 @@ agent_main :-
     output("Analysis complete!"),
     answer("Done").
 ```
+
+**Use it for debugging.** When a predicate does not do what you expect, add
+`output/1` calls between the steps: you see how far execution gets, what the
+intermediate values actually are, and which call returned nothing. It costs one
+line, it is invisible to the model (unlike a `task/N` description), and it is the
+fastest way to find where a chain goes wrong:
+
+```prolog
+summarise(Doc, Summary) :-
+    extract_sections(Doc, Sections),
+    format(string(S), "sections: ~w", [Sections]), output(S),
+    pick_main(Sections, Main),
+    format(string(M), "main: ~w", [Main]), output(M),
+    task("Summarise this in one sentence: ~w", [Main], Summary).
+```
+
+Remove them before the final version, or keep the ones that read as progress
+reports — a predicate that says what it is doing is easier to debug the next
+time too.
 
 #### `yield(+Text)`
 

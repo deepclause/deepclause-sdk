@@ -343,7 +343,7 @@ describe('harness history', () => {
   it('rolls back the last harness transaction, step by step', async () => {
     const backend = new CannedBackend([
       commitResponse('demo :- output(one).'),
-      commitResponse('demo :- output(two).'),
+      defineResponse('demo', 'demo :- output(two).'),
     ]);
     repl = await createHarnessRepl({
       workspacePath: workspace,
@@ -415,7 +415,7 @@ describe('harness history', () => {
       workspacePath: workspace,
       model: 'test-model',
       provider: 'openai',
-      llmBackend: new CannedBackend([commitResponse('demo :- output(two).')]),
+      llmBackend: new CannedBackend([defineResponse('demo', 'demo :- output(two).')]),
       tools: new Map(),
       history: HISTORY,
     });

@@ -834,6 +834,25 @@ agent_main :-
     answer("Done").
 ```
 
+**Use it for debugging.** When a predicate does not do what you expect, add
+`output/1` calls between the steps: you see how far execution gets, what the
+intermediate values actually are, and which call returned nothing. It costs one
+line, it is invisible to the model (unlike a `task/N` description), and it is the
+fastest way to find where a chain goes wrong:
+
+```prolog
+summarise(Doc, Summary) :-
+    extract_sections(Doc, Sections),
+    format(string(S), "sections: ~w", [Sections]), output(S),
+    pick_main(Sections, Main),
+    format(string(M), "main: ~w", [Main]), output(M),
+    task("Summarise this in one sentence: ~w", [Main], Summary).
+```
+
+Remove them before the final version, or keep the ones that read as progress
+reports — a predicate that says what it is doing is easier to debug the next
+time too.
+
 #### `yield(+Text)`
 
 Alias for `output/1`.

@@ -130,4 +130,13 @@ describe('the authoring prompt and the language reference', () => {
     expect(prefix).toContain('after a couple of attempts');
     expect(prefix).toContain('rather than perfecting it privately');
   });
+
+  it('suggests intermediate output/1 calls for debugging', () => {
+    const prefix = behaviouralPrefix(prompt);
+    expect(prefix).toContain('add intermediate `output/1` calls');
+    // The reason it is the cheap tool: it does not touch the conversation.
+    expect(prefix).toContain('invisible to the model');
+    const reference = readFileSync(join(DOCS, 'DML_REFERENCE.md'), 'utf8');
+    expect(reference).toContain('**Use it for debugging.**');
+  });
 });

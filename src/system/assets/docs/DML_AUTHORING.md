@@ -238,11 +238,17 @@ text-only — never attach media to them.
   file must yield exactly one solution with no choicepoint left across the side
   effect (`once/1`, `->`, or a cut). Otherwise backtracking re-runs the model
   call: slow, costly, and a different answer each time.
-- Replace a predicate with `define(head, clauses)` (or `retract` then
-  `assert_many`). `assert` appends, so asserting a clause twice duplicates the
-  predicate; never patch it clause by clause.
-- Clause order matters: base case before a recursive rule; define a whole
-  predicate with `assert_many` (clauses in the order written).
+- Replace a predicate with `define(head, clauses)`, where the head names the
+  predicate being replaced and must be one of the predicates the block defines.
+  Never patch it clause by clause.
+- `assert`/`assert_many` are for a **new** predicate: they append, so against an
+  existing one both versions would stay live with their clauses interleaved, and
+  the runtime refuses the call rather than let that happen.
+- `retract` removes the clauses matching its pattern and says how many; `delete`
+  removes a whole predicate. `retract` fails when nothing matched — check that
+  the pattern is the one you meant.
+- Clause order matters: base case before a recursive rule; give a whole predicate
+  to `define`/`assert_many` at once (clauses in the order written).
 - Verify after changing a predicate: `listing(Name/Arity)`.
 - Bounded iteration only: finite recursion or an explicit bound. `execute` is
   gas-limited and the turn has a model-call budget, but a single builtin call

@@ -35,7 +35,7 @@ export interface HarnessToolController {
   /** Concise harness manifest for the system prompt. */
   manifest(): Promise<string>;
   /** Snapshot the harness and open a transaction. */
-  beginTurn(): Promise<void>;
+  beginTurn(): Promise<{ ok: boolean; error?: string }>;
   /** Validate and commit the open transaction; records a history version. */
   endTurn(): Promise<HarnessCommitResult>;
   /** Restore the last snapshot and discard edits. */
@@ -92,8 +92,7 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
     description: 'Open an edit transaction (snapshot the harness). You MUST call this before the first edit; `define`/`assert`/`assert_many`/`retract`/`delete` are refused while no transaction is open. `end_turn` commits it, `rollback` discards it.',
     parameters: { type: 'object', properties: {}, required: [] },
     execute: async () => {
-      await controller.beginTurn();
-      return { ok: true };
+      return controller.beginTurn();
     },
   });
 
@@ -139,7 +138,7 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
   });
 
   tools.set('assert', {
-    description: 'Assert one clause. Requires an open transaction (call begin_turn first). Use only for a new predicate — assert appends, so asserting over an existing predicate duplicates clauses. Use define to change one.',
+    description: 'Assert one clause of a NEW predicate. Requires an open transaction (call begin_turn first). Refused if the predicate already has clauses: use define to replace it, or delete first.',
     parameters: {
       type: 'object',
       properties: { clause: stringProp('The DML clause/fact text to assert (no trailing period required).') },
@@ -159,7 +158,7 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
   });
 
   tools.set('retract', {
-    description: 'Remove matching clauses from the harness. Requires an open transaction (call begin_turn first). Reserved names are protected.',
+    description: 'Remove the clauses matching a pattern, e.g. retract("f(1)") or retract("f(X) :- g(X)"). Reports how many were removed. Requires an open transaction (call begin_turn first). Reserved names are protected.',
     parameters: {
       type: 'object',
       properties: { clause: stringProp('The clause pattern to retract (no trailing period required).') },

@@ -1358,11 +1358,21 @@ export class DMLSession {
     return undefined;
   }
 
-  async beginTurn(): Promise<void> {
+  async beginTurn(): Promise<{ ok: boolean; error?: string }> {
+    // A second begin_turn would re-snapshot the *mid-transaction* state, so
+    // `rollback` would stop meaning "the last committed harness" and the
+    // recorded diff would lose the edits made before it.
+    if (this.transactionBefore !== null) {
+      return {
+        ok: false,
+        error: 'a transaction is already open; call end_turn to commit it, or rollback to discard it',
+      };
+    }
     this.prologQuery(`deepclause_mi:repl_snapshot_save('${this.sessionId}')`);
     this.prologQuery(`deepclause_mi:repl_edit_touched_clear('${this.sessionId}')`);
     this.transactionBefore = this.predicateList();
     this.transactionDirty = false;
+    return { ok: true };
   }
 
   async endTurn(): Promise<HarnessCommitResult> {
@@ -1511,10 +1521,17 @@ export class DMLSession {
     return undefined;
   }
 
-  private editResult(result: unknown): { ok: boolean; error?: string } {
+  private editResult(result: unknown): { ok: boolean; error?: string; note?: string } {
     if (result === 'ok') {
       this.transactionDirty = true;
       return { ok: true };
+    }
+    // `ok(Note)` carries a detail the agent should see, e.g. how many clauses a
+    // retract actually removed. Reporting it is the point of counting them.
+    const match = /^ok\(([\s\S]*)\)$/.exec(String(result).trim());
+    if (match) {
+      this.transactionDirty = true;
+      return { ok: true, note: match[1] };
     }
     return { ok: false, error: String(result) };
   }
