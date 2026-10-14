@@ -12,6 +12,7 @@
 
 import type { DMLEvent } from '../types.js';
 import type { ProcessRequestPayload, ProcessRequestResult } from '../runner.js';
+import type { ProcessBackend } from './process-backend.js';
 import type { DMLSession } from './session.js';
 import {
   LocalProcessHost,
@@ -83,7 +84,7 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-export class DmlProcessExecutor {
+export class DmlProcessExecutor implements ProcessBackend {
   readonly host: LocalProcessHost;
   private readonly pidTerms = new Map<string, Pid>();
   private readonly pendingReplies = new Map<string, (value: string) => void>();
@@ -304,5 +305,44 @@ export class DmlProcessExecutor {
     const waiter = this.hostWaiters.shift();
     if (waiter) waiter(message);
     else this.hostMailbox.push(message);
+  }
+
+  // ---- ProcessBackend -----------------------------------------------------
+
+  spawn(goal: string, options: SpawnOptions = {}): Promise<Pid> {
+    return Promise.resolve(this.host.spawn(goal, options));
+  }
+
+  send(to: Pid | string, messageTerm: unknown): void {
+    this.host.send(to, messageTerm);
+  }
+
+  async stop(target: Pid | string, reason: unknown = 'shutdown'): Promise<void> {
+    const pid = typeof target === 'string' ? this.host.whereis(target) : target;
+    if (pid) this.host.stop(pid, reason);
+  }
+
+  whereis(name: string): Pid | undefined {
+    return this.host.whereis(name);
+  }
+
+  info(pid: Pid): ProcessInfo | undefined {
+    return this.host.info(pid);
+  }
+
+  processes(): ProcessInfo[] {
+    return this.host.processes();
+  }
+
+  register(name: string, pid: Pid): void {
+    this.host.register(name, pid);
+  }
+
+  foregroundHandle(request: ProcessRequestPayload, signal?: AbortSignal): Promise<ProcessRequestResult> {
+    return this.handleRequest(this.host.hostPid, request, signal);
+  }
+
+  shutdown(): Promise<void> {
+    return this.host.shutdown();
   }
 }

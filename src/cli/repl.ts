@@ -653,6 +653,7 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
     modelResolver,
     history: historyOptions,
     harness: harnessName,
+    execution: options.execution,
     autoLoadHarness: !(options.load?.length),
     compaction: { settings: replCompaction, auto: replCompaction.auto },
     contextWindow,
@@ -1835,11 +1836,7 @@ export async function startRepl(options: ReplCliOptions): Promise<number> {
       });
     }
     if (options.execution === 'worker') {
-      runtime.renderer.writeLine(
-        'note: --execution worker is not available yet; running with the in-process (L1) host.\n'
-        + '      The process host already sits behind the ProcessHost/CapabilityBroker seam,\n'
-        + '      so worker mode is a drop-in implementation, not a rewrite.',
-      );
+      runtime.renderer.writeLine('note: subagents run in a worker thread (--execution worker)');
     }
   } catch (error) {
     process.stderr.write(`ERROR: ${(error as Error).message}\n`);

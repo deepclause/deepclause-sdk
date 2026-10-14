@@ -472,7 +472,7 @@ export class LocalProcessHost {
   // ---- messaging ----------------------------------------------------------
 
   send(to: Pid | string, message: unknown): void {
-    const pid = typeof to === 'string' ? this.names.get(to) : to;
+    const pid = typeof to === 'string' ? (this.names.get(to) ?? this.pidByLabel(to)) : to;
     if (!pid) throw new NoProcError(typeof to === 'string' ? { node: this.node, session: this.sessionId, id: to } : to);
 
     // The host is a synthetic endpoint for request/reply.
@@ -625,7 +625,7 @@ export class LocalProcessHost {
   }
 
   whereis(name: string): Pid | undefined {
-    const pid = this.names.get(name);
+    const pid = this.names.get(name) ?? this.pidByLabel(name);
     if (!pid) return undefined;
     const record = this.records.get(pidKey(pid));
     if (!record || record.terminal) {
@@ -633,6 +633,14 @@ export class LocalProcessHost {
       return undefined;
     }
     return pid;
+  }
+
+  /** Resolve a process label (the goal functor) to a live pid. */
+  private pidByLabel(name: string): Pid | undefined {
+    for (const record of this.records.values()) {
+      if (!record.terminal && record.name === name) return record.pid;
+    }
+    return undefined;
   }
 
   // ---- inspection ---------------------------------------------------------

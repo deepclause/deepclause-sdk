@@ -78,6 +78,8 @@ export interface HarnessReplOptions {
   history?: HistoryOptions;
   /** Harness this session edits (a project can hold several). Default `main`. */
   harness?: string;
+  /** Process execution mode: `inline` (L1, default) or `worker` (L2). */
+  execution?: 'inline' | 'worker';
   /** Load the harness's current content on open (default true; `-l` sets false). */
   autoLoadHarness?: boolean;
   /** TypeScript compaction settings (ported from pi). */
@@ -236,6 +238,7 @@ export async function createHarnessRepl(options: HarnessReplOptions): Promise<Ha
     history: options.history,
     harnessName: options.harness,
     autoLoadHarness: options.autoLoadHarness,
+    execution: options.execution,
     compaction: options.compaction,
     contextWindow: options.contextWindow,
     runnerOptions: {

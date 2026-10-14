@@ -26,6 +26,7 @@ import {
 import { getWorkspaceDocAssetPath } from '../system/assets/index.js';
 import { DMLRunner, toJsValue, type Frame, type InternalRunOptions, type ProcessRequestPayload, type ProcessRequestResult, type RunnerOptions } from '../runner.js';
 import { DmlProcessExecutor } from './process-executor.js';
+import type { ProcessBackend } from './process-backend.js';
 import type { Pid, ProcessEvent, ProcessInfo, SpawnOptions } from './processes.js';
 import type { HarnessSnapshot, HarnessPredicate } from './tui/harness-view.js';
 import {
@@ -43,6 +44,8 @@ import type {
   FrameKind,
   ImageBackend,
   LLMBackend,
+  LLMBackendRequest,
+  LLMBackendResponse,
   MemoryMessage,
   ToolDefinition,
   ToolPolicy,
@@ -150,6 +153,8 @@ export interface DMLSessionOptions {
    * Set false when the caller supplies content explicitly (e.g. `-l`).
    */
   autoLoadHarness?: boolean;
+  /** Process execution mode: inline (L1, default) or worker (L2). */
+  execution?: 'inline' | 'worker';
 }
 
 /** Binds a running process to the host primitives it may call (spec §4). */
@@ -245,7 +250,8 @@ export class DMLSession {
   /** Original options, used to create per-process child sessions. */
   private readonly openOptions: DMLSessionOptions;
   /** Session-scoped subagents (spec §2). */
-  private processExecutor?: DmlProcessExecutor;
+  private processBackend?: ProcessBackend;
+  private processBackendPromise?: Promise<ProcessBackend>;
   private processEventSink?: (event: ProcessEvent) => void;
   /** Service declarations replayed from the session record (resume only). */
   private recordedServices: Array<Record<string, unknown>> = [];
@@ -422,23 +428,37 @@ export class DMLSession {
     this.processEventSink = sink;
   }
 
-  private ensureProcessExecutor(): DmlProcessExecutor {
-    if (!this.processExecutor) {
-      this.processExecutor = new DmlProcessExecutor(this, {
-        onEvent: (event) => {
-          this.processEventSink?.(event);
-          this.recordServiceEvent(event);
-        },
-      });
-    }
-    return this.processExecutor;
+  /**
+   * The process backend: in-process (L1) or worker-backed (L2). Created lazily
+   * so a session with no subagents pays nothing.
+   */
+  private ensureProcessBackend(): Promise<ProcessBackend> {
+    if (this.processBackendPromise) return this.processBackendPromise;
+    const mode = this.openOptions.execution ?? 'inline';
+    this.processBackendPromise = (async () => {
+      const onEvent = (event: ProcessEvent): void => {
+        this.processEventSink?.(event);
+        this.recordServiceEvent(event);
+      };
+      if (mode === 'worker') {
+        const { RemoteProcessHost } = await import('./worker-host.js');
+        const host = new RemoteProcessHost(this, { onEvent });
+        await host.start();
+        this.processBackend = host;
+        return host;
+      }
+      const executor = new DmlProcessExecutor(this, { onEvent });
+      this.processBackend = executor;
+      return executor;
+    })();
+    return this.processBackendPromise;
   }
 
   /** Record a process declaration/exit so a resumed session can replay it (§7). */
   private recordServiceEvent(event: ProcessEvent): void {
     if (!this.history) return;
     if (event.type === 'started') {
-      const info = this.processExecutor?.host.info(event.pid);
+      const info = this.processBackend?.info(event.pid);
       void this.history.appendServiceRecord({
         type: 'declare',
         at: event.at,
@@ -467,41 +487,98 @@ export class DMLSession {
 
   /** Start a session-scoped subagent running `goal`; returns immediately. */
   async spawnProcess(goal: string, options: SpawnOptions = {}): Promise<Pid> {
-    return this.ensureProcessExecutor().host.spawn(goal, options);
+    return (await this.ensureProcessBackend()).spawn(goal, options);
   }
 
   /** The whole system state: every process this session owns. */
   processes(): ProcessInfo[] {
-    return this.processExecutor?.host.processes() ?? [];
+    return this.processBackend?.processes() ?? [];
   }
 
   processInfo(pid: Pid): ProcessInfo | undefined {
-    return this.processExecutor?.host.info(pid);
+    return this.processBackend?.info(pid);
   }
 
   /** Stop one process by pid or registered name. */
   async stopProcess(target: Pid | string, reason: unknown = 'shutdown'): Promise<void> {
-    const host = this.processExecutor?.host;
-    if (!host) return;
-    const pid = typeof target === 'string' ? host.whereis(target) : target;
-    if (pid) host.stop(pid, reason);
+    await (await this.ensureProcessBackend()).stop(target, reason);
   }
 
   /** Resolve a registered process name. */
   whereisProcess(name: string): Pid | undefined {
-    return this.processExecutor?.host.whereis(name);
+    return this.processBackend?.whereis(name);
+  }
+
+  /** Register a process under a session-scoped name. */
+  registerProcess(name: string, pid: Pid): void {
+    this.processBackend?.register(name, pid);
   }
 
   /** Copy a message term into a process's mailbox. */
   sendProcess(to: Pid | string, messageTerm: string): void {
-    this.processExecutor?.host.send(to, messageTerm);
+    this.processBackend?.send(to, messageTerm);
   }
 
   /** Request/reply against a service process (library(service) protocol). */
   async callProcess(to: Pid | string, messageTerm: string, timeoutMs = 300_000): Promise<string> {
-    const executor = this.processExecutor;
-    if (!executor) throw new Error('no process host is running');
-    return String(await executor.callTerm(to, messageTerm, timeoutMs));
+    return (await this.ensureProcessBackend()).callTerm(to, messageTerm, timeoutMs);
+  }
+
+  /** Resolve a process primitive for this (non-process) foreground run. */
+  async handleForeground(request: ProcessRequestPayload, signal?: AbortSignal): Promise<ProcessRequestResult> {
+    return (await this.ensureProcessBackend()).foregroundHandle(request, signal);
+  }
+
+  /** Host tool descriptors, for a worker's proxy tools. */
+  toolDescriptors(): Array<{ name: string; description: string; parameters: Record<string, unknown> }> {
+    return [...this.tools.entries()].map(([name, tool]) => ({
+      name,
+      description: tool.description,
+      parameters: tool.parameters as unknown as Record<string, unknown>,
+    }));
+  }
+
+  /** Run a model call on behalf of a worker's proxy backend. */
+  async completeModelRequest(request: LLMBackendRequest): Promise<LLMBackendResponse> {
+    if (!this.llmBackend) throw new Error('this session has no LLM backend');
+    return this.llmBackend.complete(request);
+  }
+
+  /** Run a host tool on behalf of a worker's proxy tool. */
+  runHostTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+    const tool = this.tools.get(name);
+    if (!tool) throw new Error(`unknown host tool: ${name}`);
+    return tool.execute(args, { signal });
+  }
+
+  /** Prompt the human on behalf of a worker's `input/2`. */
+  requestHumanInput(prompt: string): Promise<string | undefined> {
+    return this.requireInput(prompt);
+  }
+
+  // Accessors for building a worker's init data (see worker-host.ts).
+  workspacePathValue(): string | undefined {
+    return this.workspacePath;
+  }
+
+  modelId(): string {
+    return this.model;
+  }
+
+  providerId(): string {
+    return this.provider;
+  }
+
+  temperatureValue(): number {
+    return this.temperature;
+  }
+
+  maxTokensValue(): number {
+    return this.maxTokens;
+  }
+
+  toolPolicyValue(): ToolPolicy | null {
+    return this.toolPolicy;
   }
 
   /** The living module as loadable DML source, for a process snapshot. */
@@ -517,6 +594,7 @@ export class DMLSession {
     const text = await this.harnessText();
     const child = await DMLSession.open({
       ...this.openOptions,
+      execution: 'inline',
       sessionId: undefined,
       resume: false,
       history: undefined,
@@ -1819,9 +1897,9 @@ export class DMLSession {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
-    if (this.processExecutor) {
+    if (this.processBackend) {
       try {
-        await this.processExecutor.host.shutdown();
+        await this.processBackend.shutdown();
       } catch {
         // teardown is best-effort
       }
@@ -1841,9 +1919,6 @@ export class DMLSession {
 
   private buildRunOptions(options: DMLQueryOptions): InternalRunOptions {
     const inputHandler = options.onInput ?? this.inputHandler;
-    // A run that is not itself a process acts as the synthetic host process, so
-    // a `/goal` or authoring turn can also spawn, send, and call services.
-    const process = options.process ?? this.ensureProcessExecutor().foregroundBinding();
     return {
       workspacePath: this.workspacePath,
       gasLimit: options.gasLimit ?? this.gasLimit,
@@ -1854,7 +1929,11 @@ export class DMLSession {
         : async () => undefined,
       signal: options.signal,
       onModelCall: () => this.reserveModelCall(),
-      onProcessRequest: (request, signal) => process.handle(request, signal),
+      // A run that is not itself a process resolves primitives through the
+      // process backend (local or worker); a process uses its own binding.
+      onProcessRequest: options.process
+        ? (request, signal) => options.process!.handle(request, signal)
+        : (request, signal) => this.handleForeground(request, signal),
     };
   }
 
