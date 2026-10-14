@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 - 2026-10-14
 
 ### Added
 
@@ -30,6 +30,31 @@
   `none` returns no bindings. Both report what was left out and the original
   length, so a shortened value cannot be mistaken for a short one, or an omitted
   binding for a goal that bound nothing.
+
+### Changed
+
+Harness-visible behaviour that this release tightens. Each of these used to
+*succeed quietly* while doing something other than what it said; they now do what
+they claim, or refuse. Check existing harnesses and prompts for the old shapes.
+
+- **`retract` removes only the clauses matching its pattern.** It used to discard
+  the pattern's arguments and remove every clause of the predicate. A pattern
+  that matches nothing is now an error rather than a silent `ok`.
+- **`assert`/`assert_many` refuse a predicate that already has clauses.** They
+  appended, which left the old and the new version live together.
+- **`define`'s head argument is the target**, and must be a predicate the clause
+  block defines. It was parsed as a division term and silently ignored.
+- **Paths resolve against `/workspace`**, which is the working directory; there is
+  no rewriting layer. `/workspace/x` is the file `x` (it used to become
+  `/workspace/workspace/x`), and other absolute paths are the session's ephemeral
+  VM filesystem instead of being re-rooted into the workspace. `directory_files("")`
+  is now an error — use `"."`.
+- **An unknown tool parameter is an error.** `exec(bash(command: …, stdin: …))`
+  used to drop `stdin` and then block until the timeout; the call is refused, with
+  the accepted parameters named.
+- **Prolog's own stdout/stderr is captured and rendered as events** rather than
+  printed to the terminal, so a reader warning no longer corrupts an interactive
+  frame. A warning or error is shown without `--verbose`.
 
 ### Fixed
 
@@ -62,22 +87,6 @@
   then the command blocked until the timeout. An unknown tool parameter is now an
   error that names the accepted ones.
 
-### Known gaps
-
-- **The nested-tool exclusion is unverified.** A tool whose body calls `task/N` is
-  withheld from the agent that `task/N` spawns (declared with
-  `(unavailable in this task)`, and refused at dispatch if called anyway), and the
-  construction sites are unit-tested. What is *not* verified is the live nested
-  request: no test drives a tool call through the agent loop, because the DML path
-  goes through `runAgentLoop` and the AI SDK, and the existing SDK mocks call
-  `tools.X.execute` directly rather than exercising the loop's dispatch. Confirming
-  it needs either a faithful `generateText` tool-call fixture or a real model call.
-- **`schema/2` fields are described to the model, but a *changed* schema does not
-  invalidate a task that names it.** Adding a field affects the next evaluated
-  clause, not a session's existing prompt.
-
-### Fixed
-
 - **`--harness` was inert.** The REPL action handler never forwarded it, so the
   harness always resolved to `main` and no named slot was ever created.
 - **A tool that failed by returning an error rendered as a tick.** Only
@@ -106,6 +115,19 @@
   nothing, that `prompt/N` exists, or that `atom_json_dict/3` writes JSON and DCGs
   work — but `phrase/2` needs `string_chars/2` first.
 
+### Known gaps
+
+- **The nested-tool exclusion is unverified.** A tool whose body calls `task/N` is
+  withheld from the agent that `task/N` spawns (declared with
+  `(unavailable in this task)`, and refused at dispatch if called anyway), and the
+  construction sites are unit-tested. What is *not* verified is the live nested
+  request: no test drives a tool call through the agent loop, because the DML path
+  goes through `runAgentLoop` and the AI SDK, and the existing SDK mocks call
+  `tools.X.execute` directly rather than exercising the loop's dispatch. Confirming
+  it needs either a faithful `generateText` tool-call fixture or a real model call.
+- **`schema/2` fields are described to the model, but a *changed* schema does not
+  invalidate a task that names it.** Adding a field affects the next evaluated
+  clause, not a session's existing prompt.
 
 ## 0.1.1 - 2026-10-12
 
