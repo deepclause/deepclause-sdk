@@ -23,20 +23,22 @@ Every phase below preserves them.
 | 5. Persistence | ✅ `services.jsonl` declarations/exits; resume replays declarations |
 | 4. Libraries | ✅ `serve/2`, `service_call/3,4`, `service_cast/2`, `swarm/3,4`, `pmap/3`, `receive_match/3`, `receive/1,2` |
 | 5. Persistence | ✅ `services.jsonl` declarations/exits; resume replays declarations |
-| 6. L2 seam | ✅ `--execution inline\|worker` flag + seam; worker host is the remaining implementation |
+| 6. L2 seam | ✅ `--execution worker` is real: a worker thread runs the process host with its own `swipl-wasm`, capabilities are proxied to the main thread, and the panel reads a synchronous cache |
 
 ### Remaining
 
-- **`WorkerProcessHost` (L2).** `--execution worker` currently prints a notice and
-  runs inline. Everything is behind `ProcessHost`/`CapabilityBroker`, so the
-  work is a worker entrypoint plus an RPC host/broker and a pid-routed
-  `send` — no change above the seam.
 - **Non-modal background input presentation.** A subagent's `input/2` is served
   through the shared, serialized human channel and reuses the editor; there is
   no separate queued/notification surface beyond the panel's `needs input`
   marker.
 - **Enforced `swarm` concurrency.** `swarm/4` accepts a concurrency argument but
   does not yet throttle spawns (the host's process limit still bounds it).
+- **Cross-node links/monitors.** Links and monitors work within a backend; a
+  process on one node cannot link to a process on another. The pid carries the
+  node, so the routing is a later addition.
+- **Real-worker test coverage.** The worker cannot load a TypeScript entry under
+  vitest, so `worker-host.ts` is unit-tested against a scripted fake worker and
+  the real worker is verified end-to-end against `dist` (rebuild + manual run).
 
 ## Phase 1 — Process core
 
