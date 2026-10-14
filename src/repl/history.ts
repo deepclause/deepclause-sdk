@@ -754,6 +754,42 @@ export class HistoryStore {
     await this.appendRaw(file, `${JSON.stringify(record)}\n`);
   }
 
+  /**
+   * Append a session-scoped service record (a declaration or lifecycle event).
+   * See `docs/DML_REPL_PROCESSES_SPEC.md` §7.
+   */
+  async appendServiceRecord(record: Record<string, unknown>): Promise<void> {
+    try {
+      await this.appendRaw(path.join(this.sessionDirAbs, 'services.jsonl'), `${JSON.stringify(record)}\n`);
+    } catch {
+      // History is best-effort; a failed write must never fail a turn.
+    }
+  }
+
+  /** Read the recorded service declarations and lifecycle events, in order. */
+  async readServiceRecords(): Promise<Array<Record<string, unknown>>> {
+    try {
+      const text = await fs.readFile(path.join(this.sessionDirAbs, 'services.jsonl'), 'utf8');
+      return text
+        .split('\n')
+        .filter((line) => line.trim().length > 0)
+        .flatMap((line) => {
+          try {
+            return [JSON.parse(line) as Record<string, unknown>];
+          } catch {
+            return [];
+          }
+        });
+    } catch {
+      return [];
+    }
+  }
+
+  /** The workspace-relative directory of this session's records. */
+  get sessionDirectory(): string {
+    return this.sessionDirRel;
+  }
+
   private async appendRaw(file: string, text: string): Promise<void> {
     await fs.mkdir(path.dirname(file), { recursive: true });
     await fs.appendFile(file, text, 'utf8');

@@ -106,6 +106,10 @@ export interface ReplCliOptions {
   open?: boolean;
   /** Interactive UI: auto (TUI on a TTY), on, or off. */
   tui?: 'auto' | 'on' | 'off';
+  /** Process execution mode: inline (L1, default) or worker (L2, planned). */
+  execution?: 'inline' | 'worker';
+  /** Worker pool size for `--execution worker`. */
+  workers?: number;
 }
 
 export type ReplInput =
@@ -1808,6 +1812,13 @@ export async function startRepl(options: ReplCliOptions): Promise<number> {
         channel: message.channel,
       });
     }
+    if (options.execution === 'worker') {
+      runtime.renderer.writeLine(
+        'note: --execution worker is not available yet; running with the in-process (L1) host.\n'
+        + '      The process host already sits behind the ProcessHost/CapabilityBroker seam,\n'
+        + '      so worker mode is a drop-in implementation, not a rewrite.',
+      );
+    }
   } catch (error) {
     process.stderr.write(`ERROR: ${(error as Error).message}\n`);
     return 1;
@@ -1942,6 +1953,13 @@ export function registerReplCommand(program: Command): void {
     .option('--sandbox', 'run shell tools in AgentVM')
     .option('--require-sandbox', 'refuse to run unless the shell is sandboxed (bwrap/AgentVM/sandbox-exec)')
     .option('--harness-view', 'open the live harness side view (experiment)')
+    .option('--execution <mode>', 'process execution mode: inline (L1, default) or worker (L2)', (value: string) => {
+      if (value !== 'inline' && value !== 'worker') {
+        throw new Error(`invalid --execution: ${value} (use inline or worker)`);
+      }
+      return value;
+    })
+    .option('--workers <n>', 'worker pool size for --execution worker', parseInt)
     .option('--no-ask', 'make ask_user / input/2 fail instead of prompting')
     .option('--image-model <provider:id>', 'image model for generation (default: first available)')
     .option('--no-open', 'do not hand images to the OS viewer on terminals without inline images')
@@ -1988,6 +2006,8 @@ export function registerReplCommand(program: Command): void {
         sandbox: options.sandbox,
         requireSandbox: options.requireSandbox,
         harnessView: options.harnessView,
+        execution: options.execution,
+        workers: options.workers,
         noAsk: options.ask === false,
         imageModel: options.imageModel,
         open: options.open,

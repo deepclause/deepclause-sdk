@@ -12,7 +12,18 @@ Every phase below preserves them.
 
 ---
 
-## Phase 1 — Process core (this phase)
+## Status
+
+| Phase | State |
+|---|---|
+| 1. Process core + seam | ✅ `src/repl/processes.ts`, 18 tests |
+| 2. DML surface + executor | ✅ MI primitives, runner `request_proc`, `process-executor.ts`, e2e tests |
+| 3. REPL integration | ✅ harness tools, `/spawn` `/ps` `/send` `/call` `/stop`, event sink, status segment |
+| 4. Libraries | ✅ `serve/2`, `service_call/3,4`, `service_cast/2` built-ins (`library(swarm)` deferred) |
+| 5. Persistence | ✅ `services.jsonl` declarations/exits; resume replays declarations |
+| 6. L2 seam | ✅ `--execution inline\|worker` flag + seam; worker host is the remaining implementation |
+
+## Phase 1 — Process core
 
 The host bookkeeping and the L1↔L2 seam, independent of Prolog. Fully unit-tested.
 

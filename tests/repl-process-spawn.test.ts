@@ -92,4 +92,26 @@ describe('session-scoped subagents', () => {
     const info = repl.session.processes().find((p) => p.pid.id === pid.id);
     expect(['killed', 'crashed', 'done']).toContain(info?.state);
   });
+
+  it('serves request/reply through service_call and serve', async () => {
+    await define('echo/1', [
+      'echo(State) :-',
+      '    receive(Msg),',
+      '    (   Msg = request(From, Ref, Value) -> send(From, reply(Ref, Value)), echo(State)',
+      '    ;   echo(State)',
+      '    ).',
+    ].join('\n'));
+    await define('start_echo/0', 'start_echo :- serve(echo, echo(ok)).');
+    await define('ask_echo/1', 'ask_echo(Reply) :- service_call(echo, hello, Reply).');
+
+    await repl.session.executeGoal('start_echo', 1);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    const result = await repl.session.executeGoal('ask_echo(Reply)', 1);
+    expect(result.error).toBeUndefined();
+    expect(result.bindings.some((binding) => binding.name === 'Reply' && binding.value === 'hello')).toBe(true);
+
+    const service = repl.session.processes().find((p) => p.name === 'echo');
+    expect(service).toBeDefined();
+  });
 });

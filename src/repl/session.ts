@@ -25,7 +25,7 @@ import {
 } from '../system/runtime/shell-manager.js';
 import { getWorkspaceDocAssetPath } from '../system/assets/index.js';
 import { DMLRunner, toJsValue, type Frame, type InternalRunOptions, type ProcessRequestPayload, type ProcessRequestResult, type RunnerOptions } from '../runner.js';
-import type { DmlProcessExecutor } from './process-executor.js';
+import { DmlProcessExecutor } from './process-executor.js';
 import type { Pid, ProcessEvent, ProcessInfo, SpawnOptions } from './processes.js';
 import type { HarnessSnapshot, HarnessPredicate } from './tui/harness-view.js';
 import {
@@ -241,6 +241,8 @@ export class DMLSession {
   /** Session-scoped subagents (spec §2). */
   private processExecutor?: DmlProcessExecutor;
   private processEventSink?: (event: ProcessEvent) => void;
+  /** Service declarations replayed from the session record (resume only). */
+  private recordedServices: Array<Record<string, unknown>> = [];
   /** Monotonic per-session turn counter used by history records. */
   private turnCounter = 0;
   private historyWarned = false;
@@ -315,6 +317,7 @@ export class DMLSession {
         session.harnessName,
       );
       snapshot = await store.readSessionHarness();
+      session.recordedServices = await store.readServiceRecords();
       if (!snapshot) {
         throw new Error(`session not found or has no saved harness: ${session.sessionId}`);
       }
@@ -413,19 +416,52 @@ export class DMLSession {
     this.processEventSink = sink;
   }
 
-  private async ensureProcessExecutor(): Promise<DmlProcessExecutor> {
-    if (this.processExecutor) return this.processExecutor;
-    const { DmlProcessExecutor } = await import('./process-executor.js');
-    this.processExecutor = new DmlProcessExecutor(this, {
-      onEvent: (event) => this.processEventSink?.(event),
-    });
+  private ensureProcessExecutor(): DmlProcessExecutor {
+    if (!this.processExecutor) {
+      this.processExecutor = new DmlProcessExecutor(this, {
+        onEvent: (event) => {
+          this.processEventSink?.(event);
+          this.recordServiceEvent(event);
+        },
+      });
+    }
     return this.processExecutor;
+  }
+
+  /** Record a process declaration/exit so a resumed session can replay it (§7). */
+  private recordServiceEvent(event: ProcessEvent): void {
+    if (!this.history) return;
+    if (event.type === 'started') {
+      const info = this.processExecutor?.host.info(event.pid);
+      void this.history.appendServiceRecord({
+        type: 'declare',
+        at: event.at,
+        pid: event.pid,
+        name: event.name,
+        goal: info?.goal,
+        priority: info?.priority,
+        codeVersion: info?.codeVersion,
+      });
+    } else if (event.type === 'exited') {
+      void this.history.appendServiceRecord({
+        type: 'exit',
+        at: event.at,
+        pid: event.pid,
+        name: event.name,
+        state: event.state,
+        reason: event.reason,
+      });
+    }
+  }
+
+  /** Service declarations replayed from the session record (resume only). */
+  recordedProcesses(): Array<Record<string, unknown>> {
+    return this.recordedServices;
   }
 
   /** Start a session-scoped subagent running `goal`; returns immediately. */
   async spawnProcess(goal: string, options: SpawnOptions = {}): Promise<Pid> {
-    const executor = await this.ensureProcessExecutor();
-    return executor.host.spawn(goal, options);
+    return this.ensureProcessExecutor().host.spawn(goal, options);
   }
 
   /** The whole system state: every process this session owns. */
@@ -1799,6 +1835,9 @@ export class DMLSession {
 
   private buildRunOptions(options: DMLQueryOptions): InternalRunOptions {
     const inputHandler = options.onInput ?? this.inputHandler;
+    // A run that is not itself a process acts as the synthetic host process, so
+    // a `/goal` or authoring turn can also spawn, send, and call services.
+    const process = options.process ?? this.ensureProcessExecutor().foregroundBinding();
     return {
       workspacePath: this.workspacePath,
       gasLimit: options.gasLimit ?? this.gasLimit,
@@ -1809,9 +1848,7 @@ export class DMLSession {
         : async () => undefined,
       signal: options.signal,
       onModelCall: () => this.reserveModelCall(),
-      onProcessRequest: options.process
-        ? (request, signal) => options.process!.handle(request, signal)
-        : undefined,
+      onProcessRequest: (request, signal) => process.handle(request, signal),
     };
   }
 

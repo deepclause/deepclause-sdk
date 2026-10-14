@@ -4367,6 +4367,75 @@ mi_call(now_ms(Milliseconds), StateIn, StateIn) :-
     get_time(Seconds),
     Milliseconds is round(Seconds * 1000).
 
+%% mi_call(serve(+Name, +Goal), +StateIn, -StateOut)
+%% Spawn a session-scoped process and register it under Name. Sugar over
+%% spawn/2 + register/2; the goal decides the process's shape.
+mi_call(serve(Name, Goal), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    copy_term(Goal, GoalCopy),
+    term_string(GoalCopy, GoalText),
+    engine_yield(request_proc(spawn(GoalText))),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, spawn, SpawnResult),
+    retract(session_proc_result(SessionId, spawn, _)),
+    SpawnResult = ok(Pid),
+    term_string(Name, NameText),
+    term_string(Pid, PidText),
+    engine_yield(request_proc(register(NameText, PidText))),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, register, _),
+    retract(session_proc_result(SessionId, register, _)).
+
+%% mi_call(service_cast(+Target, +Message), +StateIn, -StateOut)
+mi_call(service_cast(Target, Message), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    term_string(Target, TargetText),
+    term_string(Message, MessageText),
+    engine_yield(request_proc(send(TargetText, MessageText))),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, send, _),
+    retract(session_proc_result(SessionId, send, _)).
+
+%% mi_call(service_call(+Target, +Request, -Reply), +StateIn, -StateOut)
+mi_call(service_call(Target, Request, Reply), StateIn, StateOut) :-
+    !,
+    mi_call(service_call(Target, Request, Reply, 300000), StateIn, StateOut).
+
+%% mi_call(service_call(+Target, +Request, -Reply, +TimeoutMs), ...)
+%% Request/reply against a process using the request(From, Ref, Request) /
+%% reply(Ref, Value) protocol. Unrelated messages are ignored while waiting.
+mi_call(service_call(Target, Request, Reply, Timeout), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    gensym(reply_ref_, Ref),
+    engine_yield(request_proc(self)),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, self, Me),
+    retract(session_proc_result(SessionId, self, _)),
+    term_string(Target, TargetText),
+    term_string(request(Me, Ref, Request), RequestText),
+    engine_yield(request_proc(send(TargetText, RequestText))),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, send, _),
+    retract(session_proc_result(SessionId, send, _)),
+    service_await_reply(Ref, Reply, Timeout).
+
+%% service_await_reply(+Ref, -Reply, +TimeoutMs)
+service_await_reply(Ref, Reply, Timeout) :-
+    get_session_id(SessionId),
+    engine_yield(request_proc(receive(Timeout))),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, receive, Result),
+    retract(session_proc_result(SessionId, receive, _)),
+    (   Result = ok(reply(Ref, Reply))
+    ->  true
+    ;   Result = ok(_)
+    ->  service_await_reply(Ref, Reply, Timeout)
+    ;   fail
+    ).
+
 %% ============================================================
 %% Tool Scoping Predicates
 %% ============================================================
@@ -5713,6 +5782,10 @@ is_mi_special_predicate(whereis(_,_)).
 is_mi_special_predicate(sleep(_)).
 is_mi_special_predicate(make_ref(_)).
 is_mi_special_predicate(now_ms(_)).
+is_mi_special_predicate(serve(_,_)).
+is_mi_special_predicate(service_cast(_,_)).
+is_mi_special_predicate(service_call(_,_,_)).
+is_mi_special_predicate(service_call(_,_,_,_)).
 is_mi_special_predicate(param(_,_)).
 is_mi_special_predicate(param(_,_,_)).
 %% Prompt predicates (like task but with fresh memory)

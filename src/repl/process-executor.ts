@@ -16,6 +16,7 @@ import type { DMLSession } from './session.js';
 import {
   LocalProcessHost,
   parsePidTerm,
+  pidKey,
   pidTermText,
   prologAtom,
   type Pid,
@@ -86,6 +87,8 @@ export class DmlProcessExecutor {
   readonly host: LocalProcessHost;
   private readonly pidTerms = new Map<string, Pid>();
   private readonly pendingReplies = new Map<string, (value: string) => void>();
+  private readonly hostMailbox: string[] = [];
+  private readonly hostWaiters: Array<(message: string | undefined) => void> = [];
   private replyCounter = 0;
 
   constructor(private readonly parent: DMLSession, options: DmlProcessExecutorOptions = {}) {
@@ -104,6 +107,17 @@ export class DmlProcessExecutor {
   /** The body for a spawned goal: run it in a private child session. */
   resolveBody(goal: string): ProcessBody {
     return (ctx) => this.run(goal, ctx);
+  }
+
+  /**
+   * A binding for the foreground (non-process) run, using the synthetic host
+   * pid. It lets a `/goal` or an authoring turn spawn, send, and call services.
+   */
+  foregroundBinding(): { pid: Pid; handle: (request: ProcessRequestPayload, signal?: AbortSignal) => Promise<ProcessRequestResult> } {
+    return {
+      pid: this.host.hostPid,
+      handle: (request, signal) => this.handleRequest(this.host.hostPid, request, signal),
+    };
   }
 
   private async run(goal: string, ctx: ProcessContext): Promise<unknown> {
@@ -152,7 +166,8 @@ export class DmlProcessExecutor {
 
       case 'spawn': {
         const options = parseSpawnOptions(request.options);
-        const childPid = this.host.spawn(request.goal ?? 'true', { ...options, parent: pid });
+        const isHost = pidKey(pid) === pidKey(this.host.hostPid);
+        const childPid = this.host.spawn(request.goal ?? 'true', isHost ? options : { ...options, parent: pid });
         this.pidTerms.set(pidTermText(childPid), childPid);
         return { key: 'spawn', term: `ok(${pidTermText(childPid)})` };
       }
@@ -165,6 +180,12 @@ export class DmlProcessExecutor {
 
       case 'receive': {
         const timeout = Number(request.timeout ?? 0);
+        if (pidKey(pid) === pidKey(this.host.hostPid)) {
+          const message = await this.hostReceive(timeout > 0 ? timeout : undefined);
+          return message === undefined
+            ? { key: 'receive', term: 'timeout' }
+            : { key: 'receive', term: `ok(${message})` };
+        }
         const result = await this.host.receive<string>(pid, timeout > 0 ? timeout : undefined);
         return result.ok
           ? { key: 'receive', term: `ok(${result.message})` }
@@ -240,14 +261,39 @@ export class DmlProcessExecutor {
     });
   }
 
-  /** Resolve a `reply(Ref, Value)` term addressed to the host. */
+  /** Pop a message addressed to the synthetic host pid, or wait. */
+  private hostReceive(timeoutMs?: number): Promise<string | undefined> {
+    if (this.hostMailbox.length > 0) return Promise.resolve(this.hostMailbox.shift());
+    return new Promise<string | undefined>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const waiter = (message: string | undefined): void => {
+        if (timer) clearTimeout(timer);
+        resolve(message);
+      };
+      if (timeoutMs && timeoutMs > 0) {
+        timer = setTimeout(() => {
+          const index = this.hostWaiters.indexOf(waiter);
+          if (index !== -1) this.hostWaiters.splice(index, 1);
+          resolve(undefined);
+        }, timeoutMs);
+      }
+      this.hostWaiters.push(waiter);
+    });
+  }
+
+  /** Resolve a `reply(Ref, Value)` addressed to the host, or queue the message. */
   private handleHostMessage(message: string): void {
     const match = /^reply\(\s*([^,]+?)\s*,\s*([\s\S]*)\)$/.exec(message.trim());
-    if (!match) return;
-    const resolver = this.pendingReplies.get(match[1]);
-    if (resolver) {
-      this.pendingReplies.delete(match[1]);
-      resolver(match[2].trim());
+    if (match) {
+      const resolver = this.pendingReplies.get(match[1]);
+      if (resolver) {
+        this.pendingReplies.delete(match[1]);
+        resolver(match[2].trim());
+        return;
+      }
     }
+    const waiter = this.hostWaiters.shift();
+    if (waiter) waiter(message);
+    else this.hostMailbox.push(message);
   }
 }
