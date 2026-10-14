@@ -59,4 +59,22 @@ describe('the authoring prompt and the language reference', () => {
       expect(prefix).toContain(tool);
     }
   });
+
+  it('tells the agent to start small and show the user', () => {
+    // Scope discipline: the counterweight to everything else in the prompt, which
+    // encourages reuse, generality and documentation. Without this an agent
+    // generalises and abstracts before anything runs.
+    const prefix = behaviouralPrefix(prompt);
+    expect(prefix).toContain('Start small, then improve');
+    expect(prefix).toContain('show the user');
+    expect(prefix).toMatch(/smallest/);
+  });
+
+  it('carries the same rule in the authoring guide', () => {
+    // DML_AUTHORING.md is not part of this prompt; it is read via
+    // reference("authoring"), so it needs its own guard.
+    const guide = readFileSync(join(DOCS, 'DML_AUTHORING.md'), 'utf8');
+    expect(guide).toContain('**Start small, then improve.**');
+    expect(guide).toContain('Signs you are overengineering');
+  });
 });

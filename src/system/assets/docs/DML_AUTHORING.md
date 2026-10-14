@@ -58,6 +58,34 @@ extractor, or transformation that must not be swayed by the conversation;
 caller's memory on exit. A `task/N` inside a `tool/2` body starts empty: give it the
 context as an argument.
 
+**Start small, then improve.** Write the smallest harness that answers the actual
+request end to end — often a single predicate — run it on a real input, and show
+the user the result *before* extending it. Say what it does, what it does not do
+yet, and what you would add next, then let the next request decide. A harness grows
+in the direction the user actually takes it.
+
+Adding capability speculatively is the expensive mistake, and it costs more here
+than in a normal codebase: every predicate is part of the harness the next turn has
+to reason about, and every helper is one more thing the model can be offered as a
+tool. Do not write an error taxonomy before an error has occurred, retry and
+fallback policies before something has failed, caching or configuration layers
+before there is a reason, or a predicate per case for cases you have not seen.
+Prefer the smallest change that makes the failing input work.
+
+Signs you are overengineering:
+
+- a predicate with one caller whose arguments are all literals from the request;
+- an abstraction (a schema, an options list, a dispatch table) built for a single
+  shape or a single value;
+- a helper "framework" written before the first end-to-end run;
+- generalizing across cases that no one has asked for yet;
+- a harness that does not run yet, because the parts are still being made tidy.
+
+A small change is also easier to trust: each commit is one reviewable unit, the
+`end_turn` probes report on a small surface, and `rollback` stays cheap. A harness
+that is incomplete but working is a better answer than one that is complete and
+unverified.
+
 **Prefer orchestration over algorithms.** A skill should read as a short
 sequence of steps. Describe each step with `task/N` (which sees the conversation
 memory) or `prompt/N` (fresh context) and let the model extract, classify,

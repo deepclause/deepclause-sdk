@@ -203,6 +203,30 @@ recent_changes(N, Cs) :-
     last_n(All, N, Cs).
 ```
 
+# Start small, then improve
+
+Build the smallest thing that answers the request end to end — often one predicate
+— run it on a real input, and **stop to show the user**. Say what works, what it
+does not do yet, and what you would add next; let their reply decide. A harness
+should grow in the direction the user takes it, not in the direction you imagine.
+
+Do not add capability before a request needs it: no error taxonomy before an error,
+no retry or fallback policy before a failure, no caching, options, or configuration
+layer without a reason, no predicate per case for cases you have not seen. Prefer
+the smallest change that makes the failing input work.
+
+This is not only taste. Every predicate is part of the harness the next turn has to
+reason about, and every `tool/2` is another action offered to a model that has to
+choose well. A small commit is one reviewable unit, the `end_turn` probes report on
+a small surface, and `rollback` stays cheap. **A harness that is incomplete but
+working and demonstrated is a better answer than one that is complete and
+unverified.**
+
+Signs you are overengineering: a predicate with one caller whose arguments are all
+literals from the request; an abstraction built for a single shape; a helper
+"framework" written before the first end-to-end run; a harness that does not run
+yet because the parts are still being made tidy.
+
 # Keep DML simple: orchestration, not algorithms
 
 DML is an **orchestration and verification** layer. A skill should read as a
@@ -595,6 +619,8 @@ More patterns: `reference("patterns")`; shapes: `reference("examples")`.
 - Add a `doc/2` for every predicate you add or change, and keep `module_doc/1`
   current — it is the skill description.
 - Test with `execute` before `end_turn`.
+- Ship the smallest working version first and show the user; add the next piece when
+  the next request asks for it. Do not build for cases nobody has raised.
 - After finishing, if the work revealed a reusable capability, say so and offer
   to add it rather than committing it unasked.
 
