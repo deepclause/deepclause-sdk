@@ -1547,7 +1547,20 @@ export async function runTui(
   // The experiment: a live side view of the harness, beside the transcript. It reads
   // the session module (so uncommitted edits show) and refreshes after anything that
   // can change it. Hidden on a narrow terminal, where there is no room for a column.
-  const harnessView = new HarnessView(() => runtime.repl.session.harnessView());
+  const harnessView = new HarnessView(() => runtime.repl.session.harnessView(), {
+    // The view asks; the host fetches (the listing query is async) and hands it back.
+    requestSource: (indicator) => {
+      void runtime.repl.session.listing(indicator).then((text) => {
+        harnessView.setSource(indicator, text.split('\n'));
+        tui.requestRender();
+      });
+    },
+    // Escape with nothing drilled into: hand the keyboard back to the editor.
+    onExit: () => {
+      if (editor) tui.setFocus(editor);
+      tui.requestRender();
+    },
+  });
   harnessView.refresh();
   let harnessVisible = options.harnessView ?? false;
   const refreshHarness = (): void => {

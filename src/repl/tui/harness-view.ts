@@ -13,7 +13,15 @@
  * rewards watching over time.
  */
 
-import { truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from '@earendil-works/pi-tui';
+import {
+  matchesKey,
+  truncateToWidth,
+  visibleWidth,
+  wrapTextWithAnsi,
+  type Component,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
+} from '@earendil-works/pi-tui';
 
 import { paintToken, tuiStyle } from './theme.js';
 
@@ -49,6 +57,10 @@ type Change = 'added' | 'changed' | 'removed';
 export interface HarnessViewOptions {
   /** Injectable clock, so the flash window is testable without fake timers. */
   now?: () => number;
+  /** Ask the host for a predicate's source; answered with `setSource`. */
+  requestSource?: (indicator: string) => void;
+  /** Called when the user leaves the view, so focus can go back to the editor. */
+  onExit?: () => void;
 }
 
 export class HarnessView implements Component {
@@ -62,10 +74,116 @@ export class HarnessView implements Component {
   private removed: string[] = [];
   private lastRefresh = 0;
   private lastNote = '';
+  /** Cursor and the predicate being drilled into. */
+  private selected = 0;
+  private openIndicator?: string;
+  private sourceLines: string[] = [];
+  private sourceLoading = false;
+  /** Where the predicate rows start in the rendered output, for hit-testing clicks. */
+  private rowsStart = 0;
 
   constructor(getSnapshot: () => HarnessSnapshot | undefined, options: HarnessViewOptions = {}) {
     this.getSnapshot = getSnapshot;
     this.clock = options.now ?? (() => Date.now());
+    this.requestSource = options.requestSource;
+    this.onExit = options.onExit;
+  }
+
+  private readonly requestSource?: (indicator: string) => void;
+  private readonly onExit?: () => void;
+
+  /** The predicate under the cursor. */
+  get selectedIndicator(): string | undefined {
+    return this.rows[this.selected]?.indicator;
+  }
+
+  /** The predicate currently drilled into, if any. */
+  get open(): string | undefined {
+    return this.openIndicator;
+  }
+
+  /** The host's answer to `requestSource`. */
+  setSource(indicator: string, lines: string[]): void {
+    if (indicator !== this.openIndicator) return;
+    this.sourceLines = lines.map((line) => line.replace(/\s+$/, ''));
+    this.sourceLoading = false;
+  }
+
+  private openPredicate(indicator: string | undefined): void {
+    if (!indicator) return;
+    this.openIndicator = indicator;
+    this.sourceLines = [];
+    this.sourceLoading = true;
+    this.requestSource?.(indicator);
+  }
+
+  private closeDrilldown(): void {
+    this.openIndicator = undefined;
+    this.sourceLines = [];
+    this.sourceLoading = false;
+  }
+
+  /** Keyboard: move the cursor, open a predicate, go back. */
+  handleInput(data: string): void {
+    if (matchesKey(data, 'escape') || matchesKey(data, 'left')) {
+      if (this.openIndicator) {
+        this.closeDrilldown();
+        return;
+      }
+      this.onExit?.();
+      return;
+    }
+    if (matchesKey(data, 'up') || matchesKey(data, 'k')) {
+      this.moveCursor(-1);
+      return;
+    }
+    if (matchesKey(data, 'down') || matchesKey(data, 'j')) {
+      this.moveCursor(1);
+      return;
+    }
+    if (matchesKey(data, 'enter') || matchesKey(data, 'right') || matchesKey(data, 'space')) {
+      const indicator = this.selectedIndicator;
+      if (this.openIndicator === indicator) this.closeDrilldown();
+      else this.openPredicate(indicator);
+    }
+  }
+
+  /**
+   * Mouse: the alternate screen routes a click to the box under the pointer and makes
+   * `y` relative to this component, so the rendered line index is the hit test.
+   */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (event.type === 'wheel') {
+      this.moveCursor((event.wheelDelta ?? 0) > 0 ? 1 : -1);
+      return { handled: true, render: true };
+    }
+    if (event.type !== 'press' && event.type !== 'click') return undefined;
+    const index = event.y - this.rowsStart;
+    if (index < 0 || index >= this.rows.length) {
+      // Clicking the header or the sparkline drills back out.
+      if (this.openIndicator) {
+        this.closeDrilldown();
+        return { handled: true, render: true };
+      }
+      return undefined;
+    }
+    this.selected = index;
+    const indicator = this.selectedIndicator;
+    if (this.openIndicator === indicator) this.closeDrilldown();
+    else this.openPredicate(indicator);
+    return { handled: true, focus: true, render: true };
+  }
+
+  private moveCursor(delta: number): void {
+    this.selected = Math.min(Math.max(0, this.rows.length - 1), Math.max(0, this.selected + delta));
+    this.clampSelectedToCursor();
+  }
+
+  private clampSelectedToCursor(): void {
+    const indicator = this.selectedIndicator;
+    // Moving the cursor while drilled in follows it, so the panel always describes the
+    // highlighted predicate rather than the one you opened.
+    if (this.openIndicator && indicator !== this.openIndicator) this.openPredicate(indicator);
   }
 
   /** Refresh from the session. Cheap enough to call after every tool call. */
@@ -149,17 +267,28 @@ export class HarnessView implements Component {
     const rule = tuiStyle.borderMuted('─'.repeat(Math.max(0, width)));
     out.push(rule);
 
+    if (this.openIndicator) {
+      // The rows are not on screen while drilled in, so no click can land on one; a
+      // click anywhere is "go back".
+      this.rowsStart = Number.POSITIVE_INFINITY;
+      out.push(...this.drilldown(width));
+      return out;
+    }
+
+    this.rowsStart = out.length;
     if (this.rows.length === 0) {
       out.push(tuiStyle.dim('(empty — nothing defined yet)'));
     }
-    for (const predicate of this.rows) {
-      out.push(this.row(predicate, width));
-    }
+    this.rows.forEach((predicate, index) => {
+      out.push(this.row(predicate, width, index === this.selected));
+    });
     for (const indicator of this.removed) {
       const change = this.marker(indicator);
       if (!change) continue;
       out.push(truncateToWidth(`${tuiStyle.error('−')} ${tuiStyle.dim(strikethrough(indicator))}`, width, '…'));
     }
+    out.push('');
+    out.push(tuiStyle.dim(truncateToWidth('↑↓ move · enter open · click a row', width, '…')));
 
     // The most recent change, so the view says what just happened.
     if (this.lastNote && this.clock() - this.lastRefresh < FLASH_MS) {
@@ -169,7 +298,31 @@ export class HarnessView implements Component {
     return out;
   }
 
-  private row(predicate: HarnessPredicate, width: number): string {
+  /** The clauses of the predicate under the cursor, indented under the view's rule. */
+  private drilldown(width: number): string[] {
+    const out: string[] = [];
+    out.push(tuiStyle.title(truncateToWidth(this.openIndicator ?? '', width, '…')));
+    out.push(tuiStyle.dim(truncateToWidth('esc to go back', width, '…')));
+    out.push(tuiStyle.borderMuted('─'.repeat(Math.max(0, width))));
+    if (this.sourceLoading) {
+      out.push(tuiStyle.dim('loading…'));
+      return out;
+    }
+    const lines = this.sourceLines.filter((line) => line.trim() !== '');
+    const budget = 40;
+    for (const line of lines.slice(0, budget)) {
+      // Indent the source so it reads as belonging to the drilled-in predicate, and
+      // wrap rather than cut: a truncated clause body is worse than a wrapped one.
+      const wrapped = wrapTextWithAnsi(line, Math.max(8, width - 2));
+      for (const piece of wrapped) out.push(tuiStyle.output(` ${piece}`));
+    }
+    if (lines.length > budget) {
+      out.push(tuiStyle.dim(` … ${lines.length - budget} more lines`));
+    }
+    return out;
+  }
+
+  private row(predicate: HarnessPredicate, width: number, cursor: boolean): string {
     const change = this.marker(predicate.indicator);
     const marker = change === 'added'
       ? tuiStyle.success('+')
@@ -188,7 +341,8 @@ export class HarnessView implements Component {
     if (predicate.flags.includes('doc')) badges.push(tuiStyle.dim('doc'));
     badges.push(tuiStyle.dim(`${predicate.clauses}c`));
 
-    const left = `${marker} ${name}`;
+    const pointer = cursor ? tuiStyle.accent('❯') : ' ';
+    const left = `${pointer}${marker} ${name}`;
     const right = badges.join(' ');
     const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
     return truncateToWidth(`${left}${' '.repeat(gap)}${right}`, width, '…');

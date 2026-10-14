@@ -89,3 +89,76 @@ describe('HarnessView', () => {
     }
   });
 });
+
+describe('drill-down', () => {
+  const predicates = [entry, alpha, tool];
+  function viewWithSource() {
+    const requested: string[] = [];
+    const view = new HarnessView(() => snapshot(predicates), {
+      requestSource: (indicator) => requested.push(indicator),
+    });
+    view.refresh();
+    return { view, requested };
+  }
+
+  it('opens the predicate under the cursor and shows its clauses', () => {
+    const { view, requested } = viewWithSource();
+    view.handleInput('\r');
+    const indicator = view.selectedIndicator!;
+    expect(view.open).toBe(indicator);
+    expect(requested).toEqual([indicator]);
+
+    view.setSource(indicator, [`${indicator} :- true.`, '']);
+    const text = view.render(40).map(plain).join('\n');
+    expect(text).toContain('esc to go back');
+    expect(text).toContain(`${indicator} :- true.`);
+  });
+
+  it('moves the cursor with the keyboard and follows it while open', () => {
+    const { view, requested } = viewWithSource();
+    const first = view.selectedIndicator;
+    view.handleInput('\u001b[B'); // down
+    expect(view.selectedIndicator).not.toBe(first);
+
+    view.handleInput('\r');
+    const second = view.selectedIndicator;
+    view.handleInput('\u001b[B'); // down again, still drilled in
+    expect(requested).toContain(second);
+    expect(view.open).toBe(view.selectedIndicator);
+  });
+
+  it('goes back with escape, and reports leaving when nothing is open', () => {
+    const exits: number[] = [];
+    const view = new HarnessView(() => snapshot(predicates), { onExit: () => exits.push(1) });
+    view.refresh();
+
+    view.handleInput('\r');
+    expect(view.open).toBeDefined();
+    view.handleInput('\u001b');
+    expect(view.open).toBeUndefined();
+    expect(exits).toHaveLength(0);
+
+    view.handleInput('\u001b');
+    expect(exits).toHaveLength(1);
+  });
+
+  it('opens the row that was clicked', () => {
+    const { view } = viewWithSource();
+    // The mouse y is relative to this component, so the rendered line index is the
+    // hit test — find the row for a known predicate and click it.
+    const lines = view.render(40).map(plain);
+    const rowIndex = lines.findIndex((line) => line.includes('alpha/1'));
+    expect(rowIndex).toBeGreaterThan(0);
+    view.handleMouse({ type: 'press', y: rowIndex, x: 3, button: 'left' } as never);
+    expect(view.open).toBe('alpha/1');
+  });
+
+  it('hides nothing when a click lands on the sparkline or header', () => {
+    const { view } = viewWithSource();
+    view.handleInput('\r');
+    expect(view.open).toBeDefined();
+    view.render(40); // draw it, so the hit map matches what is on screen
+    view.handleMouse({ type: 'press', y: 1, x: 3, button: 'left' } as never);
+    expect(view.open).toBeUndefined();
+  });
+});
