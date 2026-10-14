@@ -174,6 +174,12 @@ export interface DMLQueryOptions {
 
 let sessionCounter = 0;
 
+/**
+ * One human, one editor: human-channel requests from the foreground and from any
+ * subagent are served strictly in order (see `requireInput`).
+ */
+let sharedInputQueue: Promise<void> = Promise.resolve();
+
 function nextSessionId(): string {
   sessionCounter += 1;
   return `repl_${Date.now().toString(36)}_${sessionCounter}`;
@@ -1995,7 +2001,12 @@ export class DMLSession {
     if (!this.inputHandler) {
       return undefined;
     }
-    return this.inputHandler(prompt, options);
+    // Serialize human-channel requests across every session in this process: a
+    // background subagent's input/2 must not clobber a foreground prompt (one
+    // editor, one human). Child process sessions share this module-level queue.
+    const value = sharedInputQueue.then(() => this.inputHandler!(prompt, options));
+    sharedInputQueue = value.then(() => undefined, () => undefined);
+    return value;
   }
 
   /**

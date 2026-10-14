@@ -147,4 +147,24 @@ describe('session-scoped subagents', () => {
     expect(value).toContain('marked(x)');
     expect(value).not.toContain('ok(');
   });
+
+  it('serializes concurrent input requests onto one channel', async () => {
+    const order: string[] = [];
+    let active = 0;
+    let maxActive = 0;
+    repl.session.setInputHandler(async (prompt) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      order.push(prompt);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      active -= 1;
+      return 'ok';
+    });
+    await define('asker/1', 'asker(N) :- input(N, _), output("answered").');
+    await repl.session.spawnProcess('asker("first")');
+    await repl.session.spawnProcess('asker("second")');
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(maxActive).toBe(1);
+    expect(order).toHaveLength(2);
+  });
 });
