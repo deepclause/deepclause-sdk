@@ -140,7 +140,7 @@ describe('autocomplete and the parser agree', () => {
   /** Commands the parser handles that should be visible in the completion list. */
   const ADVERTISED = [
     'goal', 'listing', 'halt', 'help', 'reset', 'rollback', 'compact', 'export',
-    'model', 'reasoning', 'show-reasoning', 'freeze', 'unfreeze', 'params',
+    'model', 'reasoning', 'show-reasoning', 'harness', 'freeze', 'unfreeze', 'params',
     'trace', 'notrace', 'viz', 'show', 'gen',
   ];
 

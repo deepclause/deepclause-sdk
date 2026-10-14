@@ -28,6 +28,7 @@ export const REPL_COMMANDS: SlashCommand[] = [
   { name: 'model', description: 'Switch or show the active model', argumentHint: '[provider:id]' },
   { name: 'reasoning', description: 'Set the model reasoning level', argumentHint: '[off|minimal|low|medium|high|xhigh|max]' },
   { name: 'show-reasoning', description: 'How much reasoning to display', argumentHint: '[off|summary|full]' },
+  { name: 'harness', description: 'Toggle the live harness side view', argumentHint: '[20-120|wider|narrower]' },
   { name: 'reset', description: 'Clear the harness' },
   { name: 'rollback', description: 'Restore the previous harness version' },
   { name: 'compact', description: 'Compact the conversation', argumentHint: '[instructions]' },

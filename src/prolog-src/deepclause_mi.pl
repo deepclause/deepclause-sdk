@@ -1304,6 +1304,13 @@ repl_listing_output(SessionId, Filter) :-
         )
     ).
 
+%% A filter either names a predicate (`name/arity`), names a prefix, or is `all`.
+%% Anything else matches **nothing**.
+%%
+%% There used to be a final `repl_listing_match(_, _, _)` catch-all, which turned any
+%% filter it did not understand into "the whole module" — silently. `listing('alpha/1')`
+%% therefore listed every predicate, so the side view's drill-down showed the module
+%% instead of the predicate under the cursor.
 repl_listing_match(all, _, _) :- !.
 repl_listing_match(Name/Arity, Name, Arity) :- !.
 repl_listing_match(Filter, Name, _) :-
@@ -1312,7 +1319,8 @@ repl_listing_match(Filter, Name, _) :-
     (   sub_atom(Name, 0, _, _, Filter)
     ;   sub_atom(Filter, 0, _, _, Name)
     ).
-repl_listing_match(_, _, _).
+repl_listing_match(_, _, _) :-
+    fail.
 
 %% repl_user_predicate(+SessionId, +Name, +Arity)
 %% Excludes reserved and internal predicates from listing/export.

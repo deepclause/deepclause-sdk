@@ -118,7 +118,7 @@ export type ReplInput =
   | { kind: 'rollback' }
   | { kind: 'compact'; instructions?: string }
   | { kind: 'model'; model?: string }
-  | { kind: 'harness' }
+  | { kind: 'harness'; width?: string }
   | { kind: 'reasoning'; level?: string }
   | { kind: 'show-reasoning' }
   | { kind: 'export'; path?: string }
@@ -220,7 +220,7 @@ export function classifyReplInput(line: string): ReplInput {
         return { kind: 'model', model: arg || undefined };
       case 'harness':
       case 'side':
-        return { kind: 'harness' };
+        return { kind: 'harness', width: arg || undefined };
       case 'reasoning':
       case 'reasoning-level':
         return { kind: 'reasoning', level: arg || undefined };
@@ -1519,6 +1519,35 @@ export async function runTui(
     if (chosen) await apply(chosen);
   };
 
+  /**
+   * `/harness` toggles the side view; `/harness 40`, `wider` and `narrower` resize it.
+   * The width is a layout basis, so a resize rebuilds the root.
+   */
+  const handleHarnessCommand = async (width?: string): Promise<void> => {
+    if (!width) {
+      harnessVisible = !harnessVisible;
+      applyLayout();
+      if (harnessVisible) harnessView.refresh();
+      tui.invalidate();
+      tui.requestRender();
+      renderer.writeLine(`harness view ${harnessVisible ? 'on' : 'off'}${harnessVisible ? ` (${harnessWidth} columns)` : ''}`);
+      return;
+    }
+    const requested = width === 'wider' ? harnessWidth + 8
+      : width === 'narrower' ? harnessWidth - 8
+        : Number(width);
+    if (!Number.isFinite(requested) || requested < 20 || requested > 120) {
+      renderer.writeLine(`harness view width must be 20-120 columns (got '${width}')`);
+      return;
+    }
+    harnessWidth = Math.round(requested);
+    if (!harnessVisible) harnessVisible = true;
+    applyLayout();
+    tui.invalidate();
+    tui.requestRender();
+    renderer.writeLine(`harness view ${harnessWidth} columns`);
+  };
+
   const pickModel = async (): Promise<void> => {
     const catalog = runtime.modelResolver?.catalog() ?? [];
     if (catalog.length === 0) {
@@ -1590,22 +1619,29 @@ export async function runTui(
     { component: editorContainer, basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
     { component: statusBar, basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
   ]);
-  const columns = new HStack([
-    { component: scroll, basis: 0, grow: 1, shrink: 1, minSize: 20 },
-    {
-      component: harnessView,
-      basis: 34,
-      grow: 0,
-      shrink: 0,
-      minSize: 24,
-      visible: (viewport) => harnessVisible && viewport.width >= 96,
-    },
-  ], { gap: 1 });
-  tui.setLayoutRoot(new VStack([
-    { component: new Spacer(1), basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
-    { component: columns, basis: 0, grow: 1, shrink: 1, minSize: 1 },
-    { component: dock, basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
-  ]));
+  // Rebuilt rather than mutated: a stack entry's basis is read from the entries given
+  // at construction, so resizing means handing the TUI a new root.
+  let harnessWidth = 34;
+  const applyLayout = (): void => {
+    const columns = new HStack([
+      { component: scroll, basis: 0, grow: 1, shrink: 1, minSize: 20 },
+      {
+        component: harnessView,
+        basis: harnessWidth,
+        grow: 0,
+        shrink: 0,
+        minSize: 20,
+        visible: (viewport) => harnessVisible && viewport.width >= 96,
+      },
+    ], { gap: 1 });
+    tui.setLayoutRoot(new VStack([
+      { component: new Spacer(1), basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
+      { component: columns, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+      { component: dock, basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
+    ]));
+  };
+  applyLayout();
+
   tui.start();
 
   await printBanner(runtime, loaded);
@@ -1623,11 +1659,7 @@ export async function runTui(
       if (input.kind === 'reasoning') { await pickReasoningLevel(input.level); continue; }
       if (input.kind === 'show-reasoning') { await pickReasoningMode(); continue; }
       if (input.kind === 'harness') {
-        harnessVisible = !harnessVisible;
-        if (harnessVisible) harnessView.refresh();
-        tui.invalidate();
-        tui.requestRender();
-        renderer.writeLine(`harness view ${harnessVisible ? 'on' : 'off'}`);
+        await handleHarnessCommand(input.width);
         continue;
       }
 
