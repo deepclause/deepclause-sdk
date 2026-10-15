@@ -859,7 +859,7 @@ async function renderResumedSession(runtime: ReplRuntime): Promise<void> {
   const events = await runtime.repl.resumedTranscript().catch(() => []);
   if (events.length === 0) return;
   runtime.renderer.writeLine('');
-  runtime.renderer.writeLine(`── resumed session ${runtime.sessionId} ──`);
+  runtime.renderer.writeLine(`── resumed session ${runtime.sessionId} — runtime state was reset ──`);
   for (const event of events) runtime.renderer.render(event);
   runtime.renderer.writeLine('');
 }

@@ -221,6 +221,12 @@ Resume is anchored by a **durable harness snapshot** written beside the session
 * **What it restores.** The module is loaded back into the living module (a
   restore, not a new change); the serialized `harness`/`meta` memory seeds
   `create_session/4`; `turnCounter` continues from the last `harness_turn`.
+* **What it does not restore.** Runtime state: subagent processes/services and
+  in-flight work from the previous run are gone. A short system note is appended
+  to the restored memory (and the authoring memory) saying the session was
+  reloaded and transient state was reset, so an agent does not assume a previous
+  service is still alive. The note is replaced — not stacked — across repeated
+  resumes.
 * **Consistency.** `hash` covers the module *and* the linked script hashes.
   Scripts live in the workspace and are *not* overwritten on resume; if the
   recomputed hash differs from the snapshot, a warning is emitted (under

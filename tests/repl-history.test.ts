@@ -430,6 +430,72 @@ describe('harness history', () => {
     expect(history).toMatch(new RegExp(`harness_turn\\('${id}', 2,`));
   });
 
+  it('notes in the model context that a resumed session was reloaded', async () => {
+    const id = 'sess_resume_note';
+    repl = await createHarnessRepl({
+      sessionId: id,
+      workspacePath: workspace,
+      model: 'test-model',
+      provider: 'openai',
+      llmBackend: new CannedBackend([commitResponse('demo :- output(one).')]),
+      tools: new Map(),
+      history: HISTORY,
+    });
+    await collect(repl.prompt('make demo'));
+    await repl.dispose();
+    repl = undefined;
+
+    // Resume, then run a task so we see the memory the model is handed.
+    const backend = new CannedBackend([{
+      toolCalls: [
+        { name: 'set_result', arguments: { variable: 'R', value: 'ok' } },
+        { name: 'finish', arguments: { success: true } },
+      ],
+    }]);
+    repl = await createHarnessRepl({
+      sessionId: id,
+      resume: true,
+      workspacePath: workspace,
+      model: 'test-model',
+      provider: 'openai',
+      llmBackend: backend,
+      tools: new Map(),
+      history: HISTORY,
+    });
+    await collect(repl.query('task("just reply", string(R))'));
+
+    const seen = backend.calls
+      .flatMap((call) => call.messages)
+      .map((message) => `${message.role}: ${message.content}`)
+      .join('\n');
+    expect(seen).toContain('This session was reloaded');
+    expect(seen).toContain('transient state was reset');
+    expect(seen).toContain('subagents/services');
+
+    // Resuming again replaces the note instead of stacking it.
+    await repl.dispose();
+    const backend2 = new CannedBackend([{
+      toolCalls: [
+        { name: 'set_result', arguments: { variable: 'R', value: 'ok' } },
+        { name: 'finish', arguments: { success: true } },
+      ],
+    }]);
+    repl = await createHarnessRepl({
+      sessionId: id,
+      resume: true,
+      workspacePath: workspace,
+      model: 'test-model',
+      provider: 'openai',
+      llmBackend: backend2,
+      tools: new Map(),
+      history: HISTORY,
+    });
+    await collect(repl.query('task("reply again", string(R))'));
+    // Count within one model call: the memory is repeated across calls.
+    const firstCall = backend2.calls[0]?.messages.map((message) => message.content).join('\n') ?? '';
+    expect(firstCall.match(/This session was reloaded/g)).toHaveLength(1);
+  });
+
   it('replays a resumed session transcript on load', async () => {
     const id = 'sess_replay';
     repl = await createHarnessRepl({

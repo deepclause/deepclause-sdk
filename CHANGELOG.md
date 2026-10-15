@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- **A reloaded session says so.** Resuming a session with `--session` appends a
+  short system note to the restored context stating that the session was reloaded
+  and its transient state was reset (subagents/services from the previous run are
+  gone). It reaches both the runtime (`task/N`) memory and the authoring memory,
+  and is replaced rather than stacked across repeated resumes.
+
 ### Changed
 
 - **`deepclause-agentvm` 0.0.5 → 0.4.0.** The sandbox API the SDK uses

@@ -96,6 +96,17 @@ export interface DiagramResult {
   warnings: string[];
 }
 
+/**
+ * Context note added when a saved session is reloaded. The opening words are
+ * also the de-duplication marker in `repl_note_resumed/2` — keep them in sync.
+ */
+const RESUME_NOTE =
+  'This session was reloaded from a saved snapshot and its transient state was reset: '
+  + 'the harness and conversation memory were restored, but any subagents/services running '
+  + 'before are gone. Re-create anything you still need.';
+
+const RESUME_NOTE_PREFIX = 'This session was reloaded';
+
 export interface DMLSessionOptions {
   /** Optional explicit session id; generated when omitted. */
   sessionId?: string;
@@ -447,6 +458,7 @@ export class DMLSession {
         session.agentMessages = snapshot.memory.agent;
       }
       await session.restoreHarnessFromHistory(snapshot);
+      session.noteSessionResumed();
     } else if (session.autoLoadHarness) {
       // One harness per name: a fresh session starts from the harness's current
       // content file (`harness.dml`), not an empty module.
@@ -909,6 +921,22 @@ export class DMLSession {
     } catch (error) {
       this.warnHistory(error);
     }
+  }
+
+  /**
+   * Note in the model's context that this session was restored. Without it an
+   * agent can assume work from a previous run is still alive — a subagent, a
+   * service, an in-flight job — when the runtime state is gone. The note is
+   * replaced (not stacked) across repeated resumes.
+   */
+  private noteSessionResumed(): void {
+    this.prologQuery(
+      `deepclause_mi:repl_note_resumed('${this.sessionId}', ${quoteString(RESUME_NOTE)})`
+    );
+    this.agentMessages = [
+      ...this.agentMessages.filter((message) => !message.content.startsWith(RESUME_NOTE_PREFIX)),
+      { role: 'system', content: RESUME_NOTE },
+    ];
   }
 
   /**

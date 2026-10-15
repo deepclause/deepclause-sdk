@@ -93,6 +93,7 @@
     repl_memory_term/3,
     repl_get_memory/3,
     repl_set_memory/3,
+    repl_note_resumed/2,
     post_agent_result/4,
     post_exec_result/3,
     post_sample_token_result/3,
@@ -2720,6 +2721,33 @@ repl_set_memory(SessionId, Slot, Messages) :-
         assertz(session_meta_memory(SessionId, Messages))
     ;   retractall(session_repl_memory(SessionId, _)),
         assertz(session_repl_memory(SessionId, Messages))
+    ).
+
+%% repl_note_resumed(+SessionId, +Text)
+%% Record that the session was restored from a saved snapshot. Added to both
+%% memory slots so the authoring agent and every task/N see it. Any earlier
+%% note is replaced, so a session resumed many times carries one line, not a
+%% growing stack.
+repl_note_resumed(SessionId, Text) :-
+    atom_string(TextAtom, Text),
+    Note = message{role: system, content: TextAtom},
+    forall(member(Slot, [harness, meta]), (
+        repl_get_memory(SessionId, Slot, Messages),
+        exclude(is_resume_note, Messages, Kept),
+        append(Kept, [Note], Next),
+        repl_set_memory(SessionId, Slot, Next)
+    )).
+
+%% is_resume_note(+Message)
+%% True for a prior `repl_note_resumed/2` message, matched by its opening words.
+%% The content may be an atom (as first written) or a string (after a task/N
+%% round-trips the memory through the runner), so accept either.
+is_resume_note(message{role: system, content: Content}) :-
+    (   atom(Content)
+    ->  sub_atom(Content, 0, _, _, 'This session was reloaded')
+    ;   string(Content)
+    ->  sub_string(Content, 0, _, _, "This session was reloaded")
+    ;   fail
     ).
 
 %% ---- Edit transactions ----
