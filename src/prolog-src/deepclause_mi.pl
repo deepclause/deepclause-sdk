@@ -115,6 +115,9 @@
 :- discontiguous mi_call/3.
 :- discontiguous transform_task_calls/3.
 :- discontiguous var_to_name/3.
+%% `proc_request_payload/2` sits between the process-primitive clauses of
+%% `process_engine_result/4`, which is intentional.
+:- discontiguous process_engine_result/4.
 
 %% Dynamic predicates for session state (engine management only, not memory!)
 :- dynamic session_engine/2.       % session_engine(SessionId, Engine) - legacy default engine handle

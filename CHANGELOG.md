@@ -12,6 +12,12 @@
 
 ### Changed
 
+- **`sdk-examples/subagents.dml` is now a six-pattern tour** of the concurrency
+  features: fan-out (`swarm`), best-of-N plus a judge, a stateful service,
+  agents that route work between processes through tools, a hedged race with
+  cancellation, and CPU-bound CLP search in subagents — plus the three process
+  lifecycle shapes. A test loads the file and runs the examples against a
+  scripted model.
 - **`deepclause-agentvm` 0.0.5 → 0.4.0.** The sandbox API the SDK uses
   (`new AgentVM({ network, mounts })`, `start`/`exec`/`stop`, and the
   `{ stdout, stderr, exitCode }` result) is unchanged. 0.4.0 adds

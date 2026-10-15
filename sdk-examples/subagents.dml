@@ -1,15 +1,216 @@
-%% sdk-examples/subagents.dml — session-scoped subagents for the REPL.
+%% sdk-examples/subagents.dml — session-scoped subagents (processes) for the REPL.
 %%
 %%   deepclause repl -l sdk-examples/subagents.dml
+%%
+%% Six concurrency patterns, smallest to largest:
+%%
+%%   1. survey/2            fan out over a list, keep the order
+%%   2. best_of/3           best-of-N, then one judge
+%%   3. start_glossary/0    a stateful, long-lived service
+%%   4. ops_start/0         agents that route work by calling a tool
+%%   5. race/2              hedge two strategies, then cancel the loser
+%%   6. queens_portfolio/1  CPU-bound search in subagents
+%%
+%%   1-5 call task/N, so they need a model. 6 is pure Prolog; run the REPL with
+%%   the default --execution worker to spread it over cores.
+%%
+%%   /goal survey([quantum error correction, riscv], B)
+%%   /goal best_of("Name a prime greater than 100.", 3, Best)
+%%   /goal start_glossary, define_terms([subagent, mailbox], Defs)
+%%   /goal ops_start, ask_frontdesk("Where is my order #4471?", Reply)
+%%   /goal race("Explain monads in one line.", W)
+%%   /goal queens_portfolio(Rows)
+%%
+%% Section 7 lists the three process lifecycle shapes (one-shot, message-waiting,
+%% interactive), which need no model at all:
+%%
 %%   /spawn narrate("quantum error correction")
 %%   /spawn keeper([])
 %%   /spawn asker("Which deadline should I assume?")
-%%   /ps --watch
-%%   /send keeper "the migration finished"
-%%   /send keeper stop
-%%   /stop keeper
+%%   /send keeper "the migration finished"      /send keeper stop
+%%   /ps --watch --logs                          /stop keeper
 %%
-%% No model call is needed: the goals use output/1, receive/1 and input/2.
+%% See docs/SUBAGENTS.md for the full model.
+
+:- use_module(library(clpfd)).
+
+%% ============================================================
+%% 1. Fan out over a list, keep the order
+%% ============================================================
+%% swarm/4 calls brief/2 once per topic, each in its own process, and collects
+%% ok(Value)/failed per item in input order. A per-session semaphore still bounds
+%% model calls, and a refused spawn becomes failed(...) for that item only.
+
+doc(survey/2, "Summarise every topic in parallel; the results come back in input order.").
+doc(brief/2, "Worker: one topic -> a two-sentence brief.").
+
+survey(Topics, Briefs) :-
+    swarm(brief, Topics, Results, 4),
+    findall(B, member(ok(B), Results), Briefs).
+
+brief(Topic, Brief) :-
+    task("Summarise {Topic} in two sentences for a technical audience.", string(Brief)).
+
+%% ============================================================
+%% 2. Best-of-N, then one judge
+%% ============================================================
+%% Generate N independent attempts in parallel, then reduce them with a single
+%% task/N. Self-consistency / ensembles, built from swarm plus one model call.
+
+doc(best_of/3, "Generate N attempts in parallel and let a judge pick the best.").
+doc(best_attempt/3, "Worker: one independent attempt at a task.").
+
+best_of(Task, N, Best) :-
+    numlist(1, N, Seeds),
+    swarm(best_attempt(Task), Seeds, Results),
+    findall(A, member(ok(A), Results), Attempts),
+    atomic_list_concat(Attempts, "\n---\n", Pool),
+    format(string(Prompt),
+        "Task: ~w~n~nCandidate answers:~n~w~n~nReturn the single best answer verbatim.",
+        [Task, Pool]),
+    task(Prompt, string(Best)).
+
+best_attempt(Task, Seed, Answer) :-
+    format(string(Prompt), "~w~n(Attempt ~w: take an independent approach.)", [Task, Seed]),
+    task(Prompt, string(Answer)).
+
+%% ============================================================
+%% 3. A stateful, long-lived service
+%% ============================================================
+%% serve/2 is spawn + register. service_call/3 sends request(Self, Ref, Req) and
+%% waits for the matching reply. State lives in the process, carried by
+%% recursion, so a repeated term is a cache hit and costs no model call.
+
+doc(start_glossary/0, "Start the glossary service (run once).").
+doc(glossary/1, "Service: define terms, remembering each answer.").
+doc(define_terms/2, "Client: look up a list of terms.").
+
+start_glossary :- serve(glossary, glossary([])).
+
+glossary(Known) :-
+    receive(Msg, 600000),
+    (   Msg = request(From, Ref, define(Term)) ->
+        (   memberchk(Term-Def, Known) ->
+            send(From, reply(Ref, Def)),
+            glossary(Known)
+        ;   task("Define {Term} in one sentence, for a glossary.", string(Def)),
+            send(From, reply(Ref, Def)),
+            glossary([Term-Def|Known])
+        )
+    ;   Msg = request(From, Ref, dump) ->
+        send(From, reply(Ref, Known)),
+        glossary(Known)
+    ;   Msg = stop ->
+        answer(Known)
+    ;   glossary(Known)
+    ).
+
+define_terms(Terms, Defs) :- maplist(glossary_define, Terms, Defs).
+glossary_define(Term, Def) :- service_call(glossary, define(Term), Def).
+
+%% ============================================================
+%% 4. Agents that route work by calling a tool that is another process
+%% ============================================================
+%% A tool runs in its own engine, but self/1 is the process it runs in, so a
+%% tool can service_call another process. That is what makes a tool/2 edge a
+%% routing edge between agents. A shipment question cascades two hops:
+%%
+%%   frontdesk -> to_delivery -> delivery -> to_warehouse -> warehouse
+%%
+%% Each role has its own prompt, its own memory, and its own tool scope.
+
+doc(ops_start/0, "Start the support-desk services (run once).").
+doc(ask_frontdesk/2, "Send a customer message to the front desk and get its reply.").
+
+ops_start :-
+    forall(member(Role, [frontdesk, billing, delivery, warehouse]),
+           serve(Role, role_loop(Role))).
+
+role_loop(Role) :-
+    receive(request(From, Ref, customer(Message)), 600000),
+    role_prompt(Role, Prompt),
+    role_tools(Role, Tools),
+    format(string(Ask), "~w~n~nCustomer message: ~w", [Prompt, Message]),
+    with_tools(Tools, task(Ask, string(Reply))),
+    send(From, reply(Ref, Reply)),
+    role_loop(Role).
+
+ask_frontdesk(Message, Reply) :-
+    service_call(frontdesk, customer(Message), Reply, 180000).
+
+role_prompt(frontdesk, "You are the front desk. If the message is about a charge or refund, call to_billing. If it is about a shipment, call to_delivery. Otherwise answer yourself. Never invent a charge or a delivery date.").
+role_prompt(billing, "You are billing. Answer only about charges, refunds and invoices. Be brief.").
+role_prompt(delivery, "You are delivery. You do not know dispatch times: before answering about an arrival, call to_warehouse. Then answer.").
+role_prompt(warehouse, "You are the warehouse. Answer only about stock and dispatch estimates. One sentence.").
+
+role_tools(frontdesk, [to_billing, to_delivery]).
+role_tools(billing, []).
+role_tools(delivery, [to_warehouse]).
+role_tools(warehouse, []).
+
+tool(to_billing(Question, Answer), "Hand a billing question to the billing team.") :-
+    service_call(billing, customer(Question), Answer).
+tool(to_delivery(Question, Answer), "Hand a shipment question to the delivery team.") :-
+    service_call(delivery, customer(Question), Answer).
+tool(to_warehouse(Item, Answer), "Ask the warehouse for stock and dispatch for an item.") :-
+    service_call(warehouse, customer(Item), Answer).
+
+%% ============================================================
+%% 5. Hedge two strategies, cancel the loser
+%% ============================================================
+%% Two processes try the same task; the parent takes whichever answers first and
+%% exits both. exit/2 on a finished process is a no-op, so it is safe to fire
+%% without checking who is still alive.
+
+doc(race/2, "Race two strategies and keep the first answer.").
+doc(race_attempt/3, "Worker: one strategy.").
+
+race(Task, Winner) :-
+    self(Me),
+    spawn(race_attempt(Task, fast, Me), Fast),
+    spawn(race_attempt(Task, careful, Me), Careful),
+    receive(answer(_, Winner), 600000),
+    exit(Fast, lost_race),
+    exit(Careful, lost_race).
+
+race_attempt(Task, Style, Parent) :-
+    format(string(Prompt), "~w~nStyle: ~w.", [Task, Style]),
+    task(Prompt, string(Answer)),
+    send(Parent, answer(Style, Answer)),
+    answer(Answer).
+
+%% ============================================================
+%% 6. CPU-bound search in subagents
+%% ============================================================
+%% Subagents are not only for model calls. Each board size is solved in its own
+%% process; with the default --execution worker each runs on its own thread.
+%% (Enumerating every solution is very slow under WASM; a first solution is not.)
+
+doc(queens_portfolio/1, "Solve N-queens for several sizes in parallel.").
+doc(queens_row/2, "Worker: a first solution for one board size.").
+
+queens_portfolio(Rows) :-
+    numlist(8, 13, Sizes),
+    pmap(queens_row, Sizes, Rows).
+
+queens_row(N, Row) :-
+    length(Row, N),
+    Row ins 1..N,
+    all_distinct(Row),
+    no_diag(Row),
+    label(Row).
+
+no_diag([]).
+no_diag([Q|Qs]) :- no_attack(Qs, Q, 1), no_diag(Qs).
+
+no_attack([], _, _).
+no_attack([Y|Ys], X, D) :- X #\= Y + D, X #\= Y - D, D1 #= D + 1, no_attack(Ys, X, D1).
+
+%% ============================================================
+%% 7. The three process lifecycle shapes (no model needed)
+%% ============================================================
+%% one-shot (output + answer and return), message-waiting (a receive loop), and
+%% interactive (input/2 blocks until the user answers).
 
 doc(narrate/1, "One-shot: report a topic and exit.").
 doc(keeper/1, "Message-waiting: collect messages; stop on the atom `stop`.").

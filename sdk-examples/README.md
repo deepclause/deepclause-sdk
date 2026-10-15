@@ -106,27 +106,49 @@ Without `GOOGLE_GENERATIVE_AI_API_KEY`, this example now skips cleanly. Without 
 
 ### 6. Subagents (`subagents.ts`, `subagents.dml`)
 
-Session-scoped subagents with the three shapes — one-shot, message-waiting, and
-interactive (`input/2`). No API key is needed.
+The `.dml` file is a tour of six concurrency patterns, from a fan-out to
+agents that route work between processes. Patterns 1–5 call `task/N` (a model);
+pattern 6 is pure Prolog and is best run with the default `--execution worker`
+to spread it over cores.
 
-```bash
-npx tsx sdk-examples/subagents.ts            # L1 (in-process)
-npx tsx sdk-examples/subagents.ts --worker   # L2 (worker thread)
-```
-
-In the REPL:
+| Entry | Pattern |
+|---|---|
+| `survey/2` | fan out over a list with `swarm/4`, results in input order |
+| `best_of/3` | best-of-N, then one judge |
+| `start_glossary/0` | a stateful, long-lived service (`serve/2`, `service_call/3`) |
+| `ops_start/0` | agents that route work by calling a tool that is another process |
+| `race/2` | hedge two strategies, then cancel the loser (`receive` + `exit/2`) |
+| `queens_portfolio/1` | CPU-bound CLP search in subagents (`pmap/3`) |
 
 ```bash
 deepclause repl -l sdk-examples/subagents.dml
 ```
 
 ```
-/spawn narrator("quantum error correction")
+/goal survey([quantum error correction, riscv], B)
+/goal start_glossary, define_terms([subagent, mailbox], Defs)
+/goal ops_start, ask_frontdesk("Where is my order #4471?", Reply)
+/goal queens_portfolio(Rows)
+```
+
+The `narrate`/`keeper`/`asker` predicates at the bottom show the three process
+lifecycle shapes — one-shot, message-waiting, and interactive — and need no
+model:
+
+```bash
+/spawn narrate("quantum error correction")
 /spawn keeper([])
 /spawn asker("Which deadline should I assume?")
-/ps --watch
+/ps --watch --logs
 /send keeper "the migration finished"
 /stop keeper
+```
+
+`subagents.ts` is the programmatic demo of those three shapes:
+
+```bash
+npx tsx sdk-examples/subagents.ts            # L1 (in-process)
+npx tsx sdk-examples/subagents.ts --worker   # L2 (worker thread)
 ```
 
 ### 7. Two agents talking to each other (`debate.ts`, `debate.dml`)
