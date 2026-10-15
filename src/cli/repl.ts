@@ -1424,12 +1424,31 @@ export async function runTui(
       // No pending ask means a turn is running.
       const trimmed = text.trim();
       if (isSlashCommand(trimmed)) {
-        // Slash commands are never steering: queue them for when the current
-        // turn/command finishes, so /send, /call, /ps, /stop … reach the
-        // processes instead of being injected into the model's conversation.
-        pendingCommands.push(trimmed);
+        // Slash commands are never steering. UI toggles and read-only
+        // snapshots act now; everything else is queued for when the current
+        // turn/command finishes, so /send, /call, /stop … reach the processes
+        // instead of being injected into the model's conversation.
+        const immediate = classifyReplInput(trimmed);
         transcript.append(trimmed, 'user');
-        transcript.append('  (queued — runs when the current turn finishes)');
+        if (immediate.kind === 'ps') {
+          if (immediate.logs) {
+            const on = !(servicesVisible && servicesLogs);
+            servicesLogs = on;
+            servicesVisible = true;
+          } else if (immediate.watch) {
+            servicesVisible = !servicesVisible;
+          } else {
+            for (const line of formatProcessTable(runtime.repl.session.processes()).split('\n')) {
+              renderer.writeLine(line);
+            }
+          }
+          tui.requestRender();
+        } else if (immediate.kind === 'harness') {
+          void handleHarnessCommand(immediate.width);
+        } else {
+          pendingCommands.push(trimmed);
+          transcript.append('  (queued — runs when the current turn finishes)');
+        }
       } else if (runState.steerable) {
         runtime.renderer.endTextBlock?.();
         transcript.append(text, 'steer');
