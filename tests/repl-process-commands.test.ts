@@ -3,11 +3,17 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { classifyReplInput } from '../src/cli/repl.js';
+import { classifyReplInput, isSlashCommand } from '../src/cli/repl.js';
 import { createHarnessTools, formatProcessTable, type HarnessToolController } from '../src/repl/harness-tools.js';
 import type { Pid, ProcessInfo, SpawnOptions } from '../src/repl/processes.js';
 
 describe('classifyReplInput subagent commands', () => {
+  it('treats slash lines as commands, never steering', () => {
+    expect(isSlashCommand('/send keeper stop')).toBe(true);
+    expect(isSlashCommand('  /ps')).toBe(true);
+    expect(isSlashCommand('/call keeper ping')).toBe(true);
+    expect(isSlashCommand('please stop the keeper')).toBe(false);
+  });
   it('classifies /spawn and its alias', () => {
     expect(classifyReplInput('/spawn keeper([])')).toEqual({ kind: 'spawn', goal: 'keeper([])' });
     expect(classifyReplInput('/serve summarise(topic)')).toEqual({ kind: 'spawn', goal: 'summarise(topic)' });

@@ -186,6 +186,14 @@ export function formatTurnInput(turn: { mode: 'goal' | 'prompt'; request: string
 }
 
 /**
+ * Slash commands are executed (or queued), never steered into a running model
+ * turn: `/send`, `/call`, `/ps`, `/stop` … address processes, not the model.
+ */
+export function isSlashCommand(line: string): boolean {
+  return line.trim().startsWith('/');
+}
+
+/**
  * Classify one REPL input line.
  *
  * Rules (proposal §9.1): out-of-band commands are matched first as whole-line
@@ -1333,6 +1341,8 @@ export async function runTui(
   });
   runtime.renderer = renderer;
   const runState = { running: false, steerable: false, bufferable: false };
+  /** Slash commands typed during a turn/command, run when it finishes. */
+  const pendingCommands: string[] = [];
   /** Lines typed during a goal query, consumed by the solution pager. */
   const bufferedInput: string[] = [];
   const statusBar = new StatusBarComponent({
@@ -1402,7 +1412,15 @@ export async function runTui(
       }
     } else if (text.trim()) {
       // No pending ask means a turn is running.
-      if (runState.steerable) {
+      const trimmed = text.trim();
+      if (isSlashCommand(trimmed)) {
+        // Slash commands are never steering: queue them for when the current
+        // turn/command finishes, so /send, /call, /ps, /stop … reach the
+        // processes instead of being injected into the model's conversation.
+        pendingCommands.push(trimmed);
+        transcript.append(trimmed, 'user');
+        transcript.append('  (queued — runs when the current turn finishes)');
+      } else if (runState.steerable) {
         runtime.renderer.endTextBlock?.();
         transcript.append(text, 'steer');
         runtime.repl.steer(text);
@@ -1768,8 +1786,16 @@ export async function runTui(
 
   try {
     while (true) {
-      const line = await ask(runtime.promptPrefix);
-      if (line === null) break;
+      // A slash command typed while a turn/command was running: run it now that
+      // the REPL is idle, before asking for fresh input.
+      let line: string | null;
+      if (pendingCommands.length > 0) {
+        line = pendingCommands.shift()!;
+        tui.requestRender();
+      } else {
+        line = await ask(runtime.promptPrefix);
+        if (line === null) break;
+      }
       const input = classifyReplInput(line);
       if (input.kind === 'halt') break;
       // The pickers are overlays over the transcript, so they need the TUI and are
