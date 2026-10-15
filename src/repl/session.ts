@@ -711,8 +711,15 @@ export class DMLSession {
     return String(plainValue(result?.Text) ?? '');
   }
 
-  /** A private child session carrying a snapshot of this harness (invariant C). */
-  async createProcessSession(): Promise<DMLSession> {
+  /**
+   * A private child session carrying a snapshot of this harness (invariant C).
+   *
+   * Returns the session and, when the snapshot could not be loaded, the load
+   * error. It does **not** throw on a load failure: the child still runs its goal
+   * (a swarm item reports `failed`, say), whereas throwing would kill the process
+   * before it can report and leave a waiting parent hanging.
+   */
+  async createProcessSession(): Promise<{ session: DMLSession; loadError?: string }> {
     const text = await this.harnessText();
     const child = await DMLSession.open({
       ...this.openOptions,
@@ -726,8 +733,12 @@ export class DMLSession {
       onInput: this.inputHandler,
       onInputRequired: undefined,
     });
-    if (text.trim()) await child.loadCode(text);
-    return child;
+    let loadError: string | undefined;
+    if (text.trim()) {
+      const loaded = await child.loadCode(text);
+      loadError = loaded.error;
+    }
+    return { session: child, loadError };
   }
 
   /**

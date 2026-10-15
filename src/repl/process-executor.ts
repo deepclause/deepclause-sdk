@@ -139,7 +139,12 @@ export class DmlProcessExecutor implements ProcessBackend {
   }
 
   private async run(goal: string, ctx: ProcessContext): Promise<unknown> {
-    const child = await this.parent.createProcessSession();
+    const { session: child, loadError } = await this.parent.createProcessSession();
+    if (loadError) {
+      // Surface a broken snapshot instead of letting every call fail with a
+      // puzzling existence error.
+      ctx.emit({ type: 'output', content: `harness snapshot failed to load: ${loadError}` });
+    }
     const process = {
       pid: ctx.pid,
       handle: (request: ProcessRequestPayload, signal?: AbortSignal) =>

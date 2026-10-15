@@ -214,4 +214,16 @@ describe('session-scoped subagents', () => {
     expect(value).toContain('ok(');
     expect(value).toContain('the answer');
   });
+
+  it('reports a failed swarm item instead of hanging when the worker is undefined', async () => {
+    // A worker that throws used to crash its process without sending a result, so
+    // the parent's `swarm_receive` waited forever and the `execute` never stopped.
+    await define('use_missing/1', 'use_missing(R) :- swarm(does_not_exist, [a, b], R).');
+    const started = Date.now();
+    const result = await repl.session.executeGoal('use_missing(R)', 1);
+    expect(Date.now() - started).toBeLessThan(15_000);
+    const value = result.bindings.find((binding) => binding.name === 'R')?.value ?? '';
+    expect(value).toContain('failed(');
+    expect(value).toContain('does_not_exist');
+  });
 });

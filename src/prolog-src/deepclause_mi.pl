@@ -4574,11 +4574,24 @@ swarm_values([], []).
 swarm_values([_-Value|Rest], [Value|Values]) :- swarm_values(Rest, Values).
 
 %% dc_swarm_item(+Worker, +Item, +Parent, +Index) — the child goal.
+%% Catch a thrown error (an undefined worker, a budget, a tool failure) and
+%% report it as `failed(Error)`. Without the catch the child process crashes and
+%% never sends a result, so the parent's `swarm_receive` waits forever.
+%%
+%% The `call` must stay inline in this clause: a helper predicate defined in
+%% `deepclause_mi` is reached via the meta-interpreter's raw-Prolog fallback, and
+%% then `call(Worker, ...)` resolves in `deepclause_mi` instead of the session
+%% module (so every worker looked undefined).
 dc_swarm_item(Worker, Item, Parent, Index) :-
-    (   call(Worker, Item, Result)
-    ->  send(Parent, swarm_result(Index, ok(Result)))
-    ;   send(Parent, swarm_result(Index, failed))
-    ).
+    catch(
+        (   call(Worker, Item, Result)
+        ->  Outcome = ok(Result)
+        ;   Outcome = failed
+        ),
+        Error,
+        Outcome = failed(Error)
+    ),
+    send(Parent, swarm_result(Index, Outcome)).
 
 %% mi_call(pmap(+Worker, +Items, -Values), ...)
 %% Like swarm/3, but fails if any item failed.
