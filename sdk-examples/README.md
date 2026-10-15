@@ -108,7 +108,7 @@ deepclause repl -l sdk-examples/subagents.dml
 ```
 
 ```
-/goal survey([quantum error correction, riscv], B)
+/goal survey(['quantum error correction', riscv], B)
 /goal start_glossary, define_terms([subagent, mailbox], Defs)
 /goal ops_start, ask_frontdesk("Where is my order #4471?", Reply)
 /goal queens_portfolio(Rows)

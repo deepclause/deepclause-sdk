@@ -14,7 +14,7 @@
 %%   1-5 call task/N, so they need a model. 6 is pure Prolog; run the REPL with
 %%   the default --execution worker to spread it over cores.
 %%
-%%   /goal survey([quantum error correction, riscv], B)
+%%   /goal survey(['quantum error correction', riscv], B)
 %%   /goal best_of("Name a prime greater than 100.", 3, Best)
 %%   /goal start_glossary, define_terms([subagent, mailbox], Defs)
 %%   /goal ops_start, ask_frontdesk("Where is my order #4471?", Reply)
