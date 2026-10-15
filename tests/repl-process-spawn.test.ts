@@ -226,4 +226,36 @@ describe('session-scoped subagents', () => {
     expect(value).toContain('failed(');
     expect(value).toContain('does_not_exist');
   });
+
+  it('runs a swarm larger than the live-process limit', async () => {
+    // The limit is on live processes, so 25 items at concurrency 3 all complete.
+    await define('noop/2', 'noop(X, X).');
+    await define('count_swarm/1', 'count_swarm(N) :- numlist(1, 25, L), swarm(noop, L, R, 3), length(R, N).');
+    const result = await repl.session.executeGoal('count_swarm(N)', 1);
+    expect(result.error).toBeUndefined();
+    expect(result.bindings.find((binding) => binding.name === 'N')?.value).toBe('25');
+  });
+
+  it('reports a failed item when the spawn limit is actually reached', async () => {
+    await define('noop/2', 'noop(X, X).');
+    // Hold 15 of the 16 live slots, then a concurrency-4 swarm cannot spawn them all.
+    for (let index = 0; index < 15; index += 1) {
+      await repl.session.spawnProcess('receive(_, 60000)', { name: `hold${index}` });
+    }
+    const result = await repl.session.executeGoal('swarm(noop, [1, 2, 3, 4], R, 4)', 1);
+    const value = result.bindings.find((binding) => binding.name === 'R')?.value ?? '';
+    expect(value).toContain('failed(');
+    expect(value).toContain('process limit');
+  });
+
+  it('kills another process with exit/2', async () => {
+    await define('linger/0', 'linger :- receive(_, 60000).');
+    const result = await repl.session.executeGoal(
+      'self(Me), spawn(linger, Q), sleep(100), exit(Q, stop), output(killed(Q))',
+      1,
+    );
+    expect(result.output).toContain('killed(');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(repl.session.processes().find((process) => process.name === 'linger')?.state).toBe('killed');
+  });
 });

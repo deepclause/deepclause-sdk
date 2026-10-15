@@ -995,11 +995,12 @@ For a structured result, prefer the message form: have the child
 
 ### `exit/1,2` and stopping
 
-`exit(Reason)` terminates the current process; `exit(Pid, kill)` kills another.
-There is no `stop/1` predicate; the interactive case is the `stop` tool / `/stop`
-command. `process_info(Pid, Info)` returns a dict (`pid`, `name`, `state`,
-`priority`, `mailbox`, `usage`, …). `sleep(Ms)` yields; `now_ms(T)` and
-`make_ref(Ref)` are available.
+`exit(Reason)` terminates the current process. `exit(Pid, Reason)` terminates
+another (a registered name or a process label works too); there is no `stop/1`
+predicate, so `exit/2` is how DML cancels a peer. (The `/stop` command and the
+`stop` tool are the interactive equivalents.) `process_info(Pid, Info)` returns a
+dict (`pid`, `name`, `state`, `priority`, `mailbox`, `usage`, …). `sleep(Ms)`
+yields; `now_ms(T)` and `make_ref(Ref)` are available.
 
 ### Rules
 
@@ -1011,7 +1012,10 @@ command. `process_info(Pid, Info)` returns a dict (`pid`, `name`, `state`,
 - **Determinism.** A process that calls `task/N`, `exec/2`, `read_media/2`, or
   writes a file should yield one solution (`once/1`, `->`, `!`).
 - **Bound the work.** Every `swarm` item is a process and usually a model call;
-  the session has a process limit and the provider has rate limits.
+  the session has a **live-process limit** (default 16 concurrent — finished
+  processes do not count, so a long session can fan out again) and the provider
+  has rate limits. A `swarm` item whose process cannot be spawned is reported as
+  `failed(...)`; `pmap` then fails.
 - **CPU-bound Prolog** blocks the in-process host (L1). Long compute belongs in
   the REPL's `--execution worker` (L2), not a `swarm` on the default host.
 

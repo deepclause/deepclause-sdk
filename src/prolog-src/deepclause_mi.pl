@@ -2992,6 +2992,7 @@ proc_request_payload(receive(Timeout), payload{op: receive, timeout: Timeout}) :
 proc_request_payload(requeue(Message), payload{op: requeue, message: Message}) :- !.
 proc_request_payload(wait(Pid), payload{op: wait, pid: Pid}) :- !.
 proc_request_payload(exit(Reason), payload{op: exit, reason: Reason}) :- !.
+proc_request_payload(exit(Pid, Reason), payload{op: exit, pid: Pid, reason: Reason}) :- !.
 proc_request_payload(process_info(Pid), payload{op: process_info, pid: Pid}) :- !.
 proc_request_payload(register(Name, Pid), payload{op: register, name: Name, pid: Pid}) :- !.
 proc_request_payload(whereis(Name), payload{op: whereis, name: Name}) :- !.
@@ -4373,6 +4374,22 @@ mi_call(exit(Reason), StateIn, StateIn) :-
     retract(session_proc_result(SessionId, exit, _)),
     throw(process_exit(Reason)).
 
+%% mi_call(exit(+Pid, +Reason), +StateIn, -StateOut)
+%% Terminate another process. Unlike exit/1 this returns; the target is killed.
+mi_call(exit(Pid, Reason), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    term_string(Pid, PidText),
+    term_string(Reason, ReasonText),
+    engine_yield(request_proc(exit(PidText, ReasonText))),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, exit, ExitResult),
+    retract(session_proc_result(SessionId, exit, _)),
+    (   ExitResult == ok
+    ->  true
+    ;   throw(error(process_exit_failed(ExitResult), exit/2))
+    ).
+
 %% mi_call(process_info(+Pid, -Info), +StateIn, -StateOut)
 mi_call(process_info(Pid, Info), StateIn, StateIn) :-
     !,
@@ -4549,9 +4566,16 @@ mi_call(swarm(Worker, Items, Results, Concurrency), StateIn, StateIn) :-
 swarm_loop(Pending, NextIndex, InFlight, Conc, Worker, Me, SessionId, Acc, Pairs) :-
     (   Pending = [Item|Rest],
         length(InFlight, K), K < Conc
-    ->  swarm_spawn_one(Item, NextIndex, Worker, Me, SessionId),
+    ->  swarm_spawn_one(Item, NextIndex, Worker, Me, SessionId, SpawnResult),
         Next is NextIndex + 1,
-        swarm_loop(Rest, Next, [NextIndex|InFlight], Conc, Worker, Me, SessionId, Acc, Pairs)
+        (   SpawnResult = ok(_Pid)
+        ->  swarm_loop(Rest, Next, [NextIndex|InFlight], Conc, Worker, Me, SessionId, Acc, Pairs)
+        ;   % The host refused the spawn (e.g. the live-process limit): fail only
+            % this item, so the swarm still completes and the reason is visible
+            % instead of the whole call failing silently.
+            swarm_loop(Rest, Next, InFlight, Conc, Worker, Me, SessionId,
+                       [NextIndex-failed(SpawnResult)|Acc], Pairs)
+        )
     ;   InFlight = [_|_]
     ->  swarm_receive(Index, Value, SessionId),
         selectchk(Index, InFlight, Rest),
@@ -4559,13 +4583,12 @@ swarm_loop(Pending, NextIndex, InFlight, Conc, Worker, Me, SessionId, Acc, Pairs
     ;   Pairs = Acc
     ).
 
-swarm_spawn_one(Item, Index, Worker, Me, SessionId) :-
+swarm_spawn_one(Item, Index, Worker, Me, SessionId, SpawnResult) :-
     term_string(deepclause_mi:dc_swarm_item(Worker, Item, Me, Index), GoalText),
     engine_yield(request_proc(spawn(GoalText))),
     get_next_signal(SessionId, _),
     session_proc_result(SessionId, spawn, SpawnResult),
-    retract(session_proc_result(SessionId, spawn, _)),
-    SpawnResult = ok(_Pid).
+    retract(session_proc_result(SessionId, spawn, _)).
 
 swarm_receive(Index, Value, SessionId) :-
     engine_yield(request_proc(receive(0))),
@@ -5948,6 +5971,7 @@ is_mi_special_predicate(receive(_)).
 is_mi_special_predicate(receive(_,_)).
 is_mi_special_predicate(receive_match(_,_,_)).
 is_mi_special_predicate(exit(_)).
+is_mi_special_predicate(exit(_,_)).
 is_mi_special_predicate(process_info(_,_)).
 is_mi_special_predicate(register(_,_)).
 is_mi_special_predicate(whereis(_,_)).

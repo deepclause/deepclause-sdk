@@ -256,9 +256,14 @@ export class DmlProcessExecutor implements ProcessBackend {
         return { key: 'wait', term: `killed(${prologString(String(info.exitReason ?? info.state))})` };
       }
 
-      case 'exit':
-        this.host.stop(pid, request.reason ?? 'exit');
+      case 'exit': {
+        // `exit/1` targets this process; `exit/2` targets another.
+        const target = request.pid ? this.resolveTarget(request.pid, pid) : pid;
+        const resolved = typeof target === 'string' ? this.host.whereis(target) : target;
+        if (!resolved) return { key: 'exit', term: 'failure(noproc)' };
+        this.host.stop(resolved, request.reason ?? 'exit');
         return { key: 'exit', term: 'ok' };
+      }
 
       case 'process_info': {
         const target = this.resolveTarget(request.pid, pid);

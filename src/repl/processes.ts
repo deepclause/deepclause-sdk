@@ -214,6 +214,8 @@ export interface ProcessHostOptions {
   onHostMessage?: (message: unknown) => void;
   maxProcesses?: number;
   maxMailbox?: number;
+  /** Terminal process records kept for `ps`/`wait` before the oldest are reaped. */
+  maxTerminalRecords?: number;
   now?: () => number;
 }
 
@@ -307,6 +309,7 @@ export class LocalProcessHost {
   private readonly onHostMessage?: (message: unknown) => void;
   private readonly maxProcesses: number;
   private readonly maxMailbox: number;
+  private readonly maxTerminalRecords: number;
   private readonly now: () => number;
 
   private readonly records = new Map<string, ProcRecord>();
@@ -328,6 +331,7 @@ export class LocalProcessHost {
     this.onHostMessage = options.onHostMessage;
     this.maxProcesses = options.maxProcesses ?? 16;
     this.maxMailbox = options.maxMailbox ?? 1000;
+    this.maxTerminalRecords = options.maxTerminalRecords ?? 50;
     this.now = options.now ?? Date.now;
     this.hostPid = { node: this.node, session: this.sessionId, id: 'host' };
   }
@@ -336,9 +340,13 @@ export class LocalProcessHost {
 
   spawn(goal: string, options: SpawnOptions = {}, body?: ProcessBody): Pid {
     if (this.shutdownRequested) throw new Error('process host is shut down');
-    if (this.records.size >= this.maxProcesses) {
-      throw new Error(`process limit reached (${this.maxProcesses}); stop a process first`);
+    // The limit bounds *live* processes, not cumulative spawns: a finished
+    // process must not consume a slot forever (a session that spawned 16 things
+    // could otherwise never fan out again).
+    if (this.liveCount() >= this.maxProcesses) {
+      throw new Error(`process limit reached (${this.maxProcesses} running); stop a process first`);
     }
+    this.reapTerminalRecords();
     const resolved = body ?? this.resolveBody?.(goal);
     if (!resolved) throw new Error(`no body registered for goal: ${goal}`);
 
@@ -373,8 +381,7 @@ export class LocalProcessHost {
     return pid;
   }
 
-  private async run(record: ProcRecord): Promise<void> {
-    if (record.terminal) return;
+  private async run(record: ProcRecord): Promise<void> {    if (record.terminal) return;
     record.state = 'running';
     this.emit({ type: 'state', pid: record.pid, name: record.name, state: 'running' });
     try {
@@ -681,6 +688,22 @@ export class LocalProcessHost {
 
   get size(): number {
     return this.records.size;
+  }
+
+  /** Processes that have not reached a terminal state. */
+  private liveCount(): number {
+    let live = 0;
+    for (const record of this.records.values()) if (!record.terminal) live += 1;
+    return live;
+  }
+
+  /** Drop the oldest terminal records beyond `maxTerminalRecords`. */
+  private reapTerminalRecords(): void {
+    const terminal = [...this.records.entries()].filter(([, record]) => record.terminal);
+    const excess = terminal.length - this.maxTerminalRecords;
+    for (let index = 0; index < excess; index += 1) {
+      this.records.delete(terminal[index][0]);
+    }
   }
 
   /** Resolve when `pid` reaches a terminal state (already terminal resolves now). */

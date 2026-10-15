@@ -161,6 +161,20 @@ describe('spawning children', () => {
     host.spawn('first', {}, async () => new Promise(() => undefined));
     expect(() => host.spawn('second', {}, async () => 1)).toThrow(/process limit/);
   });
+
+  it('bounds live processes, not cumulative spawns', async () => {
+    // A finished process must not consume a slot forever: a session that spawned
+    // 16 things could otherwise never fan out again.
+    const host = makeHost({ maxProcesses: 2 });
+    const a = host.spawn('a', {}, async () => 'a');
+    const b = host.spawn('b', {}, async () => 'b');
+    await host.wait(a);
+    await host.wait(b);
+    expect(() => host.spawn('c', {}, async () => new Promise(() => undefined))).not.toThrow();
+    expect(() => host.spawn('d', {}, async () => new Promise(() => undefined))).not.toThrow();
+    // Now two are live again, so the limit applies.
+    expect(() => host.spawn('e', {}, async () => 1)).toThrow(/process limit/);
+  });
 });
 
 describe('links and monitors', () => {
