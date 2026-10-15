@@ -60,4 +60,13 @@ describe('end_turn documentation validation', () => {
     ].join('\n'));
     expect(warnings).toEqual([]);
   });
+
+  it('does not call doc/2 when the harness has none', async () => {
+    // `doc_without_clauses` used to call `SessionId:doc(...)` unconditionally, so
+    // a harness with no doc facts emitted `Unknown procedure: repl_x:doc/2`.
+    await commit('plain(1).');
+    const messages = repl.session.takePrologMessages().map((message) => message.text).join('\n');
+    expect(messages).not.toContain('Unknown procedure');
+    expect(messages).not.toContain('doc/2');
+  });
 });

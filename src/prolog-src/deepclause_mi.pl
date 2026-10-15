@@ -2356,6 +2356,7 @@ repl_harness_flag(_SessionId, agent_main, _Arity, entry).
 repl_harness_flag(SessionId, Name, _Arity, tool) :-
     session_user_tools(SessionId, Name).
 repl_harness_flag(SessionId, Name, Arity, doc) :-
+    current_predicate(SessionId:doc/2),
     catch(SessionId:doc(Name/Arity, _), _, fail).
 repl_harness_flag(SessionId, Name, Arity, touched) :-
     session_edit_touched(SessionId, Name/Arity).
@@ -2466,6 +2467,9 @@ repl_validate_docs(SessionId, Warnings) :-
     list_to_set(Raw, Warnings).
 
 doc_without_clauses(SessionId, Warning) :-
+    % A harness with no `doc/2` at all would otherwise make this call an
+    % undefined-procedure warning (`Unknown procedure: repl_x:doc/2`).
+    current_predicate(SessionId:doc/2),
     SessionId:doc(Name/Arity, _),
     (   \+ current_predicate(SessionId:Name/Arity)
     ;   functor(Head, Name, Arity),
