@@ -88,8 +88,11 @@ export class ServicesPanel implements Component {
       : entry.name;
     const padding = ' '.repeat(Math.max(0, NAME_WIDTH - visibleWidth(raw)));
     const label = dim(`${raw}${padding}`);
-    const text = entry.kind === 'output' ? entry.text : tuiStyle.accent(entry.text);
-    return `  ${label}  ${text}`;
+    // A component line must not contain a newline: a multi-line answer/result
+    // would otherwise break the layout.
+    const text = entry.text.replace(/\s*\n\s*/g, ' ↵ ');
+    const styled = entry.kind === 'output' ? text : tuiStyle.accent(text);
+    return `  ${label}  ${styled}`;
   }
 
   invalidate(): void {

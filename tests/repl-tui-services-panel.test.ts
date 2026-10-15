@@ -99,4 +99,11 @@ describe('ServicesPanel logs', () => {
     expect(text).toContain('hello');
     expect(text).toContain('done');
   });
+
+  it('never emits a line containing a newline', () => {
+    const log = [entry('debater', 'answer', '› first line\nsecond line')];
+    const lines = panel({ processes: [info('debater')], log, mode: 'logs' }).render(80);
+    expect(lines.every((line) => !line.includes('\n'))).toBe(true);
+    expect(lines.join(' ')).toContain('first line');
+  });
 });
