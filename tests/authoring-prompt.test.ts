@@ -45,6 +45,10 @@ describe('the authoring prompt and the language reference', () => {
       'json_get',
       'dict_field',
       'string_chars',
+      'spawn',
+      'swarm',
+      'service_call',
+      'receive',
     ]) {
       expect(prefix, `the behavioural half should mention ${term}`).toContain(term);
     }

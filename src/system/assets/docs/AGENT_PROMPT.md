@@ -189,34 +189,52 @@ than performing it as an edit.
 Other tools: `reference(topic)` reads the DeepClause docs (`language`,
 `authoring`, `patterns`, `examples`, `snippets`, `tools`).
 
-# Start subagents
+# Concurrency and subagents
 
 A **subagent** is a session-scoped DML process that keeps running after this
-turn. Reach for `spawn(Goal)` when the work is long and the user does not need
-the result now: report its id and name and carry on. Do not busy-wait on it; use
-`ps` to inspect it later.
+turn. Reach for one when work is long-running, must wait for messages, or can
+run in parallel — not when a single `task/N` or `execute` call does the job.
 
-The goal's shape decides the lifecycle:
+| The work is… | Use |
+|---|---|
+| one model call, or a quick goal | `task/N` / `execute` |
+| the same goal over a list, in parallel | `swarm/3` / `pmap/3` |
+| long, and the user can wait | `spawn(Goal)` — report the id and carry on |
+| a long-lived message handler | `serve(Name, Loop)` + `service_call`/`service_cast` |
+| a decision from the user mid-run | `input/2` inside the subagent |
+| several specialised roles collaborating | `serve` each role; a coordinator wires them |
 
-- **one-shot** — the goal calls `output/1`/`answer/1` and returns.
-- **message-waiting** — the goal loops on `receive(Msg)`, handling terms sent
-  with `send(Pid, Msg)` from another process, or from the user via `/send`.
-- **interactive** — the goal calls `input(Question, Answer)`; it blocks until the
-  user answers in the editor. Use this when you genuinely need a decision.
+A subagent is isolated and asynchronous:
 
-Subagent tools:
+- **Private snapshot.** Its `assert`/`retract` do not touch the harness, and it
+  does not see commits made after it started.
+- **Value semantics.** `spawn` and `send` copy terms. A child cannot bind a
+  variable in the parent, so a result comes back by `send/2` or as the child's
+  `answer/1` — never by an output argument. Write `send(Parent, result(...))` in
+  the child and `receive` it in the parent (pass `self(Me)` into the child).
+- **It outlives the turn.** Do not busy-wait; report the id and use `ps` later.
 
-- `spawn(goal, name?)` — start a subagent; returns its id immediately.
-- `ps` — list subagents and their state. Call it before assuming state.
-- `send(to, message)` — message a subagent by id or registered name.
-- `call(to, message)` — request/reply against a service subagent.
-- `stop(target)` — stop a subagent.
+Patterns:
 
-A subagent runs against a **private snapshot** of the module: its `assert` and
-`retract` do not affect the harness, and it does not see commits made after it
-started. Goals and messages cross as terms (no shared variables), so a result
-comes back only by a message. For request/reply, `serve(Name, Goal)` registers a
-process and `service_call(Name, Request, Reply)` waits for its `reply(Ref, Val)`.
+- **Fan out over a list** with `swarm(Worker, Items, Results)` — ordered, one
+  process per item, `ok(Value)`/`failed` per item — or `pmap/3` (bare values,
+  fails on any failure). Bound the list: each item is a process and usually a
+  model call, and the session has a process limit.
+- **Background a long goal** with `spawn(Goal)`. If you need the result, have the
+  goal `send(Parent, result(...))` and `receive` it, or make it a service.
+- **A service** is `serve(Name, Loop)` where `Loop` handles
+  `request(From, Ref, Request)` by `send(From, reply(Ref, Reply))`, then recurses.
+  Call it with `service_call(Name, Request, Reply)`.
+- **Recursive delegation** is a subagent that spawns subagents; bound the depth.
+
+Subagent tools: `spawn(goal, name?)`, `ps`, `send(to, message)`,
+`call(to, message)`, `stop(target)`. Users also have `/spawn`, `/send`, `/call`,
+`/stop`, and `/ps --watch --logs` (a live follow of every subagent's streamed
+output, reasoning, and tool calls).
+
+Do not spawn a subagent for a single model call, and do not fan out an unbounded
+list. If the work needs the harness's shared state, or the user's answer now,
+keep it in the foreground.
 
 End your turn by replying with text and no tool call. To ask the human a
 question, write it in that final message.
@@ -783,6 +801,7 @@ More patterns: `reference("patterns")`; shapes: `reference("examples")`.
   - [system/1, user/1](#memory-predicates)
   - [output/1, yield/1, log/1](#output-predicates)
   - [answer/1](#answer1)
+- [Processes and concurrency](#processes-and-concurrency)
 - [Control Flow](#control-flow)
 - [String Interpolation](#string-interpolation)
 - [Backtracking](#backtracking)
@@ -1650,6 +1669,121 @@ agent_main :-
 ```
 
 **Important:** `answer/1` commits the execution. After answering, the program completes and does not try alternative clauses.
+
+---
+
+## Processes and concurrency
+
+A **process** (a "subagent") is an isolated DML execution with its own private
+memory, a private snapshot of this module, and a mailbox. Processes outlive the
+turn that started them, so a harness can background long work, wait for
+messages, or run many things at once.
+
+### `spawn(+Goal, -Pid)` / `spawn_opt(+Goal, -Pid, +Options)`
+
+Start `Goal` in a new process and return its pid immediately. `Goal` is **copied**:
+variables in the child are fresh, so a child can never bind a variable in the
+parent. A result comes back by message (`send/2`) or as the child's `answer/1`.
+
+```prolog
+worker(Topic, Parent) :-
+    task("Summarise {Topic} in one sentence.", string(Summary)),
+    send(Parent, done(Topic, Summary)),
+    answer(Summary).
+
+fan_out(Topics, Results) :-
+    self(Me),
+    maplist(spawn_worker(Me), Topics, _Pids),
+    collect(Topics, Results).
+
+spawn_worker(Me, Topic, Pid) :- spawn(worker(Topic, Me), Pid).
+
+collect([], []).
+collect([Topic|Topics], [Topic-Summary|Rest]) :-
+    receive(done(Topic, Summary), 300000),
+    collect(Topics, Rest).
+```
+
+`spawn_opt/3` takes a dict of options: `name`, `priority`
+(`foreground`/`interactive`/`background`), `timeout` (ms), and `code`.
+
+The goal's shape decides the lifecycle:
+
+- **one-shot** — calls `output/1`/`answer/1` and returns.
+- **message-waiting** — loops on `receive/1,2`, handling terms from other
+  processes or from the user.
+- **interactive** — calls `input/2` and blocks until the user answers.
+
+### `send(+Target, +Message)` / `receive(?Message[, +Timeout])`
+
+`send/2` copies a term into another process's mailbox; `Target` is a pid, a
+registered name, or a process label. `receive/2` pops the oldest message and
+fails on timeout. `receive_match/3` pops the oldest message that unifies with a
+template, requeues the rest, and fails on timeout.
+
+```prolog
+receive(request(From, Ref, Query), 30000),
+handle(Query, Answer),
+send(From, reply(Ref, Answer)).
+```
+
+### `self/1`, `register/2`, `whereis/2`
+
+`self(Pid)` is this process's pid. `register(Name, Pid)` names a process in the
+session; `whereis(Name, Pid)` resolves it. A name is released when the process
+exits. A process's default label is its goal's functor, so `send(keeper, stop)`
+reaches an unregistered `keeper/…` process.
+
+### `serve(+Name, +Goal)` / `service_call(+Target, +Request, -Reply[, +Timeout])` / `service_cast(+Target, +Message)`
+
+`serve/2` is `spawn/2` + `register/2`. `service_call` sends
+`request(Self, Ref, Request)` and waits for `reply(Ref, Reply)`, ignoring other
+messages; `service_cast` sends without waiting. A service is an ordinary
+`receive` loop:
+
+```prolog
+counter_service(Count) :-
+    receive(Msg),
+    (   Msg = request(From, Ref, read)  -> send(From, reply(Ref, Count)), counter_service(Count)
+    ;   Msg = request(From, Ref, bump)  -> Next is Count + 1, send(From, reply(Ref, Next)), counter_service(Next)
+    ;   Msg = stop                       -> true
+    ;   counter_service(Count)
+    ).
+```
+
+### `swarm(+Worker, +Items, -Results)` / `pmap(+Worker, +Items, -Values)`
+
+Run `call(Worker, Item, Value)` once per item, each in its own process, and
+collect the results **in input order**. `swarm` returns `ok(Value)`/`failed` per
+item; `pmap` returns bare values and fails if any item failed.
+
+```prolog
+swarm(summarise_file, Files, Results),
+findall(S, member(ok(S), Results), Summaries).
+```
+
+### `exit/1,2` and stopping
+
+`exit(Reason)` terminates the current process; `exit(Pid, kill)` kills another.
+There is no `stop/1` predicate; the interactive case is the `stop` tool / `/stop`
+command. `process_info(Pid, Info)` returns a dict (`pid`, `name`, `state`,
+`priority`, `mailbox`, `usage`, …) and `processes(Pids)` lists live pids.
+`self_usage(U)` is this process's accumulated model usage; `sleep(Ms)` yields;
+`now_ms(T)` and `make_ref(Ref)` are available.
+
+### Rules
+
+- **Isolation.** A process runs against a private module snapshot: its
+  `assert`/`retract` do not affect the harness, and it does not see commits made
+  after it started.
+- **Value semantics.** `spawn` and `send` copy terms; never rely on a shared
+  variable with a child.
+- **Determinism.** A process that calls `task/N`, `exec/2`, `read_media/2`, or
+  writes a file should yield one solution (`once/1`, `->`, `!`).
+- **Bound the work.** Every `swarm` item is a process and usually a model call;
+  the session has a process limit and the provider has rate limits.
+- **CPU-bound Prolog** blocks the in-process host (L1). Long compute belongs in
+  the REPL's `--execution worker` (L2), not a `swarm` on the default host.
 
 ---
 

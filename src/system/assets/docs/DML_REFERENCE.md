@@ -15,6 +15,7 @@
   - [system/1, user/1](#memory-predicates)
   - [output/1, yield/1, log/1](#output-predicates)
   - [answer/1](#answer1)
+- [Processes and concurrency](#processes-and-concurrency)
 - [Control Flow](#control-flow)
 - [String Interpolation](#string-interpolation)
 - [Backtracking](#backtracking)
@@ -882,6 +883,121 @@ agent_main :-
 ```
 
 **Important:** `answer/1` commits the execution. After answering, the program completes and does not try alternative clauses.
+
+---
+
+## Processes and concurrency
+
+A **process** (a "subagent") is an isolated DML execution with its own private
+memory, a private snapshot of this module, and a mailbox. Processes outlive the
+turn that started them, so a harness can background long work, wait for
+messages, or run many things at once.
+
+### `spawn(+Goal, -Pid)` / `spawn_opt(+Goal, -Pid, +Options)`
+
+Start `Goal` in a new process and return its pid immediately. `Goal` is **copied**:
+variables in the child are fresh, so a child can never bind a variable in the
+parent. A result comes back by message (`send/2`) or as the child's `answer/1`.
+
+```prolog
+worker(Topic, Parent) :-
+    task("Summarise {Topic} in one sentence.", string(Summary)),
+    send(Parent, done(Topic, Summary)),
+    answer(Summary).
+
+fan_out(Topics, Results) :-
+    self(Me),
+    maplist(spawn_worker(Me), Topics, _Pids),
+    collect(Topics, Results).
+
+spawn_worker(Me, Topic, Pid) :- spawn(worker(Topic, Me), Pid).
+
+collect([], []).
+collect([Topic|Topics], [Topic-Summary|Rest]) :-
+    receive(done(Topic, Summary), 300000),
+    collect(Topics, Rest).
+```
+
+`spawn_opt/3` takes a dict of options: `name`, `priority`
+(`foreground`/`interactive`/`background`), `timeout` (ms), and `code`.
+
+The goal's shape decides the lifecycle:
+
+- **one-shot** — calls `output/1`/`answer/1` and returns.
+- **message-waiting** — loops on `receive/1,2`, handling terms from other
+  processes or from the user.
+- **interactive** — calls `input/2` and blocks until the user answers.
+
+### `send(+Target, +Message)` / `receive(?Message[, +Timeout])`
+
+`send/2` copies a term into another process's mailbox; `Target` is a pid, a
+registered name, or a process label. `receive/2` pops the oldest message and
+fails on timeout. `receive_match/3` pops the oldest message that unifies with a
+template, requeues the rest, and fails on timeout.
+
+```prolog
+receive(request(From, Ref, Query), 30000),
+handle(Query, Answer),
+send(From, reply(Ref, Answer)).
+```
+
+### `self/1`, `register/2`, `whereis/2`
+
+`self(Pid)` is this process's pid. `register(Name, Pid)` names a process in the
+session; `whereis(Name, Pid)` resolves it. A name is released when the process
+exits. A process's default label is its goal's functor, so `send(keeper, stop)`
+reaches an unregistered `keeper/…` process.
+
+### `serve(+Name, +Goal)` / `service_call(+Target, +Request, -Reply[, +Timeout])` / `service_cast(+Target, +Message)`
+
+`serve/2` is `spawn/2` + `register/2`. `service_call` sends
+`request(Self, Ref, Request)` and waits for `reply(Ref, Reply)`, ignoring other
+messages; `service_cast` sends without waiting. A service is an ordinary
+`receive` loop:
+
+```prolog
+counter_service(Count) :-
+    receive(Msg),
+    (   Msg = request(From, Ref, read)  -> send(From, reply(Ref, Count)), counter_service(Count)
+    ;   Msg = request(From, Ref, bump)  -> Next is Count + 1, send(From, reply(Ref, Next)), counter_service(Next)
+    ;   Msg = stop                       -> true
+    ;   counter_service(Count)
+    ).
+```
+
+### `swarm(+Worker, +Items, -Results)` / `pmap(+Worker, +Items, -Values)`
+
+Run `call(Worker, Item, Value)` once per item, each in its own process, and
+collect the results **in input order**. `swarm` returns `ok(Value)`/`failed` per
+item; `pmap` returns bare values and fails if any item failed.
+
+```prolog
+swarm(summarise_file, Files, Results),
+findall(S, member(ok(S), Results), Summaries).
+```
+
+### `exit/1,2` and stopping
+
+`exit(Reason)` terminates the current process; `exit(Pid, kill)` kills another.
+There is no `stop/1` predicate; the interactive case is the `stop` tool / `/stop`
+command. `process_info(Pid, Info)` returns a dict (`pid`, `name`, `state`,
+`priority`, `mailbox`, `usage`, …) and `processes(Pids)` lists live pids.
+`self_usage(U)` is this process's accumulated model usage; `sleep(Ms)` yields;
+`now_ms(T)` and `make_ref(Ref)` are available.
+
+### Rules
+
+- **Isolation.** A process runs against a private module snapshot: its
+  `assert`/`retract` do not affect the harness, and it does not see commits made
+  after it started.
+- **Value semantics.** `spawn` and `send` copy terms; never rely on a shared
+  variable with a child.
+- **Determinism.** A process that calls `task/N`, `exec/2`, `read_media/2`, or
+  writes a file should yield one solution (`once/1`, `->`, `!`).
+- **Bound the work.** Every `swarm` item is a process and usually a model call;
+  the session has a process limit and the provider has rate limits.
+- **CPU-bound Prolog** blocks the in-process host (L1). Long compute belongs in
+  the REPL's `--execution worker` (L2), not a `swarm` on the default host.
 
 ---
 

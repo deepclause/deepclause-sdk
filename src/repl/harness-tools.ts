@@ -340,7 +340,7 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
   // ---- Session-scoped subagents (spec §9.1) ------------------------------
 
   tools.set('spawn', {
-    description: 'Start a session-scoped subagent running a DML goal. Returns immediately with its id; it keeps running after this turn. The goal decides the shape: return when done, loop on receive/2 to wait for messages, or call input/2 to ask the user. Do not await it unless the user asked for its result.',
+    description: 'Start a session-scoped subagent running a DML goal. Returns immediately with its id; it keeps running after this turn. The goal decides the shape: return when done, loop on receive/2 to wait for messages, or call input/2 to ask the user. Do not await it unless the user asked for its result. For the same worker over a list, use the DML built-ins swarm/3 or pmap/3 (run with execute) instead of many spawn calls.',
     parameters: {
       type: 'object',
       properties: {

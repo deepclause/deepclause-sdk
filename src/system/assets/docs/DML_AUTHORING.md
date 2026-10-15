@@ -272,3 +272,24 @@ text-only — never attach media to them.
   `/dc-run` skill.
 - Media: reference images with `media(Path, Mime)` (`read_media/2` +
   `attach_media/1`); never inline bytes.
+
+## 7. Concurrency and subagents
+
+Most skills are a short sequence of `task/N` calls in the foreground. Reach for a
+**subagent** only when the work must outlive the turn, wait for a message, or run
+in parallel.
+
+- **Fan out over a list** (`swarm/3`, `pmap/3`): the same worker over many items,
+  each in its own process, results in input order. Bound the list.
+- **Background a long goal** (`spawn/2`): report the id and carry on; the user
+  watches it with `/ps --watch --logs`.
+- **A service** (`serve/2` + `service_call/3`): a long-lived `receive` loop that
+  answers requests; also good for a single-writer or rate-limited step.
+
+A subagent is isolated (private module snapshot) and asynchronous (value
+semantics): its `assert`/`retract` do not touch the harness, and a result comes
+back by `send/2` or the child's `answer/1`, never by an output argument. Prefer
+`swarm` over hand-rolled `spawn`+`receive` unless you need a custom protocol.
+
+Do not fan out an unbounded list (each item is a process and usually a model
+call), and do not spawn for a single model call.
