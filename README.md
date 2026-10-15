@@ -418,9 +418,9 @@ subagent runs against a **private snapshot** of the module with **value
 semantics** — a result comes back by message, never by a shared variable — which
 is what makes it safe to run many at once.
 
-Execution has two modes: `--execution inline` (default; cooperative,
-in-process) and `--execution worker` (a worker thread with its own WASM: true
-parallelism and hard cancellation). The same DML runs unchanged.
+Execution has two modes: `--execution worker` (the default; a worker thread with
+its own WASM — true parallelism and hard cancellation) and `--execution inline`
+(cooperative, in-process). The same DML runs unchanged.
 
 See [`docs/SUBAGENTS.md`](docs/SUBAGENTS.md) for the model, the surface, the
 Erlang/BEAM inspiration, and the L1/L2 seam.

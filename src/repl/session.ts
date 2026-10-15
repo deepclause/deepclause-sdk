@@ -154,7 +154,7 @@ export interface DMLSessionOptions {
    * Set false when the caller supplies content explicitly (e.g. `-l`).
    */
   autoLoadHarness?: boolean;
-  /** Process execution mode: inline (L1, default) or worker (L2). */
+  /** Process execution mode: worker (L2, default) or inline (L1). */
   execution?: 'inline' | 'worker';
 }
 
@@ -510,7 +510,7 @@ export class DMLSession {
    */
   private ensureProcessBackend(): Promise<ProcessBackend> {
     if (this.processBackendPromise) return this.processBackendPromise;
-    const mode = this.openOptions.execution ?? 'inline';
+    const mode = this.openOptions.execution ?? 'worker';
     this.processBackendPromise = (async () => {
       const onEvent = (event: ProcessEvent): void => {
         this.processEventSink?.(event);

@@ -2133,7 +2133,7 @@ export function registerReplCommand(program: Command): void {
     .option('--sandbox', 'run shell tools in AgentVM')
     .option('--require-sandbox', 'refuse to run unless the shell is sandboxed (bwrap/AgentVM/sandbox-exec)')
     .option('--harness-view', 'open the live harness side view (experiment)')
-    .option('--execution <mode>', 'process execution mode: inline (L1, default) or worker (L2)', (value: string) => {
+    .option('--execution <mode>', 'process execution mode: worker (L2, default) or inline (L1)', (value: string) => {
       if (value !== 'inline' && value !== 'worker') {
         throw new Error(`invalid --execution: ${value} (use inline or worker)`);
       }

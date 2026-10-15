@@ -67,11 +67,11 @@ CLI commands: `init`, `login`, `logout`, `set-backend`, `set-model`, `show-model
   `receive`/`receive_match`, `serve`/`service_call`/`service_cast`, `swarm`/`pmap`,
   `wait`, `exit`, `register`/`whereis`, `process_info`. The REPL runs them with
   the `spawn`/`ps`/`send`/`call`/`stop`/`swarm`/`wait` tools and the `/spawn`,
-  `/ps --watch --logs`, `/send`, `/call`, `/stop` commands. Execution is `inline`
-  (L1, cooperative, in-process) or `worker` (L2: a `worker_threads` thread with
-  its own WASM, true parallelism and hard cancellation), selected by
-  `--execution`; value semantics (copy on `spawn`/`send`) let the same DML run in
-  both. See [`SUBAGENTS.md`](./SUBAGENTS.md).
+  (`--logs` / `/stop`). Execution is `worker` (L2, the default: a `worker_threads`
+  thread with its own WASM, true parallelism and hard cancellation) or `inline`
+  (L1, cooperative, in-process), selected by `--execution`; value semantics (copy
+  on `spawn`/`send`) let the same DML run in both. See
+  [`SUBAGENTS.md`](./SUBAGENTS.md).
 - **Commands**: `/goal <dml>`, `/help`, `/listing [filter]`, `/viz [entry] [--spec]`,
   `/show <path>`, `/gen <prompt>`, `/spawn <goal>`, `/ps [--watch|--logs]`,
   `/send <name> <term>`, `/call <name> <term>`, `/stop <name>`, `/login`,

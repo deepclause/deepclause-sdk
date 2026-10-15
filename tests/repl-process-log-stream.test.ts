@@ -52,6 +52,7 @@ beforeEach(async () => {
     workspacePath: workspace,
     model: 'test-model',
     provider: 'openai',
+    execution: 'inline',
     llmBackend: streamingBackend(),
   });
   await repl.session.beginTurn();

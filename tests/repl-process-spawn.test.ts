@@ -33,7 +33,9 @@ async function waitForDone(repl: HarnessRepl, id: string, timeoutMs = 15_000): P
 
 beforeEach(async () => {
   workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'deepclause-proc-'));
-  repl = await createHarnessRepl({ workspacePath: workspace, model: 'test-model', provider: 'openai' });
+  // Tests run on the in-process host (L1) for determinism; worker mode (L2) is
+  // covered by repl-process-worker.test.ts against a scripted worker.
+  repl = await createHarnessRepl({ workspacePath: workspace, model: 'test-model', provider: 'openai', execution: 'inline' });
   events = [];
   repl.session.setProcessEventSink((event) => events.push(event));
 });

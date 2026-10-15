@@ -44,7 +44,7 @@ async function waitForTerminal(id: string, timeoutMs = 15_000): Promise<void> {
 
 beforeEach(async () => {
   calls = [];
-  repl = await createHarnessRepl({ model: 'test-model', provider: 'openai', llmBackend: recordingBackend(calls) });
+  repl = await createHarnessRepl({ model: 'test-model', provider: 'openai', execution: 'inline', llmBackend: recordingBackend(calls) });
   await repl.session.beginTurn();
   await repl.session.define(
     'worker/1',

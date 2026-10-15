@@ -79,7 +79,7 @@ export interface HarnessReplOptions {
   history?: HistoryOptions;
   /** Harness this session edits (a project can hold several). Default `main`. */
   harness?: string;
-  /** Process execution mode: `inline` (L1, default) or `worker` (L2). */
+  /** Process execution mode: `worker` (L2, default) or `inline` (L1). */
   execution?: 'inline' | 'worker';
   /** Max concurrent model calls across the session and its subagents (default 4; 0 = unlimited). */
   providerConcurrency?: number;

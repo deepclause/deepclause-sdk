@@ -131,9 +131,10 @@ order**.
 
 ## 4. Two execution modes
 
-The same DML runs at either isolation level; only `--execution` changes.
+The same DML runs at either isolation level; only `--execution` changes. `worker`
+is the default; `inline` is the in-process fallback.
 
-| | **L1 — `inline` (default)** | **L2 — `worker`** |
+| | **L1 — `inline`** | **L2 — `worker` (default)** |
 |---|---|---|
 | Where | one WASM instance, cooperative scheduler | a `worker_threads` thread with its own WASM |
 | Concurrency | interleaving at `task`/`exec`/`receive` yield points | true parallelism |

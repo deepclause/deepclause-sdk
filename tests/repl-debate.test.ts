@@ -50,6 +50,7 @@ beforeEach(async () => {
     workspacePath: workspace,
     model: 'test-model',
     provider: 'openai',
+    execution: 'inline',
     llmBackend: mockBackend(),
   });
 });
