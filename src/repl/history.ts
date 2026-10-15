@@ -53,6 +53,16 @@ export interface HistoryTurnRecord {
   usage?: { inputTokens?: number; outputTokens?: number };
 }
 
+/** One persisted runtime event (`sessions/<id>/events.jsonl`). */
+export interface HistoryEventRecord {
+  ts?: string;
+  sessionId?: string;
+  turn?: number;
+  frame?: string;
+  type: string;
+  [key: string]: unknown;
+}
+
 export interface HistoryChangedPredicate {
   predicate: string;
   action: 'added' | 'removed' | 'replaced';
@@ -630,6 +640,30 @@ export class HistoryStore {
       }
     }
     return 0;
+  }
+
+  /**
+   * Persisted runtime events for a session, oldest first, capped at the last
+   * `limit`. Used to render a resumed session on load.
+   */
+  async readEvents(sessionId: string = this.sessionId, limit = 400): Promise<HistoryEventRecord[]> {
+    let text: string;
+    try {
+      text = await fs.readFile(path.join(this.sessionsDir(), sessionId, 'events.jsonl'), 'utf8');
+    } catch {
+      return [];
+    }
+    const records: HistoryEventRecord[] = [];
+    for (const line of text.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const parsed = JSON.parse(line) as HistoryEventRecord;
+        if (parsed && typeof parsed.type === 'string') records.push(parsed);
+      } catch {
+        // skip a malformed line
+      }
+    }
+    return limit >= records.length ? records : records.slice(records.length - limit);
   }
 
   /** Persist the durable harness snapshot beside a session (best effort). */

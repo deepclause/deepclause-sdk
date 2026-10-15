@@ -47,7 +47,9 @@ CLI commands: `init`, `login`, `logout`, `set-backend`, `set-model`, `show-model
   an independent harness with its own content and history; `-l file.dml` uses/creates
   a harness named after the file, whose loaded content becomes its baseline.
 - **Resume**: `deepclause repl --session <id|last>` restores the harness, memory,
-  and turn numbering from the durable `sessions/<id>/harness.json`.
+  and turn numbering from the durable `sessions/<id>/harness.json`, and replays the
+  prior transcript (`events.jsonl`, bounded) so the session continues instead of
+  starting blank.
 - **Media**: `read_media/2` + `attach_media/1` attach a workspace image to the next
   `task/N` (reference-only; no bytes in clauses). Images can also be **displayed**
   (`output(media(...))`, `output(media{svg: …})`, `/show <path>`) and **generated**

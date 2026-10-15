@@ -846,6 +846,20 @@ async function printBanner(runtime: ReplRuntime, loaded: string[]): Promise<void
   runtime.renderer.writeLine(lines.join('\n'));
 }
 
+/**
+ * Replay a resumed session's prior events so the transcript continues instead of
+ * starting blank. Bounded, and skipped when the session was not resumed or
+ * tracing was off.
+ */
+async function renderResumedSession(runtime: ReplRuntime): Promise<void> {
+  const events = await runtime.repl.resumedTranscript().catch(() => []);
+  if (events.length === 0) return;
+  runtime.renderer.writeLine('');
+  runtime.renderer.writeLine(`── resumed session ${runtime.sessionId} ──`);
+  for (const event of events) runtime.renderer.render(event);
+  runtime.renderer.writeLine('');
+}
+
 /** Dispatch one classified input. Returns false when the REPL should exit. */
 export async function dispatchReplInput(
   runtime: ReplRuntime,
@@ -1882,6 +1896,7 @@ export async function runTui(
   tui.start();
 
   await printBanner(runtime, loaded);
+  await renderResumedSession(runtime);
   tui.requestRender();
 
   try {
@@ -2056,6 +2071,7 @@ export async function startRepl(options: ReplCliOptions): Promise<number> {
       return await runTui(runtime, options, saveHarnessOnExit, options.load ?? []);
     }
     await printBanner(runtime, options.load ?? []);
+    await renderResumedSession(runtime);
     return await runInteractive(runtime, options, saveHarnessOnExit);
   } finally {
     await saveHarnessOnExit();

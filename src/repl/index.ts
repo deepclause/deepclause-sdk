@@ -130,6 +130,8 @@ export interface HarnessRepl {
   diagram(entry?: string, mode?: DiagramMode, options?: { signal?: AbortSignal }): Promise<DiagramResult>;
   /** Deliver a steering message into the running authoring turn. */
   steer(text: string): void;
+  /** Events from a resumed session, to render it on load (resumed sessions only). */
+  resumedTranscript(limit?: number): Promise<DMLEvent[]>;
   dispose(): Promise<void>;
   /** The underlying session (used by the CLI for session id / frame kind). */
   readonly session: DMLSession;
@@ -200,6 +202,10 @@ class HarnessReplImpl implements HarnessRepl {
 
   steer(text: string): void {
     this.session.steer(text);
+  }
+
+  resumedTranscript(limit?: number): Promise<DMLEvent[]> {
+    return this.session.resumedTranscript(limit);
   }
 
   dispose(): Promise<void> {

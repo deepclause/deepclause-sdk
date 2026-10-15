@@ -430,6 +430,39 @@ describe('harness history', () => {
     expect(history).toMatch(new RegExp(`harness_turn\\('${id}', 2,`));
   });
 
+  it('replays a resumed session transcript on load', async () => {
+    const id = 'sess_replay';
+    repl = await createHarnessRepl({
+      sessionId: id,
+      workspacePath: workspace,
+      model: 'test-model',
+      provider: 'openai',
+      llmBackend: new CannedBackend([commitResponse('demo :- output(one).')]),
+      tools: new Map(),
+      history: HISTORY,
+    });
+    await collect(repl.prompt('make demo'));
+    // Run the skill so an `output` event is recorded for the session.
+    expect(outputs(await collect(repl.query('demo')))).toContain('one');
+    await repl.dispose();
+    repl = undefined;
+
+    repl = await createHarnessRepl({
+      sessionId: id,
+      resume: true,
+      workspacePath: workspace,
+      model: 'test-model',
+      provider: 'openai',
+      llmBackend: new CannedBackend([{ text: '' }]),
+      tools: new Map(),
+      history: HISTORY,
+    });
+
+    const prior = await repl.resumedTranscript();
+    expect(prior.length).toBeGreaterThan(0);
+    expect(prior.some((event) => event.type === 'output' && event.content?.includes('one'))).toBe(true);
+  });
+
   it('indexes sessions and resolves the latest for --session last', async () => {
     const first = new HistoryStore(workspace, 'sess_a', HISTORY);
     await first.init();

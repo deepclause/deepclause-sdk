@@ -186,6 +186,51 @@ let sessionCounter = 0;
  */
 let sharedInputQueue: Promise<void> = Promise.resolve();
 
+/** Rebuild a `DMLEvent` from a persisted history record, or undefined. */
+function historyEventFromRecord(record: Record<string, unknown>): DMLEvent | undefined {
+  const type = typeof record.type === 'string' ? (record.type as DMLEvent['type']) : undefined;
+  if (!type) return undefined;
+  const frameKind = typeof record.frame === 'string' ? (record.frame as DMLEvent['frameKind']) : undefined;
+  const content = typeof record.content === 'string' ? record.content : undefined;
+  switch (type) {
+    case 'stream':
+      return content ? { type, frameKind, content } : undefined;
+    case 'output':
+    case 'answer':
+    case 'error':
+      return { type, frameKind, content };
+    case 'log':
+      return { type, frameKind, content, level: record.level as DMLEvent['level'] };
+    case 'tool_call':
+      return {
+        type,
+        frameKind,
+        toolName: typeof record.toolName === 'string' ? record.toolName : undefined,
+        toolState: record.toolState as DMLEvent['toolState'],
+        toolSummary: typeof record.toolSummary === 'string' ? record.toolSummary : undefined,
+        toolArgs: record.toolArgs as Record<string, unknown> | undefined,
+      };
+    case 'solution':
+      return {
+        type,
+        frameKind,
+        solution: {
+          bindings: (Array.isArray(record.bindings) ? record.bindings : []) as NonNullable<DMLEvent['solution']>['bindings'],
+          deterministic: false,
+        },
+      };
+    case 'task_activity':
+      return {
+        type,
+        frameKind,
+        taskState: record.taskState as DMLEvent['taskState'],
+        taskDescription: typeof record.taskDescription === 'string' ? record.taskDescription : undefined,
+      };
+    default:
+      return undefined;
+  }
+}
+
 /** The log-view line for an event, or undefined for per-tick noise. */
 function processLogText(event: ProcessEvent): string | undefined {
   switch (event.type) {
@@ -524,6 +569,18 @@ export class DMLSession {
   processLog(limit = 200): ProcessLogEntry[] {
     const entries = this.processLogEntries;
     return limit >= entries.length ? [...entries] : entries.slice(entries.length - limit);
+  }
+
+  /**
+   * Events from the resumed session, to render it on load. Empty unless this
+   * session was opened with `resume` and history is enabled.
+   */
+  async resumedTranscript(limit = 400): Promise<DMLEvent[]> {
+    if (!this.resume || !this.history) return [];
+    const records = await this.history.readEvents(this.sessionId, limit);
+    return records
+      .map((record) => historyEventFromRecord(record))
+      .filter((event): event is DMLEvent => Boolean(event));
   }
 
   private recordProcessLog(event: ProcessEvent): void {
