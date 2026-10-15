@@ -1,115 +1,98 @@
 # DeepClause SDK Examples
 
-This directory contains examples demonstrating how to use the DeepClause SDK.
+Every example runs **with no configuration**: if a provider key is in the
+environment it uses the live model, otherwise it falls back to a scripted model.
+That keeps the examples runnable — and `npm run examples:smoke` meaningful — on a
+machine with no credentials.
 
-## Prerequisites
-
-1. Build the SDK:
-   ```bash
-   npm run build
-   ```
-
-2. Set up API keys (environment variables):
-   ```bash
-  export GOOGLE_GENERATIVE_AI_API_KEY="..."
-  # optional, for deep-research.ts live web search
-  export BRAVE_API_KEY="..."
-   ```
-
-For a no-key validation path, start with:
+## Quick start
 
 ```bash
-npx tsx sdk-examples/no-api-key.ts
+npm run build
+npm run example     # quick-start.ts — DeepClause in 30 lines
+npm run examples    # neurosymbolic.ts — the model reads prose, Prolog decides
 ```
 
-## Quick Start
+Keys are optional. To use a live model, export one of:
 
-The simplest example to get started:
+```bash
+export OPENAI_API_KEY="..."                # gpt-4o-mini
+export ANTHROPIC_API_KEY="..."             # claude-3-5-haiku-latest
+export GOOGLE_GENERATIVE_AI_API_KEY="..."  # gemini-2.0-flash
+```
+
+`npm run examples:smoke` runs every example in this directory offline.
+
+## The examples
+
+### 1. Quick start — `quick-start.ts`
+
+The smallest program that does something: one `task/N` and one `answer/1`.
 
 ```bash
 npm run example
-# or
-npx tsx sdk-examples/quick-start.ts
 ```
 
-To exercise the currently supported no-key paths end-to-end:
+### 2. Tools and policy — `tools.ts`
+
+Register typed host tools, then restrict which ones the model may reach. The
+same request runs under a whitelist that permits only `fetch_weather`, so the
+email call comes back refused — enforced by the host, not the model.
 
 ```bash
-npm run examples:smoke
+npx tsx sdk-examples/tools.ts
 ```
 
-## Available Examples
+```
+policy: {"mode":"whitelist","tools":["fetch_weather"]}
 
-### 1. Quick Start (`quick-start.ts`)
-
-Minimal example showing core functionality:
-- Creating SDK instance
-- Running DML code
-- Handling events
-
-### 2. Basic Usage (`basic-usage.ts`)
-
-Comprehensive examples covering all SDK features:
-
-| Example | Description |
-|---------|-------------|
-| 1. Simple Task | Basic `task()` execution |
-| 2. Task with Variables | Binding output variables |
-| 3. Custom Tools | Registering and using tools |
-| 4. Tool Policy | Whitelist/blacklist security |
-| 5. User Input | Handling interactive input |
-| 6. Parameters | Passing parameters to DML |
-| 7. Sub-agents | Delegating to sub-agents |
-| 8. Streaming | Using `yield()` for output |
-| 9. Cancellation | AbortController support |
-| 10. Research Agent | Complete workflow example |
-
-Run specific example:
-```bash
-npx tsx sdk-examples/basic-usage.ts 3
+  ▸ weather
+  ▸ fetch_weather
+  ✓ fetch_weather
+  ✓ weather
+  ▸ send_email
+  ▸ smtp
+  ✗ smtp  Tool 'smtp' is not in the whitelist
+  ✓ send_email
+answer: done
 ```
 
-### 3. Neurosymbolic (`neurosymbolic.ts`)
+Note the policy check applies to `exec/2` **inside a DML tool body**, not only to
+a top-level `exec`. A tool cannot smuggle a blocked host capability.
 
-Advanced examples showcasing Prolog + LLM integration:
+### 3. Neuro-symbolic — `neurosymbolic.ts`
 
-| Example | Description |
-|---------|-------------|
-| 1. Product Recommendation | Constraint filtering + LLM generation |
-| 2. Puzzle Solver | CLP(FD) solving + LLM explanation |
-| 3. Backtracking Reasoning | Prolog backtracking for fault tolerance |
+A refund policy arrives in English. The model extracts it into a declared shape
+(`schema/2`); Prolog then applies it to every order exactly, so the model never
+sees the order table and cannot miscount a refund.
 
 ```bash
-npx tsx sdk-examples/neurosymbolic.ts 1
+npm run examples
+# refund [carol,erin]
 ```
 
-### 4. No-Key Example (`no-api-key.ts`)
+Swap the policy text and the *same rules* produce a different, still-exact
+answer — that is the neuro-symbolic split: language in, logic out.
 
-Runs without provider credentials and demonstrates:
-- Tool registration
-- Tool whitelist and blacklist policies
-- A Prolog-only DML run with no model call
+### 4. Semantic judgments — `judgments.ts`
+
+`judge/2` with pluggable backends. One DML program makes typed semantic
+decisions — `choose`, `rate`, `verify`, `probability` — and the same program runs
+against a mock, an LLM, or Jev by changing only the backend registration.
 
 ```bash
-npx tsx sdk-examples/no-api-key.ts
+JUDGE_BACKEND=mock npx tsx sdk-examples/judgments.ts                       # no key
+JUDGE_BACKEND=llm  GOOGLE_GENERATIVE_AI_API_KEY=... npx tsx sdk-examples/judgments.ts
+JUDGE_BACKEND=jev  TYPESAFE_API_KEY=...             npx tsx sdk-examples/judgments.ts
 ```
 
-### 5. Deep Research (`deep-research.ts`)
+See [`docs/JUDGMENT_BACKENDS.md`](../docs/JUDGMENT_BACKENDS.md).
 
-Longer interactive research workflow with optional Brave Search integration:
+### 5. Subagents — `subagents.dml`, `subagents.ts`
 
-```bash
-npx tsx sdk-examples/deep-research.ts "test topic"
-```
-
-Without `GOOGLE_GENERATIVE_AI_API_KEY`, this example now skips cleanly. Without `BRAVE_API_KEY`, it falls back to mock search results.
-
-### 6. Subagents (`subagents.ts`, `subagents.dml`)
-
-The `.dml` file is a tour of six concurrency patterns, from a fan-out to
-agents that route work between processes. Patterns 1–5 call `task/N` (a model);
-pattern 6 is pure Prolog and is best run with the default `--execution worker`
-to spread it over cores.
+The `.dml` file is a tour of six concurrency patterns, from a fan-out to agents
+that route work between processes. Patterns 1–5 call `task/N` (a model); pattern
+6 is pure Prolog and is best run with the default `--execution worker`.
 
 | Entry | Pattern |
 |---|---|
@@ -135,7 +118,7 @@ The `narrate`/`keeper`/`asker` predicates at the bottom show the three process
 lifecycle shapes — one-shot, message-waiting, and interactive — and need no
 model:
 
-```bash
+```
 /spawn narrate("quantum error correction")
 /spawn keeper([])
 /spawn asker("Which deadline should I assume?")
@@ -151,7 +134,9 @@ npx tsx sdk-examples/subagents.ts            # L1 (in-process)
 npx tsx sdk-examples/subagents.ts --worker   # L2 (worker thread)
 ```
 
-### 7. Two agents talking to each other (`debate.ts`, `debate.dml`)
+See [`docs/SUBAGENTS.md`](../docs/SUBAGENTS.md).
+
+### 6. Two agents talking to each other — `debate.dml`, `debate.ts`
 
 Two **LLM-backed** subagents — Pro and Con — with their own private memory and
 their own `task/N` calls, exchanging arguments directly with `send/2` and
@@ -167,115 +152,71 @@ Or with the REPL's configured model:
 
 ```bash
 deepclause repl -l sdk-examples/debate.dml
-```
-
-```
 /goal debate("Nuclear power should expand to meet climate targets", 2, Verdict).
 ```
 
 Each debate turn is shown as `⚙ debater  PRO (round 2): …` in the transcript.
 
-## DML Language Quick Reference
+## Embedding the REPL
 
-### Core Predicates
+`subagents.ts` and `debate.ts` use `createHarnessRepl` (exported from the SDK) to
+embed the REPL engine, not just the one-shot `runDML`. That is the seam for
+building a UI on top of DeepClause.
+
+## DML language quick reference
+
+### Core predicates
 
 ```prolog
 % Run an LLM agent loop
 task("Description").
-task("Description with Variable binding", Variable).
+task("Description with variables", string(Answer), integer(Count)).
+
+% Structured output against a declared shape
+schema(author, [field(name, string, required), field(email, string, default(""))]).
+task("Extract the authors", list(schema(author, Authors))).
 
 % External tool execution
-exec(tool_name(args), Result).
+exec(tool_name(Arg), Result).
 
-% Memory management
-system("System prompt").      % Add system message
-user("User message").         % Add user message
-push_context.                 % Save memory state
-pop_context.                  % Restore memory state
+% Memory
+system("System prompt").
+user("User message").
+push_context / pop_context.       % backtrackable memory
 
 % Output
-answer("Final answer").       % Send final answer
-yield("Streaming output").    % Stream intermediate output
-log("Debug message").         % Log message
+answer("Final answer").           % terminate and commit
+yield("Streaming output").        % stream intermediate text
+log("Debug message").
 ```
 
-### Tool Definition
+### Tools and entry point
 
 ```prolog
-% Define a tool available to the task agent
-tool(my_tool(Arg1, Result)) :-
+tool(my_tool(Arg1, Result), "What it does") :-
     exec(external_tool(Arg1), Result).
+
+agent_main :- ... .               % entry point, runDML()
+agent_main(Arg1, Arg2) :- ... .   % with positional args
 ```
 
-### Entry Point
+### Processes (subagents)
 
 ```prolog
-agent_main :-
-    % Your code here
-    answer("Done!").
-
-% With parameters
-agent_main(Param1, Param2) :-
-    % Use Param1, Param2
-    answer("Done!").
-```
-
-## Creating Your Own Example
-
-```typescript
-import { createDeepClause } from '../src/index.js';
-import { z } from 'zod';
-
-async function myExample() {
-  const dc = await createDeepClause({
-    model: 'gpt-4o',
-    apiKey: process.env.OPENAI_API_KEY,
-  });
-
-  // Register tools
-  dc.registerTool('my_tool', {
-    description: 'What this tool does',
-    parameters: z.object({
-      input: z.string(),
-    }),
-    execute: async (args) => {
-      // Tool implementation
-      return { result: 'success' };
-    },
-  });
-
-  // Define DML
-  const code = `
-    tool(my_tool_wrapper(Input, Output)) :-
-        exec(my_tool(Input), Output).
-
-    agent_main :-
-        system("You are a helpful assistant."),
-        task("Do something with my_tool"),
-        answer("Done!").
-  `;
-
-  // Run and handle events
-  try {
-    for await (const event of dc.runDML(code)) {
-      console.log(event.type, event.content);
-    }
-  } finally {
-    await dc.dispose();
-  }
-}
-
-myExample().catch(console.error);
+spawn(Goal, Pid).                 % start a process; Goal is copied
+send(Pid, Message).               % copy a term into a mailbox
+receive(Message, TimeoutMs).      % pop the oldest message; fails on timeout
+serve(Name, Goal).                % spawn + register
+service_call(Name, Request, Reply).
+swarm(Worker, Items, Results, 4). % fan out, collect in input order
 ```
 
 ## Tips
 
-1. **Tool Policy**: Always set a tool policy in production to control what tools the LLM can access.
-
-2. **Error Handling**: Use Prolog's `(Goal -> Then ; Else)` construct for graceful error handling.
-
-3. **Backtracking**: Use `push_context`/`pop_context` to make memory backtrackable.
-
-4. **Streaming**: Use `yield()` to stream intermediate results for better UX.
-
-5. **Cancellation**: Pass an `AbortController.signal` to enable user cancellation.
+1. **Tool policy**: set one in production. It governs `exec/2` everywhere,
+   including inside a DML tool.
+2. **Error handling**: use Prolog's `( Goal -> Then ; Else )` and `catch/3`.
+3. **Structured output**: prefer `schema/2` over parsing prose; a missing
+   required field fails the task instead of silently going empty.
+4. **Streaming**: `yield/1` streams intermediate results for a live UI.
+5. **Cancellation**: pass an `AbortController`'s `signal` in `runDML` options.

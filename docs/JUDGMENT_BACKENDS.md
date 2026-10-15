@@ -347,4 +347,4 @@ const sdk = await createDeepClause({
 - `src/runner.ts` — `handleJudgment`, `completeJudgment`, `postJudgmentResult`.
 - `src/prolog-src/deepclause_mi.pl` — judgment predicates and `mi_call_judgment`.
 - `docs/JUDGE_EXAMPLES.md` — worked examples.
-- `sdk-examples/judge.ts` — runnable harness selecting `mock` / `llm` / `jev`.
+- `sdk-examples/judgments.ts` — runnable harness selecting `mock` / `llm` / `jev`.

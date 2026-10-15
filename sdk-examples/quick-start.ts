@@ -1,62 +1,37 @@
 /**
- * DeepClause SDK - Quick Start Example
- * 
- * This is a minimal example showing the core functionality.
- * Run with: npx tsx sdk-examples/quick-start.ts
+ * DeepClause in 30 lines.
+ *
+ *   npx tsx sdk-examples/quick-start.ts
+ *
+ * One DML program: ask the model for a sentence, then commit it with `answer/1`.
+ * With no provider key it runs against a scripted model, so it always works.
  */
+import { exampleSdk, modelLabel } from './_offline.js';
 
-import { createDeepClause } from '../src/index.js';
+const DML = `
+agent_main :-
+    system("Answer in exactly one sentence, for a developer."),
+    task("What is DeepClause?", string(Summary)),
+    answer(Summary).
+`;
 
-async function main() {
-  // Check for API key
-  const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
-  if (!apiKey) {
-    console.log('Skipping quick-start: GOOGLE_GENERATIVE_AI_API_KEY is not set.');
-    console.log('Set it and rerun `npx tsx sdk-examples/quick-start.ts` to execute the live example.');
-    return;
-  }
-  
-  // Create DeepClause instance
-  const dc = await createDeepClause({
-    model: 'gemini-2.0-flash',
-    apiKey,
-    temperature: 0.7,
-    maxTokens: 8192,
-  });
-
-  // 3. Define DML code
-  const dmlCode = `
-    % Main entry point
-    agent_main :-
-        system("You are a helpful assistant."),
-        task("Explain what DeepClause is in exactly one sentence.", Summary),
-        answer(Summary).
-  `;
-
-  // 4. Run and handle events
-  console.log('Starting DeepClause execution...\n');
+async function main(): Promise<void> {
+  console.log(`model: ${modelLabel()}\n`);
+  const dc = await exampleSdk(
+    () => 'DeepClause is a neuro-symbolic runtime that gives a model a Prolog engine to reason with, not just to talk.',
+  );
 
   try {
-    for await (const event of dc.runDML(dmlCode)) {
-      switch (event.type) {
-        case 'output':
-          console.log(event.content);
-          break;
-        case 'answer':
-          console.log('\n✓', event.content);
-          break;
-        case 'error':
-          console.error('✗ Error:', event.content);
-          break;
-        case 'finished':
-          console.log('\nExecution complete.');
-          break;
-      }
+    for await (const event of dc.runDML(DML)) {
+      if (event.type === 'answer') console.log(event.content);
+      else if (event.type === 'error') console.error('error:', event.content);
     }
   } finally {
-    // 5. Cleanup
     await dc.dispose();
   }
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

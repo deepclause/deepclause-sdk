@@ -2016,7 +2016,19 @@ export class DMLRunner {
             if (process.env.DEBUG_RUNNER) {
               console.log('[RUNNER] Tool exec request:', execToolName, execArgs);
             }
-            
+
+            // The tool policy governs host capabilities, and an `exec/2` inside a
+            // DML tool body is one. The top-level path checks this in
+            // handleExec; without the same check here a tool could reach a
+            // blocked host tool (`ask_user` is exempt inside checkToolPolicy).
+            const policyCheck = checkToolPolicy(execToolName, runContext.toolPolicy ?? null);
+            if (!policyCheck.allowed) {
+              onToolEvent?.(buildToolStartEvent(execToolName, {}));
+              onToolEvent?.(buildToolFailureEvent(execToolName, {}, new Error(policyCheck.reason)));
+              this.postExecResult({ success: false, error: policyCheck.reason });
+              break;
+            }
+
             // Find and execute the registered tool
             const tool = registeredTools.get(execToolName);
             if (!tool) {

@@ -4,9 +4,9 @@
  * Demonstrates `judge/2` with pluggable backends. The same DML runs against a
  * mock, an LLM, or Jev; only the backend registration changes.
  *
- *   JUDGE_BACKEND=mock npx tsx sdk-examples/judge.ts
- *   JUDGE_BACKEND=llm  GOOGLE_GENERATIVE_AI_API_KEY=... npx tsx sdk-examples/judge.ts
- *   JUDGE_BACKEND=jev  TYPESAFE_API_KEY=...             npx tsx sdk-examples/judge.ts
+ *   JUDGE_BACKEND=mock npx tsx sdk-examples/judgments.ts
+ *   JUDGE_BACKEND=llm  GOOGLE_GENERATIVE_AI_API_KEY=... npx tsx sdk-examples/judgments.ts
+ *   JUDGE_BACKEND=jev  TYPESAFE_API_KEY=...             npx tsx sdk-examples/judgments.ts
  *
  * `mock` is the default and needs no key.
  */
