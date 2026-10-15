@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **`deepclause-agentvm` 0.0.5 → 0.4.0.** The sandbox API the SDK uses
+  (`new AgentVM({ network, mounts })`, `start`/`exec`/`stop`, and the
+  `{ stdout, stderr, exitCode }` result) is unchanged. 0.4.0 adds
+  `persistentRoot`/`persistentRootDir`, adds a `blitFrame` export, and raises
+  the default network rate limit from 512 KiB/s to 2 MiB/s. It requires Node
+  ≥ 20 (0.0.5 already did), so the SDK's `engines.node` moves from `>=18` to
+  `>=20.0.0`.
+
 ## 0.2.1 - 2026-10-15
 
 ### Fixed

@@ -46,13 +46,13 @@
     "@ai-sdk/anthropic": "^3.0.35",
     "@ai-sdk/google": "^3.0.60",
     "@ai-sdk/openai": "^3.0.25",
-    "@resvg/resvg-js": "^2.6.2",
     "@earendil-works/pi-ai": "^1.0.4",
     "@earendil-works/pi-coding-agent": "^1.0.4",
     "@earendil-works/pi-tui": "^1.0.4",
+    "@resvg/resvg-js": "^2.6.2",
     "ai": "^6.0.116",
     "commander": "^12.1.0",
-    "deepclause-agentvm": "^0.0.5",
+    "deepclause-agentvm": "^0.4.0",
     "fflate": "^0.8.3",
     "zod": "^3.23.0"
   },
@@ -68,7 +68,7 @@
     "vitest": "^4.1.10"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "files": [
     "dist",
