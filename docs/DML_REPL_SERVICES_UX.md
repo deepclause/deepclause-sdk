@@ -166,7 +166,7 @@ block on it; the turn continues.
 
 | Command | What it does |
 |---|---|
-| `/ps [name] [--watch]` | print the tree; `--watch` toggles the live panel |
+| `/ps [name] [--watch] [--logs]` | print the tree; `--watch` pins the summary panel; `--logs` pins a larger follow of subagent output, reasoning and tool calls |
 | `/tail <name> [n]` | print the last `n` buffered events/lines |
 | `/focus <name>` | follow a service: its streamed output renders live in the transcript, prefixed |
 | `/unfocus` | back to quiet |
