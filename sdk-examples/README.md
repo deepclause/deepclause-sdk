@@ -104,6 +104,55 @@ npx tsx sdk-examples/deep-research.ts "test topic"
 
 Without `GOOGLE_GENERATIVE_AI_API_KEY`, this example now skips cleanly. Without `BRAVE_API_KEY`, it falls back to mock search results.
 
+### 6. Subagents (`subagents.ts`, `subagents.dml`)
+
+Session-scoped subagents with the three shapes — one-shot, message-waiting, and
+interactive (`input/2`). No API key is needed.
+
+```bash
+npx tsx sdk-examples/subagents.ts            # L1 (in-process)
+npx tsx sdk-examples/subagents.ts --worker   # L2 (worker thread)
+```
+
+In the REPL:
+
+```bash
+deepclause repl -l sdk-examples/subagents.dml
+```
+
+```
+/spawn narrator("quantum error correction")
+/spawn keeper([])
+/spawn asker("Which deadline should I assume?")
+/ps --watch
+/send keeper "the migration finished"
+/stop keeper
+```
+
+### 7. Two agents talking to each other (`debate.ts`, `debate.dml`)
+
+Two **LLM-backed** subagents — Pro and Con — with their own private memory and
+their own `task/N` calls, exchanging arguments directly with `send/2` and
+`receive/2`, then judged by a third call.
+
+```bash
+npx tsx sdk-examples/debate.ts             # L1, deterministic mock model
+npx tsx sdk-examples/debate.ts --worker    # L2 worker, mock model
+DC_REAL=1 DC_MODEL=gpt-4o OPENAI_API_KEY=… npx tsx sdk-examples/debate.ts   # real model
+```
+
+Or with the REPL's configured model:
+
+```bash
+deepclause repl -l sdk-examples/debate.dml
+```
+
+```
+/goal debate("Nuclear power should expand to meet climate targets", 2, Verdict).
+```
+
+Each debate turn is shown as `⚙ debater  PRO (round 2): …` in the transcript.
+
 ## DML Language Quick Reference
 
 ### Core Predicates

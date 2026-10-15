@@ -1,0 +1,88 @@
+%% sdk-examples/debate.dml — two LLM-backed subagents debating each other.
+%%
+%%   deepclause repl -l sdk-examples/debate.dml
+%%   /goal debate("Nuclear power should expand to meet climate targets", 2, Verdict).
+%%
+%% `debate/3` spawns a PRO and a CON subagent. Each is its own process with its
+%% own private conversation memory and its own task/N (LLM) calls. They exchange
+%% arguments directly with send/2 and receive/2 — Pro opens, they alternate
+%% rebuttals for MaxRounds, then one sends `final/1` so both close. Each sends its
+%% closing to the coordinator, which makes one judge call and returns a verdict.
+%%
+%% In the REPL, `output/1` from a subagent is shown prefixed with its name, so the
+%% debate is visible as it happens.
+
+doc(debate/3, "Run a Pro-vs-Con debate between two subagents and judge it.").
+doc(debater/4, "A debater subagent: opens, rebuts, then closes.").
+
+debate(Topic, MaxRounds, Verdict) :-
+    self(Me),
+    spawn(debater(Me, pro, Topic, MaxRounds), Pro),
+    spawn(debater(Me, con, Topic, MaxRounds), Con),
+    %% Hand each debater the other's pid, then let Pro open.
+    send(Pro, peer(Con)),
+    send(Con, peer(Pro)),
+    send(Pro, start),
+    %% Both close; collect the two closing statements.
+    receive(closing(_, ProClosing), 600000),
+    receive(closing(_, ConClosing), 600000),
+    format(string(JudgePrompt),
+        "You are judging a debate on: ~w~n~nPRO closing: ~w~n~nCON closing: ~w~n~nIn three sentences, say which side is more convincing and why.",
+        [Topic, ProClosing, ConClosing]),
+    task(JudgePrompt, string(Verdict)).
+
+%% debater(+Coordinator, +Role, +Topic, +MaxRounds)
+%% Pro opens after `start`; Con waits for Pro's opening argument.
+debater(Coordinator, Role, Topic, MaxRounds) :-
+    receive(peer(Peer), 600000),
+    (   Role == pro ->
+        receive(start, 600000),
+        format(string(OpenPrompt),
+            "You are the ~w side in a debate on: ~w. Open with one concise, specific argument in at most 3 sentences.",
+            [Role, Topic]),
+        task(OpenPrompt, string(Opening)),
+        format(string(Line), "~w opening: ~w", [Role, Opening]),
+        output(Line),
+        send(Peer, argument(Opening, 1))
+    ;   true
+    ),
+    debate_loop(Coordinator, Role, Topic, MaxRounds, Peer).
+
+debate_loop(Coordinator, Role, Topic, MaxRounds, Peer) :-
+    receive(Msg, 600000),
+    (   Msg = argument(Opponent, N) ->
+        (   N >= MaxRounds ->
+            close_debate(Coordinator, Role, Topic, Peer, Opponent)
+        ;   Next is N + 1,
+            format(string(RebuttalPrompt),
+                "You are the ~w side in a debate on: ~w. The opponent argued: ~w. Rebuttal in at most 3 sentences.",
+                [Role, Topic, Opponent]),
+            task(RebuttalPrompt, string(Rebuttal)),
+            format(string(Line), "~w (round ~w): ~w", [Role, Next, Rebuttal]),
+            output(Line),
+            send(Peer, argument(Rebuttal, Next)),
+            debate_loop(Coordinator, Role, Topic, MaxRounds, Peer)
+        )
+    ;   Msg = final(OpponentClosing) ->
+        %% The opponent closed: this side closes back and finishes.
+        format(string(ClosingPrompt),
+            "You are the ~w side in a debate on: ~w. The opponent closed with: ~w. Give your closing statement in at most 3 sentences.",
+            [Role, Topic, OpponentClosing]),
+        task(ClosingPrompt, string(Closing)),
+        format(string(Line), "~w closing: ~w", [Role, Closing]),
+        output(Line),
+        send(Coordinator, closing(Role, Closing)),
+        answer(Closing)
+    ;   debate_loop(Coordinator, Role, Topic, MaxRounds, Peer)
+    ).
+
+close_debate(Coordinator, Role, Topic, Peer, Opponent) :-
+    format(string(ClosingPrompt),
+        "You are the ~w side in a debate on: ~w. The opponent said: ~w. Give your closing statement in at most 3 sentences.",
+        [Role, Topic, Opponent]),
+    task(ClosingPrompt, string(Closing)),
+    format(string(Line), "~w closing: ~w", [Role, Closing]),
+    output(Line),
+    send(Peer, final(Closing)),
+    send(Coordinator, closing(Role, Closing)),
+    answer(Closing).
