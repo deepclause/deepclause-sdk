@@ -73,7 +73,7 @@ CLI commands: `init`, `login`, `logout`, `set-backend`, `set-model`, `show-model
   on `spawn`/`send`) let the same DML run in both. See
   [`SUBAGENTS.md`](./SUBAGENTS.md).
 - **Commands**: `/goal <dml>`, `/help`, `/listing [filter]`, `/viz [entry] [--spec]`,
-  `/show <path>`, `/gen <prompt>`, `/spawn <goal>`, `/ps [--watch|--logs]`,
+  `/show <path>`, `/gen <prompt>`, `/spawn <goal>`, `/ps [--watch|--logs|--code]`,
   `/send <name> <term>`, `/call <name> <term>`, `/stop <name>`, `/login`,
   `/reset`, `/rollback`, `/compact [notes]`, `/export [file]`, `/model [id]`,
   `/reasoning [level]`, `/show-reasoning [mode]`, `/harness [width]`,

@@ -89,6 +89,7 @@ async function main(): Promise<void> {
     onInput: (prompt) => rpc('input', { prompt }) as Promise<string | undefined>,
   });
   await session.loadCode(init.harnessText);
+  session.setProcessSnapshot(init.harnessText, init.harnessVersion);
   session.setProcessEventSink(createEventForwarder(port));
 
   port.on('message', (message: MainToWorker) => {
@@ -98,10 +99,25 @@ async function main(): Promise<void> {
   port.postMessage({ type: 'ready' });
 }
 
+/**
+ * Adopt the harness snapshot the main pushed with a spawn/foreground request.
+ * Without this a long-lived worker would snapshot every later child from the
+ * module it started with, so committed edits would never reach new processes.
+ */
+function adoptSnapshot(
+  session: DMLSession,
+  message: { harnessText?: string; harnessVersion?: string },
+): void {
+  if (message.harnessText) {
+    session.setProcessSnapshot(message.harnessText, message.harnessVersion);
+  }
+}
+
 async function handle(session: DMLSession, message: MainToWorker): Promise<void> {
   switch (message.type) {
     case 'spawn':
       try {
+        adoptSnapshot(session, message);
         const pid = await session.spawnProcess(message.goal, message.options);
         port.postMessage({ type: 'spawn_result', requestId: message.requestId, pid });
       } catch (error) {
@@ -127,6 +143,7 @@ async function handle(session: DMLSession, message: MainToWorker): Promise<void>
 
     case 'foreground':
       try {
+        adoptSnapshot(session, message);
         const result = await session.handleForeground(message.request);
         port.postMessage({ type: 'foreground_result', requestId: message.requestId, ok: true, result });
       } catch (error) {

@@ -90,11 +90,16 @@ class FakeWorker implements WorkerLike {
   }
 }
 
+let stubSnapshot = { text: '', version: 'testversion' };
+
 function stubSession(log: { tools: string[]; models: number; inputs: string[] }): DMLSession {
   return {
     getSessionId: () => 's',
     workspacePathValue: () => undefined,
-    harnessText: async () => '',
+    harnessText: async () => stubSnapshot.text,
+    processSnapshotFor: () => stubSnapshot,
+    setProcessSnapshot: () => undefined,
+    currentHarnessVersion: () => stubSnapshot.version,
     modelId: () => 'test-model',
     providerId: () => 'openai',
     temperatureValue: () => 0.7,
@@ -176,6 +181,29 @@ describe('RemoteProcessHost', () => {
     await host.start();
     worker.emit({ type: 'event', event: { type: 'started', at: 1, pid: { node: 'w0', session: 's', id: 'p1' }, name: 'keeper' } });
     expect(seen).toContain('started');
+    await host.shutdown();
+  });
+
+  it('pushes the current harness snapshot with a spawn, only when it changed', async () => {
+    stubSnapshot = { text: 'ver :- output("v1").', version: 'v1' };
+    const { host, worker } = await startHost();
+    const spawnMessages = () => worker.sent.filter((message) => message.type === 'spawn');
+
+    // The worker already received v1 in its init data, so the first spawn only
+    // names the version; there is no reason to re-send the source.
+    await host.spawn('ver', { name: 'one' });
+    expect(spawnMessages().at(-1)).toMatchObject({ harnessVersion: 'v1' });
+    expect(spawnMessages().at(-1)).not.toHaveProperty('harnessText');
+
+    // A committed edit must reach the worker with the next spawn.
+    stubSnapshot = { text: 'ver :- output("v2").', version: 'v2' };
+    await host.spawn('ver', { name: 'two' });
+    expect(spawnMessages().at(-1)).toMatchObject({ harnessText: stubSnapshot.text, harnessVersion: 'v2' });
+
+    // Unchanged again: version only.
+    await host.spawn('ver', { name: 'three' });
+    expect(spawnMessages().at(-1)).toMatchObject({ harnessVersion: 'v2' });
+    expect(spawnMessages().at(-1)).not.toHaveProperty('harnessText');
     await host.shutdown();
   });
 });

@@ -86,6 +86,17 @@ describe('classifyReplInput', () => {
     expect(classifyReplInput('/model anthropic/claude')).toEqual({ kind: 'model', model: 'anthropic/claude' });
     expect(classifyReplInput('/nope')).toEqual({ kind: 'unknown-command', name: 'nope' });
   });
+
+  it('classifies /ps and its snapshot-inspection flags', () => {
+    expect(classifyReplInput('/ps')).toEqual({ kind: 'ps', watch: false, logs: false, code: undefined });
+    expect(classifyReplInput('/ps --watch')).toMatchObject({ kind: 'ps', watch: true });
+    expect(classifyReplInput('/ps --watch --logs')).toMatchObject({ kind: 'ps', watch: true, logs: true });
+    // `--code` alone reports the current version; `--code <target>` inspects a
+    // process snapshot (both `--code=x` and `--code x`).
+    expect(classifyReplInput('/ps --code')).toMatchObject({ kind: 'ps', code: '' });
+    expect(classifyReplInput('/ps --code frontdesk')).toMatchObject({ kind: 'ps', code: 'frontdesk' });
+    expect(classifyReplInput('/ps --code=p2')).toMatchObject({ kind: 'ps', code: 'p2' });
+  });
 });
 
 describe('runGoalWithRenderer', () => {

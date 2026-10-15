@@ -101,6 +101,12 @@ export interface HarnessToolController {
   spawnProcess(goal: string, options?: SpawnOptions): Promise<Pid>;
   /** The whole process state. */
   processes(): ProcessInfo[];
+  /** Info for one process, for inspection. */
+  processInfo(pid: Pid): ProcessInfo | undefined;
+  /** The harness source a process is running (its spawn-time snapshot). */
+  processCode(target: Pid | string): string | undefined;
+  /** The harness version this session is currently editing. */
+  currentHarnessVersion(): string;
   /** Resolve a registered process name. */
   whereisProcess(name: string): Pid | undefined;
   /** Copy a message term into a process's mailbox. */
@@ -116,16 +122,45 @@ function text(message: string): Record<string, unknown> {
 }
 
 /** A compact, model-readable table of the process state. */
-export function formatProcessTable(processes: ProcessInfo[]): string {
+export function formatProcessTable(processes: ProcessInfo[], currentVersion?: string): string {
   if (processes.length === 0) return 'no subagents';
   return processes
     .map((p) => {
       const usage = p.usage.totalTokens > 0 ? ` · ${p.usage.totalTokens} tok` : '';
       const activity = p.currentActivity ? ` · ${p.currentActivity}` : '';
       const error = p.error ? ` (${p.error})` : '';
-      return `${pidTermText(p.pid)}  ${p.name}  ${p.state}${error}  mailbox ${p.mailboxDepth}${usage}${activity}`;
+      // The harness snapshot the process runs. `(old)` marks a process started
+      // before the latest edit — the process is fine, its code is just older.
+      const stale = currentVersion && p.harnessVersion && p.harnessVersion !== currentVersion;
+      const code = p.harnessVersion ? ` · code ${p.harnessVersion.slice(0, 7)}${stale ? ' (old)' : ''}` : '';
+      return `${pidTermText(p.pid)}  ${p.name}  ${p.state}${error}  mailbox ${p.mailboxDepth}${usage}${code}${activity}`;
     })
     .join('\n');
+}
+
+/** The slice of a session `formatProcessCode` needs. */
+export interface ProcessCodeSource {
+  whereisProcess(name: string): Pid | undefined;
+  processes(): ProcessInfo[];
+  processCode(target: Pid | string): string | undefined;
+  processInfo(pid: Pid): ProcessInfo | undefined;
+  currentHarnessVersion(): string;
+}
+
+/**
+ * Render the harness snapshot one process is running, for `/ps --code`.
+ *
+ * With no target it reports the session's current harness version, which turns
+ * the question "is this worker stale?" into a version comparison.
+ */
+export function formatProcessCode(source: ProcessCodeSource, target: string): string {
+  if (!target) return `current harness code ${source.currentHarnessVersion()}`;
+  const pid = source.whereisProcess(target)
+    ?? source.processes().find((p) => pidTermText(p.pid) === target || p.pid.id === target)?.pid;
+  const code = pid ? source.processCode(pid) : undefined;
+  if (!pid || !code) return `no harness snapshot for ${target}`;
+  const info = source.processInfo(pid);
+  return `${pidTermText(pid)}  ${info?.name ?? target}  code ${info?.harnessVersion ?? '?'}\n${code}`;
 }
 
 const stringProp = (description: string): { type: string; description: string } => ({ type: 'string', description });
@@ -370,9 +405,17 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
   });
 
   tools.set('ps', {
-    description: 'List the session\'s subagents (the whole process state): id, name, state, mailbox depth, usage. Use this to inspect running work.',
-    parameters: { type: 'object', properties: {}, required: [] },
-    execute: async () => text(formatProcessTable(controller.processes())),
+    description: 'List the session\'s subagents (id, name, state, mailbox depth, usage, and the harness code version each runs). Pass `code` to print the full harness snapshot a subagent is running — the way to check whether a worker is on stale code.',
+    parameters: {
+      type: 'object',
+      properties: { code: stringProp('A process pid or registered name; omit to list. Pass "" for the current harness version.') },
+      required: [],
+    },
+    execute: async (args) => text(
+      args.code !== undefined
+        ? formatProcessCode(controller, String(args.code))
+        : formatProcessTable(controller.processes(), controller.currentHarnessVersion()),
+    ),
   });
 
   tools.set('send', {

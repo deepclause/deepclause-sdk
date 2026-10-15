@@ -86,6 +86,12 @@ export interface ProcessInfo {
   currentActivity?: string;
   parent?: Pid;
   codeVersion?: string;
+  /**
+   * The version of the harness snapshot this process runs (see
+   * `SpawnOptions.snapshot`). Two processes with different versions run
+   * different code; compare against the current harness to spot a stale worker.
+   */
+  harnessVersion?: string;
   result?: unknown;
   error?: string;
   exitReason?: unknown;
@@ -102,6 +108,12 @@ export interface SpawnOptions {
   maxGas?: number;
   /** Module version snapshot the process runs. */
   codeVersion?: string;
+  /**
+   * The harness snapshot this process runs. Internal: the host stamps it at
+   * spawn time from `ProcessHostOptions.resolveSnapshot`, so every process
+   * carries the exact module it started with and a comparable version.
+   */
+  snapshot?: { text: string; version: string };
   /** Link at spawn time (exit propagation). */
   link?: Pid;
   parent?: Pid;
@@ -209,6 +221,11 @@ export interface ProcessHostOptions {
   node?: NodeId;
   /** Resolve a spawned goal to a body. */
   resolveBody?: (goal: string) => ProcessBody | undefined;
+  /**
+   * The harness snapshot for a newly spawned process. A worker host returns the
+   * snapshot the main session sent; the main computes it from the live module.
+   */
+  resolveSnapshot?: () => { text: string; version: string };
   onEvent?: (event: ProcessEvent) => void;
   /** Called when a message is addressed to the synthetic host pid. */
   onHostMessage?: (message: unknown) => void;
@@ -305,6 +322,7 @@ export class LocalProcessHost {
   private readonly sessionId: string;
   private readonly node: NodeId;
   private readonly resolveBody?: (goal: string) => ProcessBody | undefined;
+  private readonly resolveSnapshot?: () => { text: string; version: string };
   private readonly onEvent?: (event: ProcessEvent) => void;
   private readonly onHostMessage?: (message: unknown) => void;
   private readonly maxProcesses: number;
@@ -327,6 +345,7 @@ export class LocalProcessHost {
     this.sessionId = options.sessionId;
     this.node = options.node ?? 'main';
     this.resolveBody = options.resolveBody;
+    this.resolveSnapshot = options.resolveSnapshot;
     this.onEvent = options.onEvent;
     this.onHostMessage = options.onHostMessage;
     this.maxProcesses = options.maxProcesses ?? 16;
@@ -349,6 +368,14 @@ export class LocalProcessHost {
     this.reapTerminalRecords();
     const resolved = body ?? this.resolveBody?.(goal);
     if (!resolved) throw new Error(`no body registered for goal: ${goal}`);
+
+    // Stamp the harness snapshot this process will run. Every path (main, a
+    // process spawning a child, a worker spawning on the main's behalf) goes
+    // through here, so a stale snapshot cannot slip in.
+    if (!options.snapshot) {
+      const snapshot = this.resolveSnapshot?.();
+      if (snapshot) options = { ...options, snapshot };
+    }
 
     const pid: Pid = { node: this.node, session: this.sessionId, id: `p${++this.counter}` };
     const record: ProcRecord = {
@@ -671,6 +698,11 @@ export class LocalProcessHost {
     return record ? this.toInfo(record) : undefined;
   }
 
+  /** The harness source a process is running (its spawn-time snapshot). */
+  codeOf(pid: Pid): string | undefined {
+    return this.records.get(pidKey(pid))?.options.snapshot?.text;
+  }
+
   processes(): ProcessInfo[] {
     const order: Record<ProcessState, number> = {
       running: 0,
@@ -733,6 +765,7 @@ export class LocalProcessHost {
       currentActivity: record.currentActivity,
       parent: record.options.parent,
       codeVersion: record.options.codeVersion,
+      harnessVersion: record.options.snapshot?.version,
       result: record.result,
       error: record.error,
       exitReason: record.exitReason,

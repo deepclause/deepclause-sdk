@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A worker no longer runs stale harness code.** A worker host loaded the
+  harness once at worker start, so every process spawned later in a long REPL
+  run ran the code from the worker's first spawn: committing an edit changed
+  nothing for new subagents until the whole session restarted. The current
+  snapshot is now pushed with each spawn, so a new process always runs the
+  committed module while an already-running process keeps the code it started
+  with.
+- **A DML tool can use process primitives.** `process_tool_engine_result/4` had
+  no `request_proc` clause, so a tool calling `self/1` (or `send`/`receive`/
+  `serve`/`service_call`/`spawn`) failed with "Unknown tool engine result:
+  request_proc(self)" and the nested model retried in a loop.
+
+### Added
+
+- **Harness snapshot inspection.** Every process carries the version of the
+  module it runs; `/ps` shows it (`code <version>`, marked `(old)` when it
+  predates the latest commit), `/ps --code` prints the current version, and
+  `/ps --code <name>` prints the full harness source a process is running. The
+  `ps` agent tool takes the same `code` argument.
+
+### Changed
+
+- **`worker` is the default execution mode** (`--execution inline` to opt back
+  into the in-process host). Subagents now run in a worker thread with its own
+  WASM: true parallelism, `worker.terminate()` cancellation, and no CPU-bound
+  Prolog on the REPL thread.
+
 ## 0.2.0 - 2026-10-15
 
 ### Added

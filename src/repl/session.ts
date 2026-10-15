@@ -60,6 +60,7 @@ import {
 import {
   HistoryStore,
   harnessHash,
+  moduleVersion,
   type HistoryChangedPredicate,
   type HistoryOptions,
   type HistoryTurnRecord,
@@ -325,6 +326,12 @@ export class DMLSession {
   /** Session-scoped subagents (spec §2). */
   private processBackend?: ProcessBackend;
   private processBackendPromise?: Promise<ProcessBackend>;
+  /**
+   * The harness snapshot new processes should run. On the main session this is
+   * unset (children snapshot the live module); a worker host sets it to the
+   * snapshot the main sent, so its children never run a stale module.
+   */
+  private processSnapshot?: { text: string; version: string };
   private processEventSink?: (event: ProcessEvent) => void;
   /** Bounded log of subagent output for the `/ps --watch --logs` view. */
   private readonly processLogEntries: ProcessLogEntry[] = [];
@@ -544,6 +551,7 @@ export class DMLSession {
         goal: info?.goal,
         priority: info?.priority,
         codeVersion: info?.codeVersion,
+        harnessVersion: info?.harnessVersion,
       });
     } else if (event.type === 'exited') {
       void this.history.appendServiceRecord({
@@ -619,6 +627,20 @@ export class DMLSession {
 
   processInfo(pid: Pid): ProcessInfo | undefined {
     return this.processBackend?.info(pid);
+  }
+
+  /**
+   * The harness source a process is running, for inspection. Accepts a pid or a
+   * registered name. Undefined when the process is unknown.
+   */
+  processCode(target: Pid | string): string | undefined {
+    const pid = typeof target === 'string' ? this.processBackend?.whereis(target) : target;
+    return pid ? this.processBackend?.codeOf(pid) : undefined;
+  }
+
+  /** The version of the harness the session itself is currently editing. */
+  currentHarnessVersion(): string {
+    return this.processSnapshotFor().version;
   }
 
   /** Stop one process by pid or registered name. */
@@ -705,10 +727,36 @@ export class DMLSession {
 
   /** The living module as loadable DML source, for a process snapshot. */
   async harnessText(): Promise<string> {
+    return this.harnessTextSync();
+  }
+
+  /** Synchronous form of `harnessText`, for spawn-time stamping. */
+  harnessTextSync(): string {
     const result = this.prologQuery(
       `deepclause_mi:export_harness('${this.sessionId}', '', Text)`,
     );
     return String(plainValue(result?.Text) ?? '');
+  }
+
+  /**
+   * The harness snapshot and its version for a process about to be spawned.
+   *
+   * A worker host holds the snapshot the main sent; the main computes it from
+   * the live module. Either way, every process carries the exact module it runs
+   * and a version that lets two processes be compared at a glance.
+   */
+  processSnapshotFor(): { text: string; version: string } {
+    if (this.processSnapshot) return this.processSnapshot;
+    const text = this.harnessTextSync();
+    return { text, version: moduleVersion(text) };
+  }
+
+  /**
+   * Adopt a process snapshot pushed by the main session (worker hosts only).
+   * Keeps a worker's children on the code the user actually committed.
+   */
+  setProcessSnapshot(text: string, version?: string): void {
+    this.processSnapshot = { text, version: version ?? moduleVersion(text) };
   }
 
   /**
@@ -720,7 +768,7 @@ export class DMLSession {
    * before it can report and leave a waiting parent hanging.
    */
   async createProcessSession(): Promise<{ session: DMLSession; loadError?: string }> {
-    const text = await this.harnessText();
+    const text = this.processSnapshotFor().text;
     const child = await DMLSession.open({
       ...this.openOptions,
       execution: 'inline',

@@ -23,6 +23,8 @@ export interface ServicesPanelOptions {
   getLog: () => ProcessLogEntry[];
   isVisible: () => boolean;
   mode: () => ServicesPanelMode;
+  /** Current harness version, to mark a process running older code. */
+  currentHarnessVersion?: () => string;
   /** Rows of log shown in logs mode (default 16). */
   maxLogLines?: number;
 }
@@ -72,7 +74,12 @@ export class ServicesPanel implements Component {
       const activity = process.currentActivity ? ` · ${process.currentActivity}` : '';
       const error = process.error ? ` (${process.error})` : '';
       const mail = process.mailboxDepth > 0 ? ` · ${process.mailboxDepth} queued` : '';
-      const text = `  ${process.name}  ${stateLabel(process.state)}${error}${activity}${mail}${usage}`;
+      const current = this.options.currentHarnessVersion?.();
+      const stale = current && process.harnessVersion && process.harnessVersion !== current;
+      const code = process.harnessVersion
+        ? ` · code ${process.harnessVersion.slice(0, 7)}${stale ? '*' : ''}`
+        : '';
+      const text = `  ${process.name}  ${stateLabel(process.state)}${error}${activity}${mail}${code}${usage}`;
       const painted = ACTIVE.includes(process.state) ? text : dim(text);
       return truncateToWidth(painted, columns, '…');
     });

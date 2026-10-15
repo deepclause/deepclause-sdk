@@ -19,7 +19,7 @@ import { resolveReplJudgeSelection } from '../repl/judge.js';
 import { ReplRenderer, type RenderMode, type ReplEventRenderer } from '../repl/render.js';
 import { TranscriptDocument } from '../repl/tui/document.js';
 import { ServicesPanel } from '../repl/tui/services-panel.js';
-import { formatProcessTable } from '../repl/harness-tools.js';import { ChoicePicker } from '../repl/tui/picker.js';
+import { formatProcessCode, formatProcessTable } from '../repl/harness-tools.js';import { ChoicePicker } from '../repl/tui/picker.js';
 import { openPiRuntime, type PiAuthInteractionLike } from '../repl/backend.js';
 import { listLoginProviders, loginToProvider, type LoginProviderOption } from '../repl/auth.js';
 import { HarnessView } from '../repl/tui/harness-view.js';
@@ -140,7 +140,7 @@ export type ReplInput =
   | { kind: 'goal'; goal: string }
   | { kind: 'prompt'; prompt: string }
   | { kind: 'spawn'; goal: string; name?: string }
-  | { kind: 'ps'; watch?: boolean; logs?: boolean }
+  | { kind: 'ps'; watch?: boolean; logs?: boolean; code?: string }
   | { kind: 'login' }
   | { kind: 'send'; target: string; message: string }
   | { kind: 'call'; target: string; message: string }
@@ -274,7 +274,11 @@ export function classifyReplInput(line: string): ReplInput {
       case 'processes': {
         const watch = /(?:^|\s)--watch(?:\s|$)/.test(arg);
         const logs = /(?:^|\s)--logs(?:\s|$)/.test(arg);
-        return { kind: 'ps', watch, logs };
+        // `--code` alone shows the current harness version; `--code <target>`
+        // prints the harness snapshot that process is running.
+        const codeMatch = /(?:^|\s)--code(?:=(\S+)|\s+(\S+))?/.exec(arg);
+        const code = codeMatch ? (codeMatch[1] ?? codeMatch[2] ?? '') : undefined;
+        return { kind: 'ps', watch, logs, code };
       }
       case 'send':
       case 'cast': {
@@ -833,7 +837,7 @@ async function printBanner(runtime: ReplRuntime, loaded: string[]): Promise<void
     `  ${accent('/goal')} ${dim('<dml>')}            run a DML goal, e.g. ${dim('/goal member(X, [1,2,3])')}`,
     `  ${accent('<plain English>')}        author the harness`,
     `  ${accent('/spawn')} ${dim('<goal>')}           start a session-scoped subagent`,
-    `  ${accent('/ps')} ${dim('[--watch|--logs]')}  list subagents / follow their output`,
+    `  ${accent('/ps')} ${dim('[--watch|--logs|--code <pid>]')}  list subagents / inspect a snapshot`,
     `  ${accent('/send')} ${accent('/call')} ${accent('/stop')}       message, call, or stop a subagent`,
     '',
     `  ${accent('/help')}  ${accent('/listing')}  ${accent('/viz')}  ${accent('/export')}  ${accent('/freeze')}  ${accent('/model')}  ${accent('/halt')}`,
@@ -882,7 +886,14 @@ export async function dispatchReplInput(
       return true;
     }
     case 'ps': {
-      for (const line of formatProcessTable(repl.session.processes()).split('\n')) print(line);
+      if (input.code !== undefined) {
+        for (const line of formatProcessCode(repl.session, input.code).split('\n')) print(line);
+        return true;
+      }
+      for (const line of formatProcessTable(
+        repl.session.processes(),
+        repl.session.currentHarnessVersion(),
+      ).split('\n')) print(line);
       return true;
     }
     case 'send': {
@@ -1081,7 +1092,7 @@ function helpText(): string {
     '',
     '  Commands',
     '    /spawn <goal>        start a session-scoped subagent (alias /serve)',
-    '    /ps [--watch|--logs]  list subagents; --watch pins a panel, --logs follows their output',
+    '    /ps [--watch|--logs|--code <pid>]  list subagents; --watch pins a panel, --logs follows output, --code shows a process harness snapshot',
     '    /send <name> <msg>   send a DML term to a subagent (alias /cast)',
     '    /call <name> <msg>   request/reply with a service subagent',
     '    /stop <name>         stop a subagent',
@@ -1451,8 +1462,15 @@ export async function runTui(
             servicesVisible = true;
           } else if (immediate.watch) {
             servicesVisible = !servicesVisible;
+          } else if (immediate.code !== undefined) {
+            for (const line of formatProcessCode(runtime.repl.session, immediate.code).split('\n')) {
+              renderer.writeLine(line);
+            }
           } else {
-            for (const line of formatProcessTable(runtime.repl.session.processes()).split('\n')) {
+            for (const line of formatProcessTable(
+              runtime.repl.session.processes(),
+              runtime.repl.session.currentHarnessVersion(),
+            ).split('\n')) {
               renderer.writeLine(line);
             }
           }
@@ -1834,6 +1852,7 @@ export async function runTui(
     getLog: () => runtime.repl.session.processLog(200),
     isVisible: () => servicesVisible,
     mode: () => (servicesLogs ? 'logs' : 'summary'),
+    currentHarnessVersion: () => runtime.repl.session.currentHarnessVersion(),
   });
   const refreshHarness = (): void => {
     if (!harnessVisible) return;

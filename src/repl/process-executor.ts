@@ -113,6 +113,7 @@ export class DmlProcessExecutor implements ProcessBackend {
     this.host = new LocalProcessHost({
       sessionId: parent.getSessionId(),
       resolveBody: (goal) => this.resolveBody(goal),
+      resolveSnapshot: () => parent.processSnapshotFor(),
       onEvent: options.onEvent,
       onHostMessage: (message) => {
         if (typeof message === 'string') this.handleHostMessage(message);
@@ -125,6 +126,11 @@ export class DmlProcessExecutor implements ProcessBackend {
   /** The body for a spawned goal: run it in a private child session. */
   resolveBody(goal: string): ProcessBody {
     return (ctx) => this.run(goal, ctx);
+  }
+
+  /** The harness source a process is running (its spawn-time snapshot). */
+  codeOf(pid: Pid): string | undefined {
+    return this.host.codeOf(pid);
   }
 
   /**

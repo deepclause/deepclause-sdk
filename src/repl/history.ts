@@ -132,6 +132,15 @@ export function harnessHash(
     .digest('hex');
 }
 
+/**
+ * Short, stable content hash of a harness module alone. This is the identity of
+ * a process snapshot: two processes with the same `moduleVersion` run the same
+ * code, and it changes whenever the module does.
+ */
+export function moduleVersion(module: string): string {
+  return createHash('sha256').update(module).digest('hex').slice(0, 12);
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }

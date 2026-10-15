@@ -20,6 +20,8 @@ export interface ProcessBackend {
   stop(target: Pid | string, reason?: unknown): Promise<void>;
   whereis(name: string): Pid | undefined;
   info(pid: Pid): ProcessInfo | undefined;
+  /** The harness source a process is running, for inspection. */
+  codeOf(pid: Pid): string | undefined;
   /** Synchronous snapshot (L2 serves it from a cache). */
   processes(): ProcessInfo[];
   register(name: string, pid: Pid): void;

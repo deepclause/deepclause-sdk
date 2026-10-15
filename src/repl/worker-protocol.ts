@@ -21,6 +21,7 @@ export interface WorkerInitData {
   workspacePath?: string;
   sessionId: string;
   harnessText: string;
+  harnessVersion?: string;
   model: string;
   provider: string;
   temperature?: number;
@@ -30,12 +31,12 @@ export interface WorkerInitData {
 }
 
 export type MainToWorker =
-  | { type: 'spawn'; requestId: number; goal: string; options: SpawnOptions }
+  | { type: 'spawn'; requestId: number; goal: string; options: SpawnOptions; harnessText?: string; harnessVersion?: string }
   | { type: 'send'; to: Pid | string; message: unknown }
   | { type: 'stop'; target: Pid | string; reason: unknown }
   | { type: 'register'; name: string; pid: Pid }
   | { type: 'processes'; requestId: number }
-  | { type: 'foreground'; requestId: number; request: ProcessRequestPayload }
+  | { type: 'foreground'; requestId: number; request: ProcessRequestPayload; harnessText?: string; harnessVersion?: string }
   | { type: 'call'; requestId: number; to: Pid | string; message: string; timeoutMs: number }
   | { type: 'resolve'; requestId: number; ok: true; result: unknown }
   | { type: 'resolve'; requestId: number; ok: false; error: string }

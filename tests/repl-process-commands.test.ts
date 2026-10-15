@@ -112,6 +112,9 @@ describe('subagent harness tools', () => {
       },
       processes: () => processes,
       whereisProcess: () => undefined,
+      processInfo: (pid: Pid) => processes.find((p) => p.pid.id === pid.id),
+      processCode: () => undefined,
+      currentHarnessVersion: () => 'testversion',
       sendProcess: (_to: Pid | string, message: string) => {
         sent.push(message);
       },

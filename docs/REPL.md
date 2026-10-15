@@ -65,6 +65,7 @@ Commands (slash form; the whole-line dotted form still works):
 | `/harness [width]` | toggle the live harness side view |
 | `/spawn <goal>` (`/serve`) | start a session-scoped subagent |
 | `/ps [--watch\|--logs]` | list subagents; `--watch` pins the panel, `--logs` follows their output |
+| `/ps --code [name]` | show the harness version, or the full snapshot a subagent runs |
 | `/send <name> <term>` (`/cast`) | send a DML term to a subagent |
 | `/call <name> <term>` | request/reply with a service subagent |
 | `/stop <name>` | stop a subagent |

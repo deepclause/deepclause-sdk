@@ -148,6 +148,28 @@ policy: a worker asks the main thread for a model call, a tool run, or user
 input. That is what makes the switch a mode, not a rewrite, and it is enforced
 by the value semantics above.
 
+### Harness snapshots and staleness
+
+A process runs a **snapshot of the harness as of its spawn**, not the live
+module: a subagent spawned before an edit keeps running the old code, while one
+spawned after runs the new code. That is deliberate — a subagent's behaviour
+should not change under it mid-conversation — but it means a long-lived service
+and a freshly spawned one can be on different code, and it is why a worker must
+be handed the current snapshot rather than starting from the module it was
+created with.
+
+Every snapshot carries a short **version** (a hash of the module). Inspect which
+code a process is running:
+
+| Command | What |
+|---|---|
+| `/ps` | each process shows `code <version>`, marked `(old)` when it predates the latest commit |
+| `/ps --code` | the session's current harness version |
+| `/ps --code <name>` | the full harness source that process is running |
+
+The `ps` agent tool takes the same `code` argument, so an authoring turn can
+diagnose a stale worker without leaving the conversation.
+
 A per-session **provider semaphore** (default 4, `providerConcurrency`) bounds
 model calls across the main run and every subagent, so a fan-out cannot trip
 rate limits.
@@ -167,6 +189,7 @@ rate limits.
 | `/ps` | print the process table |
 | `/ps --watch` | pin the summary panel above the editor |
 | `/ps --watch --logs` | pin a larger follow of every subagent's streamed output, reasoning, and tool calls |
+| `/ps --code [name]` | show the harness version, or the full snapshot a subagent runs |
 | `/send <name> <term>` (`/cast`) | message a process |
 | `/call <name> <term>` | request/reply with a service |
 | `/stop <name>` | stop a process |

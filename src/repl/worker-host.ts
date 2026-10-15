@@ -73,6 +73,9 @@ export class RemoteProcessHost implements ProcessBackend {
   private cache: ProcessInfo[] = [];
   private nameIndex = new Map<string, Pid>();
   private refreshTimer?: ReturnType<typeof setInterval>;
+  /** Every harness snapshot sent to the worker, keyed by version (for inspection). */
+  private readonly snapshotTexts = new Map<string, string>();
+  private lastSnapshotVersion?: string;
 
   constructor(private readonly session: DMLSession, options: RemoteProcessHostOptions = {}) {
     this.onEvent = options.onEvent;
@@ -82,10 +85,14 @@ export class RemoteProcessHost implements ProcessBackend {
 
   async start(): Promise<void> {
     if (this.worker) return;
+    const snapshot = this.session.processSnapshotFor();
+    this.snapshotTexts.set(snapshot.version, snapshot.text);
+    this.lastSnapshotVersion = snapshot.version;
     const init: WorkerInitData = {
       workspacePath: this.session.workspacePathValue(),
       sessionId: `${this.session.getSessionId()}__w`,
-      harnessText: await this.session.harnessText(),
+      harnessText: snapshot.text,
+      harnessVersion: snapshot.version,
       model: this.session.modelId(),
       provider: this.session.providerId(),
       temperature: this.session.temperatureValue(),
@@ -116,10 +123,32 @@ export class RemoteProcessHost implements ProcessBackend {
   private onReady?: () => void;
   private onFatal?: (error: Error) => void;
 
+  /**
+   * The harness update to attach to an outbound spawn/foreground request. The
+   * worker's children must run the code the user committed, not the module the
+   * worker happened to start with — otherwise a long-lived worker serves every
+   * later spawn from a stale snapshot.
+   */
+  private snapshotUpdate(): { harnessText?: string; harnessVersion: string } {
+    const snapshot = this.session.processSnapshotFor();
+    this.snapshotTexts.set(snapshot.version, snapshot.text);
+    if (snapshot.version === this.lastSnapshotVersion) {
+      return { harnessVersion: snapshot.version };
+    }
+    this.lastSnapshotVersion = snapshot.version;
+    return { harnessText: snapshot.text, harnessVersion: snapshot.version };
+  }
+
   // ---- ProcessBackend -----------------------------------------------------
 
   async spawn(goal: string, options: SpawnOptions = {}): Promise<Pid> {
-    const result = (await this.request({ type: 'spawn', requestId: 0, goal, options })) as {
+    const result = (await this.request({
+      type: 'spawn',
+      requestId: 0,
+      goal,
+      options,
+      ...this.snapshotUpdate(),
+    })) as {
       pid?: Pid;
       error?: string;
     };
@@ -168,13 +197,27 @@ export class RemoteProcessHost implements ProcessBackend {
   }
 
   async foregroundHandle(request: ProcessRequestPayload, _signal?: AbortSignal): Promise<ProcessRequestResult> {
-    const result = (await this.request({ type: 'foreground', requestId: 0, request })) as {
+    const result = (await this.request({
+      type: 'foreground',
+      requestId: 0,
+      request,
+      ...this.snapshotUpdate(),
+    })) as {
       ok: boolean;
       result?: ProcessRequestResult;
       error?: string;
     };
     if (!result.ok || !result.result) throw new Error(result.error ?? 'foreground request failed');
     return result.result;
+  }
+
+  /**
+   * The harness source a process is running. The main keeps every snapshot it
+   * sent (keyed by version), so this stays synchronous and needs no worker hop.
+   */
+  codeOf(pid: Pid | string): string | undefined {
+    const version = this.info(pid as Pid)?.harnessVersion;
+    return version ? this.snapshotTexts.get(version) : undefined;
   }
 
   async shutdown(): Promise<void> {

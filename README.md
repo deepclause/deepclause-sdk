@@ -383,7 +383,7 @@ See [`docs/REPL.md`](docs/REPL.md) and
 ### Commands
 
 `/goal <dml>`, `/listing [filter]`, `/viz [entry] [--spec]`, `/show <path>`,
-`/gen <prompt>`, `/spawn <goal>` (`/serve`), `/ps [--watch|--logs]`,
+`/gen <prompt>`, `/spawn <goal>` (`/serve`), `/ps [--watch|--logs|--code]`,
 `/send <name> <term>` (`/cast`), `/call <name> <term>`, `/stop <name>`,
 `/model [id]`, `/reasoning [level]`, `/show-reasoning [mode]`,
 `/harness [width]`, `/login`, `/help`, `/reset`, `/rollback`, `/compact [notes]`,
