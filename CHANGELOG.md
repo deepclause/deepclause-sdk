@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.2.0 - 2026-10-15
+
+### Added
+
+- **Subagents: session-scoped DML processes.** A process has its own module
+  snapshot, private memory, a mailbox, and a lifecycle; `spawn/2` starts one and
+  returns immediately, and it keeps running after the turn that started it.
+  Built-ins: `spawn`/`spawn_opt`, `send`/`receive`/`receive_match`, `exit`,
+  `register`/`whereis`, `process_info`, `wait`, `sleep`/`now_ms`/`make_ref`.
+  Services via `serve/2` + `service_call/3,4` + `service_cast/2`; bounded
+  fan-out via `swarm/3,4` and `pmap/3`. `spawn` and `send` copy terms (value
+  semantics), so a child can never bind a parent's variable and a result comes
+  back by message or as the child's `answer/1`.
+- **Two execution modes.** `--execution inline` (default; cooperative, one WASM
+  instance) or `--execution worker` (a `worker_threads` thread with its own
+  WASM: real parallelism and hard cancellation). Model calls, host tools and
+  user input are proxied to the main thread, so a worker never holds credentials
+  or policy; the DML is identical in both.
+- **A REPL process surface.** The authoring agent gets `spawn`, `ps`, `send`,
+  `call`, `stop`, `swarm`, and `wait` tools; users get `/spawn` (`/serve`),
+  `/ps` (`--watch` / `--logs`), `/send` (`/cast`), `/call`, and `/stop`. A status
+  segment and a services panel show the process tree, and `--logs` follows every
+  subagent's streamed output, reasoning, and tool calls.
+- **`/login` in the REPL**, and the `deepclause login` / `set-backend` pickers
+  now scroll with the arrow keys and filter as you type.
+- **Resume replays the transcript.** `--session <id|last>` restores the harness
+  and re-renders the prior events, instead of starting blank.
+- **A per-session model-call semaphore** (`providerConcurrency`, default 4)
+  bounds concurrent provider calls across the main run and every subagent.
+- **Docs and examples**: `docs/SUBAGENTS.md` (model and BEAM/OTP inspiration), a
+  *Processes and concurrency* section in the bundled DML reference and the
+  authoring prompt, plus `sdk-examples/subagents.{dml,ts}` and
+  `sdk-examples/debate.{dml,ts}` (two LLM-backed agents debating).
+
+### Changed
+
+- The worker coalesces streamed `stream`/`reasoning` chunks before crossing the
+  worker boundary, so a long response is a handful of IPC messages, not hundreds.
+
+### Fixed
+
+- Slash commands are no longer injected as steering while a turn runs. UI toggles
+  (`/ps`, `/harness`) and read-only snapshots act immediately; commands that do
+  work (`/send`, `/call`, `/spawn`, `/stop`) run when the turn finishes.
+- The dock spinner is cleared when a turn ends, errors, or is interrupted, so an
+  aborted run no longer leaves it animating.
+- Streamed reasoning keeps its frame indentation across an embedded newline, and
+  a multi-line tool argument no longer leaks a stray line outside the tree.
+- The REPL banner and the editor autocomplete advertise the process commands.
+
 ## 0.1.3 - 2026-10-14
 
 ### Changed
