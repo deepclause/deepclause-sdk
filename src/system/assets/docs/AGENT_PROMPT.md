@@ -1785,9 +1785,8 @@ For a structured result, prefer the message form: have the child
 `exit(Reason)` terminates the current process; `exit(Pid, kill)` kills another.
 There is no `stop/1` predicate; the interactive case is the `stop` tool / `/stop`
 command. `process_info(Pid, Info)` returns a dict (`pid`, `name`, `state`,
-`priority`, `mailbox`, `usage`, …) and `processes(Pids)` lists live pids.
-`self_usage(U)` is this process's accumulated model usage; `sleep(Ms)` yields;
-`now_ms(T)` and `make_ref(Ref)` are available.
+`priority`, `mailbox`, `usage`, …). `sleep(Ms)` yields; `now_ms(T)` and
+`make_ref(Ref)` are available.
 
 ### Rules
 

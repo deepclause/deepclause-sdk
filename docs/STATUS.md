@@ -60,9 +60,21 @@ CLI commands: `init`, `login`, `logout`, `set-backend`, `set-model`, `show-model
   The authoring agent sees the session's credentialed models and their prices
   (an `AVAILABLE MODELS` prompt section plus the `models` tool). Judgments keep
   their own backend. See [`DML_MODEL_SWITCHING.md`](./DML_MODEL_SWITCHING.md).
+- **Subagents / processes**: session-scoped DML processes, each with its own
+  module snapshot, memory, and mailbox. Built-ins: `spawn`/`spawn_opt`, `send`/
+  `receive`/`receive_match`, `serve`/`service_call`/`service_cast`, `swarm`/`pmap`,
+  `wait`, `exit`, `register`/`whereis`, `process_info`. The REPL runs them with
+  the `spawn`/`ps`/`send`/`call`/`stop`/`swarm`/`wait` tools and the `/spawn`,
+  `/ps --watch --logs`, `/send`, `/call`, `/stop` commands. Execution is `inline`
+  (L1, cooperative, in-process) or `worker` (L2: a `worker_threads` thread with
+  its own WASM, true parallelism and hard cancellation), selected by
+  `--execution`; value semantics (copy on `spawn`/`send`) let the same DML run in
+  both. See [`SUBAGENTS.md`](./SUBAGENTS.md).
 - **Commands**: `/goal <dml>`, `/help`, `/listing [filter]`, `/viz [entry] [--spec]`,
-  `/show <path>`, `/gen <prompt>`, `/reset`,
-  `/rollback`, `/compact [notes]`, `/export [file]`, `/model [id]`,
+  `/show <path>`, `/gen <prompt>`, `/spawn <goal>`, `/ps [--watch|--logs]`,
+  `/send <name> <term>`, `/call <name> <term>`, `/stop <name>`, `/login`,
+  `/reset`, `/rollback`, `/compact [notes]`, `/export [file]`, `/model [id]`,
+  `/reasoning [level]`, `/show-reasoning [mode]`, `/harness [width]`,
   `/freeze`/`/unfreeze`, `/params`, `/trace`/`/notrace`, `/halt` (aliases
   `/exit`, `/quit`; the legacy `goal:`/`listing.` forms still work).
 - **UI**: on a TTY the default is a pi-style TUI (`repl.tui`): a scrolling
@@ -127,11 +139,16 @@ workspace `AGENTS.md`); the shorter guides (`DML_AUTHORING.md`,
 
 ## Tests
 
-`npm test`: **517 passed / 25 skipped / 0 failed**. The skipped 25 are the
-`llm-integration` suite, gated behind real provider API keys.
+`npm test`: **832 passed / 26 skipped / 0 failed**. The skipped 26 are the
+`llm-integration` suite, gated behind real provider API keys, and one opt-in
+real-worker test.
 
 ## Not implemented / known gaps
 
+- **Subagent links, monitors, and a supervisor library** — designed in
+  [`DML_REPL_PROCESSES_SPEC.md`](./DML_REPL_PROCESSES_SPEC.md) but not built;
+  `link/1`, `monitor/2`, `demonitor/1`, `processes/1` and `self_usage/1` are not
+  implemented.
 - **`.deepclause/lib/` libraries** — designed but not built; see
   [`DML_LIBS_PROPOSAL.md`](./DML_LIBS_PROPOSAL.md).
 - **Video** — image input, inline display, and image generation all work, but
@@ -150,6 +167,12 @@ workspace `AGENTS.md`); the shorter guides (`DML_AUTHORING.md`,
   `PROLOG_SNIPPETS.md` (bundled; also seeded to `.deepclause/docs/`).
 - REPL: `REPL.md`, `DML_REPL_PROPOSAL.md`, `DML_REPL_IMPLEMENTATION_PLAN.md`,
   `DML_REPL_SESSION_HISTORY.md`, `DML_REPL_SCRIPT_BUNDLES.md`.
+- Subagents / concurrency: `SUBAGENTS.md` (overview), `DML_REPL_SUBAGENTS.md`
+  (the three shapes), `DML_REPL_PROCESSES_SPEC.md` (spec),
+  `DML_REPL_PROCESSES_IMPLEMENTATION_PLAN.md` (phases),
+  `DML_REPL_SERVICES_UX.md` (UX), `DML_PARALLEL_BACKGROUND.md`,
+  `DML_BEAM_SWARM_EXAMPLE.md`, `DML_SPECIALIZED_PROCESSES_EXAMPLE.md`.
 - Other: `JUDGMENT_BACKENDS.md`, `JUDGE_EXAMPLES.md`, `DML_MEDIA.md`,
-  `DML_MODEL_SWITCHING.md`, `DML_REPL_WORKER_EXECUTION.md` (plan),
-  `DML_LIBS_PROPOSAL.md`, `REFACTOR_CLEANUP.md`, this file.
+  `DML_MODEL_SWITCHING.md`, `DML_REPL_WORKER_EXECUTION.md` (worker plan; L2 now
+  implemented in `worker-host.ts`), `DML_LIBS_PROPOSAL.md`, `REFACTOR_CLEANUP.md`,
+  this file.

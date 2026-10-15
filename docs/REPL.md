@@ -60,6 +60,15 @@ Commands (slash form; the whole-line dotted form still works):
 | `/freeze` / `/unfreeze` | read-only lock |
 | `/trace` / `/notrace` | toggle verbose logging |
 | `/params` | show session parameters |
+| `/reasoning [level]` | set the model reasoning level (`off|minimal|low|medium|high|xhigh|max`) |
+| `/show-reasoning [mode]` | how much reasoning to display (`off|summary|full`) |
+| `/harness [width]` | toggle the live harness side view |
+| `/spawn <goal>` (`/serve`) | start a session-scoped subagent |
+| `/ps [--watch\|--logs]` | list subagents; `--watch` pins the panel, `--logs` follows their output |
+| `/send <name> <term>` (`/cast`) | send a DML term to a subagent |
+| `/call <name> <term>` | request/reply with a service subagent |
+| `/stop <name>` | stop a subagent |
+| `/login` | sign in to a provider from inside the REPL |
 
 An unknown `/command` prints `unknown command: /… — try /help.` instead of being
 treated as a prompt.

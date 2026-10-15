@@ -38,6 +38,7 @@
     "examples": "tsx sdk-examples/basic-usage.ts",
     "examples:smoke": "tsx sdk-examples/no-api-key.ts && npm run example && npm run examples && tsx sdk-examples/neurosymbolic.ts 1 && tsx sdk-examples/deep-research.ts \"test topic\"",
     "cli": "tsx src/cli/index.ts",
+    "repl": "tsx src/cli/index.ts repl",
     "sync:agent-prompt": "node scripts/sync-agent-prompt.mjs",
     "check:agent-prompt": "node scripts/sync-agent-prompt.mjs --check"
   },

@@ -383,10 +383,47 @@ See [`docs/REPL.md`](docs/REPL.md) and
 ### Commands
 
 `/goal <dml>`, `/listing [filter]`, `/viz [entry] [--spec]`, `/show <path>`,
-`/gen <prompt>`, `/help`, `/reset`, `/rollback`, `/compact [notes]`,
-`/export [file]`, `/model [id]`, `/freeze`/`/unfreeze`, `/params`,
-`/trace`/`/notrace`, `/halt` (aliases `/exit`, `/quit`). The legacy
-`goal:`/`listing.` dotted forms still work.
+`/gen <prompt>`, `/spawn <goal>` (`/serve`), `/ps [--watch|--logs]`,
+`/send <name> <term>` (`/cast`), `/call <name> <term>`, `/stop <name>`,
+`/model [id]`, `/reasoning [level]`, `/show-reasoning [mode]`,
+`/harness [width]`, `/login`, `/help`, `/reset`, `/rollback`, `/compact [notes]`,
+`/export [file]`, `/freeze`/`/unfreeze`, `/params`, `/trace`/`/notrace`,
+`/halt` (aliases `/exit`, `/quit`). The legacy `goal:`/`listing.` dotted forms
+still work.
+
+## Subagents and concurrency
+
+The REPL can run **subagents**: session-scoped DML processes that keep running
+after the turn that started them, talk to each other by messages, and run in
+parallel. Start one with `/spawn`, watch them with `/ps --watch --logs`, and
+message them with `/send` / `/call`:
+
+```text
+dml> /spawn debate("Nuclear power should expand", 2)
+spawned proc(main, sess_abc, p1)
+dml> /ps --watch --logs
+──────────────────────────────────────────────
+⚙ services — 2 processes · 2 active · debater running · debater running
+──────────────────────────────────────────────
+  debater       PRO opening: the evidence supports setting a price…
+  debater       CON (round 2): a price is regressive without a rebate…
+  debater   ✓   set_result
+  debater   ›   finished
+```
+
+The authoring agent uses the same machinery through its `spawn` / `ps` / `send`
+/ `call` / `stop` / `swarm` / `wait` tools, and DML programs use the built-ins
+directly (`spawn`, `send`/`receive`, `serve`/`service_call`, `swarm`/`pmap`). A
+subagent runs against a **private snapshot** of the module with **value
+semantics** — a result comes back by message, never by a shared variable — which
+is what makes it safe to run many at once.
+
+Execution has two modes: `--execution inline` (default; cooperative,
+in-process) and `--execution worker` (a worker thread with its own WASM: true
+parallelism and hard cancellation). The same DML runs unchanged.
+
+See [`docs/SUBAGENTS.md`](docs/SUBAGENTS.md) for the model, the surface, the
+Erlang/BEAM inspiration, and the L1/L2 seam.
 
 ## Install
 
@@ -595,7 +632,8 @@ const { valid, errors, warnings } = await validateWithProlog(dmlSource);
 
 ```text
 src/
-├── repl/         # living-module REPL (session, agent, render, history, media, models)
+├── repl/         # living-module REPL (session, agent, render, history, media,
+│                 #   processes, process-executor, worker-host, models)
 ├── cli/          # init, run, repl, login, set-backend, visualize
 ├── visualize/    # diagrams: Mermaid → Unicode tree / SVG / PNG + terminal graphics
 ├── system/       # shell/AgentVM, config, model database + catalog, bundled docs
@@ -624,7 +662,8 @@ npm test          # vitest
 npm run repl      # deepclause repl via tsx
 ```
 
-See [`docs/`](docs/): [`STATUS.md`](docs/STATUS.md) (current state),
+See [`docs/`](docs/): [`SUBAGENTS.md`](docs/SUBAGENTS.md) (subagents and
+concurrency), [`STATUS.md`](docs/STATUS.md) (current state),
 [`REPL.md`](docs/REPL.md),
 [`DML_REPL_PROPOSAL.md`](docs/DML_REPL_PROPOSAL.md),
 [`DML_REPL_SESSION_HISTORY.md`](docs/DML_REPL_SESSION_HISTORY.md),
