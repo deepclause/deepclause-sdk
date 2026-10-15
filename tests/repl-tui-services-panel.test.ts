@@ -1,6 +1,7 @@
 /**
- * The services panel renders nothing when hidden or empty, and one row per
- * process (summary) or a chronological follow of output (logs).
+ * The services panel: hidden renders nothing; visible always renders, including
+ * the "nothing is running" state; logs mode adds a rule-separated follow of
+ * subagent output.
  */
 import { describe, expect, it } from 'vitest';
 
@@ -33,13 +34,14 @@ function panel(options: {
   log?: ProcessLogEntry[];
   visible?: boolean;
   mode?: ServicesPanelMode;
+  maxLogLines?: number;
 }): ServicesPanel {
   return new ServicesPanel({
     getProcesses: () => options.processes ?? [],
     getLog: () => options.log ?? [],
     isVisible: () => options.visible ?? true,
     mode: () => options.mode ?? 'summary',
-    maxLogLines: 4,
+    maxLogLines: options.maxLogLines ?? 4,
   });
 }
 
@@ -48,56 +50,61 @@ describe('ServicesPanel summary', () => {
     expect(panel({ processes: [info('a')], visible: false }).render(80)).toEqual([]);
   });
 
-  it('renders nothing when there are no processes', () => {
-    expect(panel({ processes: [] }).render(80)).toEqual([]);
+  it('says nothing is running when visible and empty', () => {
+    const lines = panel({ processes: [] }).render(80);
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toContain('─'); // rule separating it from the transcript
+    expect(lines[1]).toContain('nothing is running');
+    expect(lines[2]).toContain('/spawn');
   });
 
-  it('renders a header and one row per process', () => {
-    const panel = new ServicesPanel({
-      getProcesses: () => [
+  it('renders a rule, a header and one row per process', () => {
+    const lines = panel({
+      processes: [
         info('keeper', { state: 'waiting', mailboxDepth: 2 }),
         info('quick', { state: 'done', usage: { inputTokens: 1, outputTokens: 2, totalTokens: 3 } }),
       ],
-      getLog: () => [],
-      isVisible: () => true,
-      mode: () => 'summary',
-    });
-    const lines = panel.render(80);
-    expect(lines).toHaveLength(3);
-    expect(lines[0]).toContain('services (2)');
-    expect(lines[1]).toContain('keeper');
-    expect(lines[1]).toContain('2 queued');
-    expect(lines[2]).toContain('3 tok');
+    }).render(80);
+    expect(lines).toHaveLength(4);
+    expect(lines[0]).toContain('─');
+    expect(lines[1]).toContain('2 processes');
+    expect(lines[1]).toContain('keeper waiting');
+    expect(lines[2]).toContain('keeper');
+    expect(lines[2]).toContain('2 queued');
+    expect(lines[3]).toContain('3 tok');
   });
 
   it('flags attention when a process waits on input', () => {
-    const panel = new ServicesPanel({
-      getProcesses: () => [info('asker', { state: 'input' })],
-      getLog: () => [],
-      isVisible: () => true,
-      mode: () => 'summary',
-    });
-    expect(panel.render(80)[0]).toContain('needs input');
+    const lines = panel({ processes: [info('asker', { state: 'input' })] }).render(80);
+    expect(lines[1]).toContain('needs input');
   });
 });
 
 describe('ServicesPanel logs', () => {
-  it('follows the last lines, newest at the bottom, at a stable height', () => {
-    const log: ProcessLogEntry[] = Array.from({ length: 10 }, (_, index) => entry('debater', 'output', `line ${index}`));
+  it('separates the process header from the log with a rule', () => {
+    const log = [entry('debater', 'stream', 'the evidence')];
     const lines = panel({ processes: [info('debater')], log, mode: 'logs' }).render(80);
-    // header + maxLogLines rows
-    expect(lines).toHaveLength(5);
-    expect(lines[0]).toContain('logs');
-    expect(lines.join('\n')).not.toContain('line 4');
-    expect(lines.at(-1)).toContain('line 9');
-    expect(lines[1]).toContain('line 6');
+    // rule, header, rule, then maxLogLines rows
+    expect(lines).toHaveLength(3 + 4);
+    expect(lines[0]).toContain('─');
+    expect(lines[1]).toContain('debater running');
+    expect(lines[2]).toContain('─');
+    expect(lines[3]).toContain('the evidence');
   });
 
-  it('includes answers and exits, accent-styled differently from output', () => {
-    const log = [entry('debater', 'output', 'hello'), entry('debater', 'answer', '› done')];
-    const text = panel({ processes: [info('debater')], log, mode: 'logs' }).render(80).join('\n');
-    expect(text).toContain('hello');
-    expect(text).toContain('done');
+  it('follows the last lines at a stable height', () => {
+    const log: ProcessLogEntry[] = Array.from({ length: 10 }, (_, index) => entry('debater', 'output', `line ${index}`));
+    const lines = panel({ processes: [info('debater')], log, mode: 'logs' }).render(80);
+    expect(lines).toHaveLength(7); // rule + header + rule + 4
+    expect(lines.join('\n')).not.toContain('line 4');
+    expect(lines.at(-1)).toContain('line 9');
+    expect(lines[3]).toContain('line 6');
+  });
+
+  it('shows the nothing-running state in logs mode too', () => {
+    const lines = panel({ processes: [], log: [], mode: 'logs' }).render(80);
+    expect(lines[1]).toContain('nothing is running');
+    expect(lines.join('\n')).toContain('/spawn');
   });
 
   it('never emits a line containing a newline', () => {
@@ -105,5 +112,11 @@ describe('ServicesPanel logs', () => {
     const lines = panel({ processes: [info('debater')], log, mode: 'logs' }).render(80);
     expect(lines.every((line) => !line.includes('\n'))).toBe(true);
     expect(lines.join(' ')).toContain('first line');
+  });
+
+  it('marks reasoning lines distinctly', () => {
+    const log = [entry('debater', 'reasoning', 'considering the options')];
+    const lines = panel({ processes: [info('debater')], log, mode: 'logs' }).render(80);
+    expect(lines.join('\n')).toContain('~ considering the options');
   });
 });

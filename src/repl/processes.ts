@@ -143,13 +143,16 @@ export class MailboxFullError extends Error {
 
 /** Plain-data lifecycle event for the service sink (spec §8.4). */
 export interface ProcessEvent {
-  type: 'started' | 'state' | 'activity' | 'answer' | 'output' | 'exited';
+  type: 'started' | 'state' | 'activity' | 'output' | 'answer' | 'exited'
+    | 'stream' | 'reasoning' | 'tool' | 'model';
   at: number;
   pid: Pid;
   name: string;
   state?: ProcessState;
   activity?: string;
   content?: string;
+  /** For 'stream'/'reasoning': the final chunk of a run. */
+  done?: boolean;
   answer?: unknown;
   reason?: unknown;
   error?: string;
@@ -162,6 +165,8 @@ export interface ProcessLogEntry {
   name: string;
   kind: ProcessEvent['type'];
   text: string;
+  /** True once a streamed entry is complete (stops coalescing). */
+  done?: boolean;
 }
 
 // ---------------------------------------------------------------------------

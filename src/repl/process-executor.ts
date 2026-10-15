@@ -70,6 +70,18 @@ function infoTerm(info: ProcessInfo | undefined): string {
     + '}';
 }
 
+/** A one-line, log-friendly rendering of a tool-call event. */
+function formatToolEvent(event: DMLEvent): string {
+  const name = event.toolName ?? 'tool';
+  if (event.toolState === 'completed') {
+    return `✓ ${name}${event.toolSummary ? ` → ${event.toolSummary}` : ''}`;
+  }
+  if (event.toolState === 'failed') {
+    return `✗ ${name}${event.toolError ? ` → ${event.toolError}` : ''}`;
+  }
+  return `▸ ${name}`;
+}
+
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -150,8 +162,22 @@ export class DmlProcessExecutor implements ProcessBackend {
   }
 
   private forwardEvent(ctx: ProcessContext, event: DMLEvent): void {
-    if (event.type === 'output' || event.type === 'answer') {
-      if (event.content) ctx.emit({ type: 'output', content: event.content });
+    switch (event.type) {
+      case 'stream':
+        if (event.content) ctx.emit({ type: 'stream', content: event.content, done: event.done });
+        break;
+      case 'reasoning':
+        if (event.content) ctx.emit({ type: 'reasoning', content: event.content, done: event.done });
+        break;
+      case 'tool_call':
+        ctx.emit({ type: 'tool', content: formatToolEvent(event) });
+        break;
+      case 'output':
+      case 'answer':
+        if (event.content) ctx.emit({ type: 'output', content: event.content });
+        break;
+      default:
+        break;
     }
   }
 

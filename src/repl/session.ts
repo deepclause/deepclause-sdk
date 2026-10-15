@@ -28,6 +28,7 @@ import { DMLRunner, toJsValue, type Frame, type InternalRunOptions, type Process
 import { DmlProcessExecutor } from './process-executor.js';
 import type { ProcessBackend } from './process-backend.js';
 import type { Pid, ProcessEvent, ProcessInfo, ProcessLogEntry, SpawnOptions } from './processes.js';
+import { pidKey } from './processes.js';
 import type { HarnessSnapshot, HarnessPredicate } from './tui/harness-view.js';
 import {
   compactMemory,
@@ -191,9 +192,19 @@ function processLogText(event: ProcessEvent): string | undefined {
     case 'started':
       return 'started';
     case 'output':
+    case 'stream':
+    case 'reasoning':
+    case 'tool':
+    case 'model':
       return event.content ?? '';
-    case 'answer':
-      return `› ${String(event.answer ?? 'ok')}`;
+    case 'answer': {
+      // A process's terminal result is its accumulated output; the actual
+      // answer/1 value is the last non-empty line, so use that (and avoid
+      // duplicating the whole transcript in one log row).
+      const text = String(event.answer ?? 'ok');
+      const lines = text.split('\n').map((line) => line.trim()).filter(Boolean);
+      return `› ${lines.length > 0 ? lines[lines.length - 1] : text}`;
+    }
     case 'exited':
       if (event.state === 'done') return 'finished';
       return `${event.state}${event.error ? ` (${event.error})` : event.reason && event.reason !== 'normal' ? ` (${String(event.reason)})` : ''}`;
@@ -518,7 +529,22 @@ export class DMLSession {
   private recordProcessLog(event: ProcessEvent): void {
     const text = processLogText(event);
     if (text === undefined) return;
-    this.processLogEntries.push({ at: event.at, pid: event.pid, name: event.name, kind: event.type, text });
+    // Coalesce streamed chunks into one growing line per process/kind.
+    const last = this.processLogEntries[this.processLogEntries.length - 1];
+    const streamy = event.type === 'stream' || event.type === 'reasoning';
+    if (streamy && last && last.kind === event.type && pidKey(last.pid) === pidKey(event.pid) && !last.done) {
+      last.text = (last.text + text).slice(-2000);
+      last.done = event.done;
+      return;
+    }
+    this.processLogEntries.push({
+      at: event.at,
+      pid: event.pid,
+      name: event.name,
+      kind: event.type,
+      text,
+      done: event.done,
+    });
     if (this.processLogEntries.length > DMLSession.PROCESS_LOG_LIMIT) {
       this.processLogEntries.splice(0, this.processLogEntries.length - DMLSession.PROCESS_LOG_LIMIT);
     }

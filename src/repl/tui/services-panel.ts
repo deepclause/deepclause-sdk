@@ -1,12 +1,14 @@
 /**
- * Live services panel: a dock row listing the session's subagents.
+ * Live services panel: a dock row for the session's subagents.
  *
- * Renders nothing when hidden or when no process exists, so the dock layout
- * does not reserve a row for it (the same trick `WorkingLine` uses).
+ * Renders nothing when hidden. When visible it always renders, so
+ * `/ps --watch` with no subagents says so instead of leaving a blank row.
  *
  * Two modes, toggled with `/ps --watch` and `/ps --watch --logs`:
  *  - `summary` — one row per process with state, activity, queue and usage;
- *  - `logs`    — a larger, chronological follow of every subagent's output.
+ *  - `logs`    — the process list over a full-width rule, then a chronological
+ *                follow of each subagent's streamed output, reasoning, tool
+ *                calls and answers.
  */
 
 import { truncateToWidth, visibleWidth, type Component } from '@earendil-works/pi-tui';
@@ -32,66 +34,85 @@ function stateLabel(state: ProcessState): string {
   return state === 'input' ? 'input' : state;
 }
 
+function processSummaryLine(processes: ProcessInfo[]): string {
+  if (processes.length === 0) return 'nothing is running';
+  const active = processes.filter((process) => ACTIVE.includes(process.state)).length;
+  const attention = processes.some((process) => process.state === 'input');
+  const names = processes
+    .slice(0, 6)
+    .map((process) => `${process.name} ${stateLabel(process.state)}`)
+    .join(' · ');
+  const more = processes.length > 6 ? ` · +${processes.length - 6}` : '';
+  return `${processes.length} process${processes.length === 1 ? '' : 'es'}`
+    + `${active > 0 ? ` · ${active} active` : ''}`
+    + `${attention ? ' · needs input' : ''}`
+    + ` · ${names}${more}`;
+}
+
 export class ServicesPanel implements Component {
   constructor(private readonly options: ServicesPanelOptions) {}
 
   render(width: number): string[] {
     if (!this.options.isVisible()) return [];
+    const columns = Math.max(1, width);
+    const rule = dim('─'.repeat(columns));
     const processes = this.options.getProcesses();
-    if (this.options.mode() === 'logs') return this.renderLogs(width, processes);
-    if (processes.length === 0) return [];
-    return this.renderSummary(width, processes);
+    const header = dim(`⚙ services — ${processSummaryLine(processes)}`);
+
+    if (this.options.mode() === 'logs') return this.renderLogs(columns, processes, rule, header);
+    return [rule, header, ...this.renderSummary(columns, processes)];
   }
 
-  private renderSummary(width: number, processes: ProcessInfo[]): string[] {
-    const active = processes.filter((process) => ACTIVE.includes(process.state));
-    const attention = active.some((process) => process.state === 'input');
-    const header = dim(`⚙ services (${processes.length})${attention ? ' — needs input' : ''}`);
-
-    const rows = processes.map((process) => {
+  private renderSummary(columns: number, processes: ProcessInfo[]): string[] {
+    if (processes.length === 0) {
+      return [dim('  /spawn <goal> to start a subagent')];
+    }
+    return processes.map((process) => {
       const usage = process.usage.totalTokens > 0 ? ` · ${process.usage.totalTokens} tok` : '';
       const activity = process.currentActivity ? ` · ${process.currentActivity}` : '';
       const error = process.error ? ` (${process.error})` : '';
       const mail = process.mailboxDepth > 0 ? ` · ${process.mailboxDepth} queued` : '';
       const text = `  ${process.name}  ${stateLabel(process.state)}${error}${activity}${mail}${usage}`;
       const painted = ACTIVE.includes(process.state) ? text : dim(text);
-      return truncateToWidth(painted, Math.max(1, width), '…');
+      return truncateToWidth(painted, columns, '…');
     });
-
-    return [header, ...rows];
   }
 
-  private renderLogs(width: number, processes: ProcessInfo[]): string[] {
+  private renderLogs(columns: number, processes: ProcessInfo[], rule: string, header: string): string[] {
     const log = this.options.getLog();
-    if (processes.length === 0 && log.length === 0) return [];
+    if (processes.length === 0 && log.length === 0) {
+      return [rule, header, dim('  /spawn <goal> to start a subagent')];
+    }
 
     const max = this.options.maxLogLines ?? 16;
     const slice = log.slice(-max);
-    const active = processes.filter((process) => ACTIVE.includes(process.state)).length;
-    const header = dim(
-      `⚙ services — logs · ${processes.length} process${processes.length === 1 ? '' : 'es'}`
-      + `${active > 0 ? ` · ${active} active` : ''}`,
-    );
 
-    // Pad to a stable height so the panel does not jump as output arrives.
+    // Entries first (top-down), then pad to a stable height so the panel does
+    // not jump as output arrives.
     const rows: string[] = [];
-    for (let i = slice.length; i < max; i += 1) rows.push('');
     for (const entry of slice) {
-      rows.push(truncateToWidth(this.formatLogLine(entry), Math.max(1, width), '…'));
+      rows.push(truncateToWidth(this.formatLogLine(entry), columns, '…'));
     }
-    return [header, ...rows];
+    for (let i = slice.length; i < max; i += 1) rows.push('');
+
+    // Rule above (separates from the transcript), process header, rule, log.
+    return [rule, header, rule, ...rows];
   }
 
   private formatLogLine(entry: ProcessLogEntry): string {
-    const raw = entry.name.length > NAME_WIDTH
-      ? `${entry.name.slice(0, NAME_WIDTH - 1)}…`
-      : entry.name;
+    const raw = entry.name.length > NAME_WIDTH ? `${entry.name.slice(0, NAME_WIDTH - 1)}…` : entry.name;
     const padding = ' '.repeat(Math.max(0, NAME_WIDTH - visibleWidth(raw)));
     const label = dim(`${raw}${padding}`);
     // A component line must not contain a newline: a multi-line answer/result
     // would otherwise break the layout.
-    const text = entry.text.replace(/\s*\n\s*/g, ' ↵ ');
-    const styled = entry.kind === 'output' ? text : tuiStyle.accent(text);
+    const body = entry.text.replace(/\s*\n\s*/g, ' ↵ ');
+    const prefix = entry.kind === 'reasoning' ? '~ ' : '';
+    const text = `${prefix}${body}`;
+    const styled = entry.kind === 'output' || entry.kind === 'stream'
+      ? text
+      : entry.kind === 'reasoning'
+        ? dim(text)
+        : tuiStyle.accent(text);
     return `  ${label}  ${styled}`;
   }
 
