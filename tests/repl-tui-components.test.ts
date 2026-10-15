@@ -205,6 +205,20 @@ describe('TuiRenderer', () => {
     expect(working.at(-1)).toBeNull();
   });
 
+  it('clears the working indicator when a run ends or errors', () => {
+    const { working, renderer } = build();
+    // An aborted turn may never report the model call completed, so `error` and
+    // `finished` must clear the dock spinner themselves or it animates forever.
+    renderer.render({ type: 'model_call', modelCallState: 'started' });
+    expect(working.at(-1)).toBe('working…');
+    renderer.render({ type: 'error', content: 'cancelled by user' });
+    expect(working.at(-1)).toBeNull();
+
+    renderer.render({ type: 'model_call', modelCallState: 'started' });
+    renderer.render({ type: 'finished', depth: 0 });
+    expect(working.at(-1)).toBeNull();
+  });
+
   it('accumulates streamed text into one markdown block', () => {
     const { document, renderer } = build();
     renderer.render({ type: 'stream', content: '# Title\n\n' });

@@ -162,6 +162,9 @@ export class TuiRenderer {
       case 'answer':
       case 'error':
         this.endStream();
+        // An aborted run may never report the model call as completed, so clear
+        // the dock spinner here or it animates forever after an interrupt.
+        this.onWorking?.(null);
         this.separate('text');
         this.text.render(event);
         return;
@@ -169,7 +172,10 @@ export class TuiRenderer {
         // A run ended. Without closing the block, the next turn's streamed text is
         // appended to this one and renders *above* the prompt the user just typed,
         // because the block sits earlier in the transcript.
-        if ((event.depth ?? 0) === 0) this.endStream();
+        if ((event.depth ?? 0) === 0) {
+          this.endStream();
+          this.onWorking?.(null);
+        }
         return;
       default:
         // Events that render nothing must not add a separator, or switching models

@@ -1521,6 +1521,10 @@ export async function runTui(
   const interruptTurn = (): boolean => {
     if (!holder.turn) return false;
     holder.turn.abort(new Error('cancelled by user'));
+    // Close the streamed block and clear the dock spinner so an interrupted turn
+    // leaves no live line behind.
+    runtime.renderer.endTextBlock?.();
+    working.set(null);
     transcript.append('(interrupted — Ctrl-C exits)');
     tui.requestRender();
     return true;
