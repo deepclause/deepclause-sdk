@@ -428,5 +428,46 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
     },
   });
 
+  tools.set('swarm', {
+    description: 'Run a worker predicate over a list, each item in its own subagent, and return the results in input order. Prefer this to many spawn calls. Bound the list: each item is a process and usually a model call.',
+    parameters: {
+      type: 'object',
+      properties: {
+        worker: stringProp('Predicate name of arity +1: `worker(Item, Result)`, e.g. summarise_file.'),
+        items: { type: 'array', description: 'DML terms, e.g. ["\"a.txt\"", "\"b.txt\""] or [1, 2, 3].' },
+        concurrency: { type: 'integer', description: 'Max items running at once (default 4).' },
+      },
+      required: ['worker', 'items'],
+    },
+    execute: async (args, context) => {
+      const worker = String(args.worker ?? '').trim();
+      const items = Array.isArray(args.items) ? args.items.map((item) => String(item)) : [];
+      if (!worker || items.length === 0) return { error: 'swarm requires a worker and a non-empty items list' };
+      const concurrency = typeof args.concurrency === 'number' && args.concurrency > 0 ? `, ${args.concurrency}` : '';
+      const goal = `swarm(${worker}, [${items.join(', ')}], DcSwarmResults${concurrency})`;
+      const result = await controller.execute(goal, 1, context?.signal, context?.onEvent, 'full');
+      if (result.error) return { error: result.error };
+      const binding = result.bindings.find((entry) => entry.name === 'DcSwarmResults');
+      return { results: binding?.value ?? result.output.trim() };
+    },
+  });
+
+  tools.set('wait', {
+    description: 'Wait for a subagent to finish and return its outcome: `ok(Result)` / `failed(Error)` / `killed(Reason)`. Blocks until it terminates; use only when you need the result. Result is the subagent terminal text.',
+    parameters: {
+      type: 'object',
+      properties: { pid: stringProp('Process id from spawn, e.g. proc(main,s,p1), or a registered name.') },
+      required: ['pid'],
+    },
+    execute: async (args, context) => {
+      const pid = String(args.pid ?? '').trim();
+      if (!pid) return { error: 'wait requires a pid' };
+      const result = await controller.execute(`wait(${pid}, DcWaitOutcome)`, 1, context?.signal, context?.onEvent, 'full');
+      if (result.error) return { error: result.error };
+      const binding = result.bindings.find((entry) => entry.name === 'DcWaitOutcome');
+      return { outcome: binding?.value ?? 'failed(unknown)' };
+    },
+  });
+
   return tools;
 }

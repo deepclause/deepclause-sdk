@@ -149,7 +149,7 @@ describe('autocomplete and the parser agree', () => {
     'goal', 'listing', 'halt', 'help', 'reset', 'rollback', 'compact', 'export',
     'model', 'reasoning', 'show-reasoning', 'harness', 'freeze', 'unfreeze', 'params',
     'trace', 'notrace', 'viz', 'show', 'gen',
-    'spawn', 'ps', 'send', 'call', 'stop',
+    'spawn', 'ps', 'send', 'call', 'stop', 'login',
   ];
 
   it('advertises every command the parser accepts', async () => {

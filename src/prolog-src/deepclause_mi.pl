@@ -2986,6 +2986,7 @@ proc_request_payload(spawn(Goal, Options), payload{op: spawn, goal: Goal, option
 proc_request_payload(send(To, Message), payload{op: send, to: To, message: Message}) :- !.
 proc_request_payload(receive(Timeout), payload{op: receive, timeout: Timeout}) :- !.
 proc_request_payload(requeue(Message), payload{op: requeue, message: Message}) :- !.
+proc_request_payload(wait(Pid), payload{op: wait, pid: Pid}) :- !.
 proc_request_payload(exit(Reason), payload{op: exit, reason: Reason}) :- !.
 proc_request_payload(process_info(Pid), payload{op: process_info, pid: Pid}) :- !.
 proc_request_payload(register(Name, Pid), payload{op: register, name: Name, pid: Pid}) :- !.
@@ -4493,6 +4494,24 @@ service_await_reply(Ref, Reply, Timeout) :-
     ;   fail
     ).
 
+%% mi_call(wait(+Pid[, -Outcome]), +StateIn, -StateOut)
+%% Block until a process terminates. Outcome is ok(Result), failed(Error), or
+%% killed(Reason); Result is the process's terminal text as a Prolog string.
+%% `wait/1` is semidet: it succeeds only on a successful finish.
+mi_call(wait(Pid), StateIn, StateIn) :-
+    !,
+    mi_call(wait(Pid, Outcome), StateIn, _),
+    Outcome = ok(_).
+
+mi_call(wait(Pid, Outcome), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    term_string(Pid, PidText),
+    engine_yield(request_proc(wait(PidText))),
+    get_next_signal(SessionId, _),
+    session_proc_result(SessionId, wait, Outcome),
+    retract(session_proc_result(SessionId, wait, _)).
+
 %% ============================================================
 %% Swarm / pmap: fan a worker over a list concurrently
 %% ============================================================
@@ -4512,36 +4531,44 @@ mi_call(swarm(Worker, Items, Results), StateIn, StateOut) :-
     mi_call(swarm(Worker, Items, Results, 4), StateIn, StateOut).
 
 %% mi_call(swarm(+Worker, +Items, -Results, +Concurrency), ...)
-mi_call(swarm(Worker, Items, Results, _Concurrency), StateIn, StateIn) :-
+%% Windowed fan-out: at most Concurrency items run at once.
+mi_call(swarm(Worker, Items, Results, Concurrency), StateIn, StateIn) :-
     !,
     get_session_id(SessionId),
     proc_self(SessionId, Me),
-    length(Items, Count),
-    swarm_spawn(Items, 1, Worker, Me, SessionId),
-    swarm_collect(Count, Pairs, SessionId),
+    (   integer(Concurrency), Concurrency > 0 -> Conc = Concurrency ; Conc = 4 ),
+    swarm_loop(Items, 1, [], Conc, Worker, Me, SessionId, [], Pairs),
     keysort(Pairs, Sorted),
     swarm_values(Sorted, Results).
 
-swarm_spawn([], _, _, _, _).
-swarm_spawn([Item|Items], Index, Worker, Me, SessionId) :-
+%% Accumulate `Acc`, bind the collected pairs to `Pairs` at the base.
+swarm_loop(Pending, NextIndex, InFlight, Conc, Worker, Me, SessionId, Acc, Pairs) :-
+    (   Pending = [Item|Rest],
+        length(InFlight, K), K < Conc
+    ->  swarm_spawn_one(Item, NextIndex, Worker, Me, SessionId),
+        Next is NextIndex + 1,
+        swarm_loop(Rest, Next, [NextIndex|InFlight], Conc, Worker, Me, SessionId, Acc, Pairs)
+    ;   InFlight = [_|_]
+    ->  swarm_receive(Index, Value, SessionId),
+        selectchk(Index, InFlight, Rest),
+        swarm_loop(Pending, NextIndex, Rest, Conc, Worker, Me, SessionId, [Index-Value|Acc], Pairs)
+    ;   Pairs = Acc
+    ).
+
+swarm_spawn_one(Item, Index, Worker, Me, SessionId) :-
     term_string(deepclause_mi:dc_swarm_item(Worker, Item, Me, Index), GoalText),
     engine_yield(request_proc(spawn(GoalText))),
     get_next_signal(SessionId, _),
     session_proc_result(SessionId, spawn, SpawnResult),
     retract(session_proc_result(SessionId, spawn, _)),
-    SpawnResult = ok(_Pid),
-    Next is Index + 1,
-    swarm_spawn(Items, Next, Worker, Me, SessionId).
+    SpawnResult = ok(_Pid).
 
-swarm_collect(0, [], _) :- !.
-swarm_collect(N, [Index-Value|Rest], SessionId) :-
+swarm_receive(Index, Value, SessionId) :-
     engine_yield(request_proc(receive(0))),
     get_next_signal(SessionId, _),
     session_proc_result(SessionId, receive, R),
     retract(session_proc_result(SessionId, receive, _)),
-    R = ok(swarm_result(Index, Value)),
-    N1 is N - 1,
-    swarm_collect(N1, Rest, SessionId).
+    R = ok(swarm_result(Index, Value)).
 
 swarm_values([], []).
 swarm_values([_-Value|Rest], [Value|Values]) :- swarm_values(Rest, Values).
@@ -5917,6 +5944,8 @@ is_mi_special_predicate(service_call(_,_,_,_)).
 is_mi_special_predicate(swarm(_,_,_)).
 is_mi_special_predicate(swarm(_,_,_,_)).
 is_mi_special_predicate(pmap(_,_,_)).
+is_mi_special_predicate(wait(_)).
+is_mi_special_predicate(wait(_,_)).
 is_mi_special_predicate(param(_,_)).
 is_mi_special_predicate(param(_,_,_)).
 %% Prompt predicates (like task but with fresh memory)

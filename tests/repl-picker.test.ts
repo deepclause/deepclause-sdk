@@ -4,13 +4,33 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { filterItems, renderPick, type PickItem } from '../src/repl/picker.js';
+import { classifyKey, filterItems, renderPick, type PickItem } from '../src/repl/picker.js';
 
 const ITEMS: PickItem[] = [
   { id: 'anthropic/claude', label: 'anthropic/claude', hint: '[reasoning]' },
   { id: 'openai/gpt', label: 'openai/gpt' },
   { id: 'openai/o3', label: 'openai/o3' },
 ];
+
+describe('classifyKey', () => {
+  it('recognizes navigation, select and cancel keys', () => {
+    expect(classifyKey('\x1b[A')).toBe('up');
+    expect(classifyKey('\x1b[B')).toBe('down');
+    expect(classifyKey('\x1b[5~')).toBe('pageup');
+    expect(classifyKey('\x1b[6~')).toBe('pagedown');
+    expect(classifyKey('\r')).toBe('enter');
+    expect(classifyKey('\n')).toBe('enter');
+    expect(classifyKey('\x1b')).toBe('cancel');
+    expect(classifyKey('\x03')).toBe('cancel');
+    expect(classifyKey('\x7f')).toBe('backspace');
+  });
+
+  it('treats other printables as filter text', () => {
+    expect(classifyKey('g')).toBe('text');
+    expect(classifyKey('4')).toBe('text');
+    expect(classifyKey('\x1b[Z')).toBe('ignore');
+  });
+});
 
 describe('filterItems', () => {
   it('returns everything for an empty query', () => {

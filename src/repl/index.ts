@@ -18,6 +18,7 @@ import type { FrameKind } from '../types.js';
 import { DMLSession, type DMLQueryOptions, type DiagramResult } from './session.js';
 import type { HarnessExportOptions, HarnessExportResult } from './export.js';
 import { resolveReplJudgeSelection, type JevJudgeOptions } from './judge.js';
+import { createLimitedBackend } from './backend.js';
 import type { HistoryOptions } from './history.js';
 import type { JudgeSelection } from '../judge/types.js';
 import type { CompactionSettings } from './compaction.js';
@@ -80,6 +81,8 @@ export interface HarnessReplOptions {
   harness?: string;
   /** Process execution mode: `inline` (L1, default) or `worker` (L2). */
   execution?: 'inline' | 'worker';
+  /** Max concurrent model calls across the session and its subagents (default 4; 0 = unlimited). */
+  providerConcurrency?: number;
   /** Load the harness's current content on open (default true; `-l` sets false). */
   autoLoadHarness?: boolean;
   /** TypeScript compaction settings (ported from pi). */
@@ -219,6 +222,10 @@ export async function createHarnessRepl(options: HarnessReplOptions): Promise<Ha
     options.onDiagnostic?.(warning);
   }
 
+  const limitedBackend = options.llmBackend
+    ? createLimitedBackend(options.llmBackend, options.providerConcurrency ?? 4)
+    : undefined;
+
   const session = await DMLSession.open({
     sessionId: options.sessionId,
     resume: options.resume,
@@ -247,7 +254,7 @@ export async function createHarnessRepl(options: HarnessReplOptions): Promise<Ha
       temperature: options.temperature ?? 0.7,
       maxTokens: options.maxTokens ?? 65536,
       streaming: options.streaming ?? true,
-      llmBackend: options.llmBackend,
+      llmBackend: limitedBackend,
       judgeSelection,
       imageBackend: options.imageBackend,
       modelResolver: options.modelResolver,

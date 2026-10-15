@@ -70,6 +70,11 @@ function infoTerm(info: ProcessInfo | undefined): string {
     + '}';
 }
 
+/** Quote text as a Prolog double-quoted string. */
+function prologString(text: string): string {
+  return `"${text.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, '\\n')}"`;
+}
+
 /** A one-line, log-friendly rendering of a tool-call event. */
 function formatToolEvent(event: DMLEvent): string {
   const name = event.toolName ?? 'tool';
@@ -226,6 +231,24 @@ export class DmlProcessExecutor implements ProcessBackend {
           this.host.requeue(pid, request.message ?? 'true');
         }
         return { key: 'requeue', term: 'ok' };
+      }
+
+      case 'wait': {
+        const target = this.resolveTarget(request.pid, pid);
+        const resolved = typeof target === 'string' ? this.host.whereis(target) : target;
+        if (!resolved) return { key: 'wait', term: 'failed(noproc)' };
+        const info = await this.host.wait(resolved);
+        if (!info) return { key: 'wait', term: 'failed(noproc)' };
+        if (info.state === 'done') {
+          const text = typeof info.result === 'string'
+            ? info.result
+            : info.result === undefined ? '' : JSON.stringify(info.result);
+          return { key: 'wait', term: `ok(${prologString(text)})` };
+        }
+        if (info.state === 'crashed') {
+          return { key: 'wait', term: `failed(${prologString(info.error ?? 'crashed')})` };
+        }
+        return { key: 'wait', term: `killed(${prologString(String(info.exitReason ?? info.state))})` };
       }
 
       case 'exit':

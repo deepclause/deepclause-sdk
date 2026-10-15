@@ -965,16 +965,33 @@ counter_service(Count) :-
     ).
 ```
 
-### `swarm(+Worker, +Items, -Results)` / `pmap(+Worker, +Items, -Values)`
+### `swarm(+Worker, +Items, -Results[, +Concurrency])` / `pmap(+Worker, +Items, -Values)`
 
 Run `call(Worker, Item, Value)` once per item, each in its own process, and
-collect the results **in input order**. `swarm` returns `ok(Value)`/`failed` per
-item; `pmap` returns bare values and fails if any item failed.
+collect the results **in input order**. At most `Concurrency` items run at once
+(default 4), so a large list does not fire every model call simultaneously.
+`swarm` returns `ok(Value)`/`failed` per item; `pmap` returns bare values and
+fails if any item failed.
 
 ```prolog
-swarm(summarise_file, Files, Results),
+swarm(summarise_file, Files, Results, 4),
 findall(S, member(ok(S), Results), Summaries).
 ```
+
+### `wait(+Pid[, -Outcome])`
+
+Block until a process terminates, then report what happened. `Outcome` is
+`ok(Result)`, `failed(Error)`, or `killed(Reason)`; `Result` is the process's
+terminal text as a Prolog string. `wait/1` is semidet — it succeeds only on a
+successful finish.
+
+```prolog
+spawn(research("qec", Me), Pid),
+wait(Pid, ok(Text)),          % Text is the subagent's terminal text
+```
+
+For a structured result, prefer the message form: have the child
+`send(Parent, result(Term))` and `receive` it in the parent.
 
 ### `exit/1,2` and stopping
 

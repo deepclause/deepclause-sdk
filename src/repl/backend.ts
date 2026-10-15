@@ -247,8 +247,7 @@ function toPiMessages(messages: LLMBackendMessage[], model: PiModelLike): unknow
  * `thinkingLevel` is forwarded to the provider only for reasoning models and
  * non-`off` levels, so provider defaults are preserved for every other model.
  */
-export function createPiAdapter(
-  registry: PiRegistryLike,
+export function createPiAdapter(  registry: PiRegistryLike,
   model: PiModelLike,
   maxTokens = 65536,
   thinkingLevel?: string,
@@ -716,4 +715,47 @@ export async function resolveLlmBackend(options: ResolveBackendOptions = {}): Pr
   }
   const model = options.model ?? 'gpt-4o';
   return { kind: 'env', provider: options.provider ?? 'openai', model, modelId: model };
+}
+
+/**
+ * Wrap a backend so at most `maxConcurrent` model calls are in flight at once.
+ *
+ * A `swarm`/fan-out otherwise fires one provider call per item simultaneously,
+ * which trips rate limits and bursts cost. The wrapper is created once (in
+ * `createHarnessRepl`) and shared by every child session, so the limit is per
+ * session tree. `maxConcurrent <= 0` returns the backend unchanged.
+ */
+export function createLimitedBackend(backend: LLMBackend, maxConcurrent: number): LLMBackend {
+  if (!Number.isFinite(maxConcurrent) || maxConcurrent <= 0) return backend;
+  let active = 0;
+  const waiters: Array<() => void> = [];
+  const acquire = (): Promise<void> =>
+    new Promise((resolve) => {
+      if (active < maxConcurrent) {
+        active += 1;
+        resolve();
+      } else {
+        waiters.push(() => {
+          active += 1;
+          resolve();
+        });
+      }
+    });
+  const release = (): void => {
+    active -= 1;
+    waiters.shift()?.();
+  };
+  return {
+    complete: async (request) => {
+      await acquire();
+      try {
+        return await backend.complete(request);
+      } finally {
+        release();
+      }
+    },
+    setThinkingLevel: backend.setThinkingLevel?.bind(backend),
+    getThinkingLevel: backend.getThinkingLevel?.bind(backend),
+    supportedThinkingLevels: backend.supportedThinkingLevels?.bind(backend),
+  };
 }

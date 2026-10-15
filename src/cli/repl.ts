@@ -20,6 +20,8 @@ import { ReplRenderer, type RenderMode, type ReplEventRenderer } from '../repl/r
 import { TranscriptDocument } from '../repl/tui/document.js';
 import { ServicesPanel } from '../repl/tui/services-panel.js';
 import { formatProcessTable } from '../repl/harness-tools.js';import { ChoicePicker } from '../repl/tui/picker.js';
+import { openPiRuntime, type PiAuthInteractionLike } from '../repl/backend.js';
+import { listLoginProviders, loginToProvider, type LoginProviderOption } from '../repl/auth.js';
 import { HarnessView } from '../repl/tui/harness-view.js';
 import { TuiRenderer } from '../repl/tui/renderer.js';
 import { WorkingLine } from '../repl/tui/working-line.js';
@@ -139,6 +141,7 @@ export type ReplInput =
   | { kind: 'prompt'; prompt: string }
   | { kind: 'spawn'; goal: string; name?: string }
   | { kind: 'ps'; watch?: boolean; logs?: boolean }
+  | { kind: 'login' }
   | { kind: 'send'; target: string; message: string }
   | { kind: 'call'; target: string; message: string }
   | { kind: 'stop'; target: string }
@@ -288,6 +291,8 @@ export function classifyReplInput(line: string): ReplInput {
       }
       case 'stop':
         return arg ? { kind: 'stop', target: arg } : { kind: 'unknown-command', name: 'stop (usage: /stop <name>)' };
+      case 'login':
+        return { kind: 'login' };
       default:
         return { kind: 'unknown-command', name };
     }
@@ -888,6 +893,9 @@ export async function dispatchReplInput(
       print(`stopped ${input.target}`);
       return true;
     }
+    case 'login':
+      print("sign in from the terminal: deepclause login (or /login in the TUI)");
+      return true;
     case 'unknown-command':
       print(`unknown command: /${input.name} — try /help.`);
       return true;
@@ -1074,6 +1082,7 @@ function helpText(): string {
     '    /compact [notes]     compact the authoring memory',
     '    /export [file]       save the harness (use .zip to bundle linked files)',
     '    /model [provider/id] show / set the model',
+    '    /login               sign in to a provider (from the terminal or the TUI)',
     '    /freeze  /unfreeze   read-only lock',
     '    /params              show session parameters',
     '    /trace   /notrace    toggle verbose logging',
@@ -1698,6 +1707,70 @@ export async function runTui(
     await persistSetting({ backend: { kind: 'pi', model: picked } }, 'model');
     renderer.writeLine(`default model set to ${picked} (takes effect on the next start)`);
   };
+
+  /** `/login`: sign in to a provider from inside the TUI. */
+  const runLogin = async (): Promise<void> => {
+    let handle;
+    try {
+      handle = await openPiRuntime({});
+    } catch (error) {
+      renderer.writeLine(`login unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    const providers = listLoginProviders(handle);
+    if (providers.length === 0) {
+      renderer.writeLine('no login providers available');
+      return;
+    }
+    const picked = await choose((done) => new ChoicePicker({
+      title: 'Sign in to a provider',
+      hint: 'Esc to cancel',
+      items: providers.map((provider: LoginProviderOption) => ({
+        value: provider.id,
+        label: `${provider.name} (${provider.id})`,
+        description: provider.configured ? '✓ configured' : provider.authType,
+      })),
+      onSelect: (item) => done(item.value),
+      onCancel: () => done(),
+    }));
+    if (!picked) return;
+
+    const interaction: PiAuthInteractionLike = {
+      prompt: async (prompt) => {
+        if (prompt.options && prompt.options.length > 0) {
+          const method = await choose((done) => new ChoicePicker({
+            title: prompt.message,
+            items: prompt.options!.map((option) => ({
+              value: option.id,
+              label: option.label,
+              description: option.description,
+            })),
+            onSelect: (item) => done(item.value),
+            onCancel: () => done(),
+          }));
+          if (!method) throw new Error('cancelled');
+          return method;
+        }
+        const answer = await ask(`${prompt.message}${prompt.placeholder ? ` (${prompt.placeholder})` : ''} `);
+        if (answer === null) throw new Error('cancelled');
+        return answer;
+      },
+      notify: (event) => {
+        if (event.type === 'auth_url' && event.url) renderer.writeLine(`open this URL to authorize: ${event.url}`);
+        else if (event.type === 'device_code') renderer.writeLine(`visit ${event.verificationUri} and enter code ${event.userCode}`);
+        else if (event.message) renderer.writeLine(event.message);
+      },
+    };
+
+    try {
+      await loginToProvider(handle, picked, { interaction });
+      await persistSetting({ backend: { kind: 'pi' } }, 'login');
+      renderer.writeLine(`signed in to ${picked} (run /model to pick one of its models)`);
+    } catch (error) {
+      renderer.writeLine(`login failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
   // The experiment: a live side view of the harness, beside the transcript. It reads
   // the session module (so uncommitted edits show) and refreshes after anything that
   // can change it. Hidden on a narrow terminal, where there is no room for a column.
@@ -1809,6 +1882,10 @@ export async function runTui(
       if (input.kind === 'show-reasoning') { await pickReasoningMode(); continue; }
       if (input.kind === 'harness') {
         await handleHarnessCommand(input.width);
+        continue;
+      }
+      if (input.kind === 'login') {
+        await runLogin();
         continue;
       }
       if (input.kind === 'ps' && (input.watch || input.logs)) {

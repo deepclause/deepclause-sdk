@@ -46,6 +46,10 @@ describe('classifyReplInput subagent commands', () => {
     expect(classifyReplInput('/stop keeper')).toEqual({ kind: 'stop', target: 'keeper' });
     expect(classifyReplInput('/stop')).toMatchObject({ kind: 'unknown-command' });
   });
+
+  it('classifies /login', () => {
+    expect(classifyReplInput('/login')).toEqual({ kind: 'login' });
+  });
 });
 
 describe('formatProcessTable', () => {
@@ -115,16 +119,34 @@ describe('subagent harness tools', () => {
       stopProcess: async (target: Pid | string) => {
         stopped.push(typeof target === 'string' ? target : target.id);
       },
+      execute: async () => ({
+        bindings: [
+          { name: 'DcSwarmResults', value: '[ok(1), ok(2)]' },
+          { name: 'DcWaitOutcome', value: 'ok("done")' },
+        ],
+        solutions: [],
+        output: '',
+        elapsedMs: 0,
+      }),
     } as unknown as HarnessToolController;
     return { controller: stub, spawned, sent, stopped };
   }
 
-  it('exposes spawn, ps, send, call and stop', () => {
+  it('exposes spawn, ps, send, call, stop, swarm and wait', () => {
     const { controller: c } = controller();
     const tools = createHarnessTools(c);
-    for (const name of ['spawn', 'ps', 'send', 'call', 'stop']) {
+    for (const name of ['spawn', 'ps', 'send', 'call', 'stop', 'swarm', 'wait']) {
       expect(tools.has(name)).toBe(true);
     }
+  });
+
+  it('swarm and wait run through the execute tool', async () => {
+    const { controller: c } = controller();
+    const tools = createHarnessTools(c);
+    const swarm = await tools.get('swarm')!.execute({ worker: 'mark', items: ['a', 'b'] });
+    expect(swarm).toMatchObject({ results: expect.stringContaining('ok(1)') });
+    const wait = await tools.get('wait')!.execute({ pid: 'proc(main,s,p1)' });
+    expect(wait).toMatchObject({ outcome: expect.stringContaining('ok(') });
   });
 
   it('spawn returns a pid and ps lists it', async () => {

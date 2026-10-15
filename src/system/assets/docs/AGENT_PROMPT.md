@@ -217,20 +217,21 @@ A subagent is isolated and asynchronous:
 Patterns:
 
 - **Fan out over a list** with `swarm(Worker, Items, Results)` — ordered, one
-  process per item, `ok(Value)`/`failed` per item — or `pmap/3` (bare values,
-  fails on any failure). Bound the list: each item is a process and usually a
-  model call, and the session has a process limit.
+  process per item (at most 4 at once), `ok(Value)`/`failed` per item — or
+  `pmap/3` (bare values, fails on any failure). Bound the list: each item is a
+  process and usually a model call, and the session has a process limit.
 - **Background a long goal** with `spawn(Goal)`. If you need the result, have the
-  goal `send(Parent, result(...))` and `receive` it, or make it a service.
+  goal `send(Parent, result(...))` and `receive` it, or make it a service. A
+  one-shot subagent's terminal result can also be read with `wait(Pid, ok(Text))`.
 - **A service** is `serve(Name, Loop)` where `Loop` handles
   `request(From, Ref, Request)` by `send(From, reply(Ref, Reply))`, then recurses.
   Call it with `service_call(Name, Request, Reply)`.
 - **Recursive delegation** is a subagent that spawns subagents; bound the depth.
 
 Subagent tools: `spawn(goal, name?)`, `ps`, `send(to, message)`,
-`call(to, message)`, `stop(target)`. Users also have `/spawn`, `/send`, `/call`,
-`/stop`, and `/ps --watch --logs` (a live follow of every subagent's streamed
-output, reasoning, and tool calls).
+`call(to, message)`, `stop(target)`, `swarm(worker, items)`, `wait(pid)`. Users
+also have `/spawn`, `/send`, `/call`, `/stop`, and `/ps --watch --logs` (a live
+follow of every subagent's streamed output, reasoning, and tool calls).
 
 Do not spawn a subagent for a single model call, and do not fan out an unbounded
 list. If the work needs the harness's shared state, or the user's answer now,
@@ -1751,16 +1752,33 @@ counter_service(Count) :-
     ).
 ```
 
-### `swarm(+Worker, +Items, -Results)` / `pmap(+Worker, +Items, -Values)`
+### `swarm(+Worker, +Items, -Results[, +Concurrency])` / `pmap(+Worker, +Items, -Values)`
 
 Run `call(Worker, Item, Value)` once per item, each in its own process, and
-collect the results **in input order**. `swarm` returns `ok(Value)`/`failed` per
-item; `pmap` returns bare values and fails if any item failed.
+collect the results **in input order**. At most `Concurrency` items run at once
+(default 4), so a large list does not fire every model call simultaneously.
+`swarm` returns `ok(Value)`/`failed` per item; `pmap` returns bare values and
+fails if any item failed.
 
 ```prolog
-swarm(summarise_file, Files, Results),
+swarm(summarise_file, Files, Results, 4),
 findall(S, member(ok(S), Results), Summaries).
 ```
+
+### `wait(+Pid[, -Outcome])`
+
+Block until a process terminates, then report what happened. `Outcome` is
+`ok(Result)`, `failed(Error)`, or `killed(Reason)`; `Result` is the process's
+terminal text as a Prolog string. `wait/1` is semidet — it succeeds only on a
+successful finish.
+
+```prolog
+spawn(research("qec", Me), Pid),
+wait(Pid, ok(Text)),          % Text is the subagent's terminal text
+```
+
+For a structured result, prefer the message form: have the child
+`send(Parent, result(Term))` and `receive` it in the parent.
 
 ### `exit/1,2` and stopping
 

@@ -26,6 +26,7 @@ export const REPL_COMMANDS: SlashCommand[] = [
   { name: 'viz', description: 'Draw a skill as a diagram', argumentHint: '<entry> [presentation|spec]' },
   { name: 'export', description: 'Save the harness to a file', argumentHint: '[path]' },
   { name: 'model', description: 'Switch or show the active model', argumentHint: '[provider:id]' },
+  { name: 'login', description: 'Sign in to a provider' },
   { name: 'reasoning', description: 'Set the model reasoning level', argumentHint: '[off|minimal|low|medium|high|xhigh|max]' },
   { name: 'show-reasoning', description: 'How much reasoning to display', argumentHint: '[off|summary|full]' },
   { name: 'harness', description: 'Toggle the live harness side view', argumentHint: '[20-120|wider|narrower]' },

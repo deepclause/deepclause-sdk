@@ -11,6 +11,7 @@ import { parentPort, workerData } from 'node:worker_threads';
 
 import type { LLMBackend, LLMBackendRequest, LLMBackendResponse, ToolDefinition } from '../types.js';
 import { DMLSession } from './session.js';
+import type { ProcessEvent } from './processes.js';
 import type { MainToWorker, WorkerInitData } from './worker-protocol.js';
 
 if (!parentPort) throw new Error('process-worker must run inside a worker thread');
@@ -88,7 +89,7 @@ async function main(): Promise<void> {
     onInput: (prompt) => rpc('input', { prompt }) as Promise<string | undefined>,
   });
   await session.loadCode(init.harnessText);
-  session.setProcessEventSink((event) => port.postMessage({ type: 'event', event }));
+  session.setProcessEventSink(createEventForwarder(port));
 
   port.on('message', (message: MainToWorker) => {
     void handle(session, message);
@@ -168,6 +169,53 @@ async function handle(session: DMLSession, message: MainToWorker): Promise<void>
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Coalesce streamed `stream`/`reasoning` chunks before they cross the worker
+ * boundary: a long model response would otherwise be hundreds of IPC messages.
+ * A non-stream event flushes the pending buffers first, to keep rough order.
+ */
+function createEventForwarder(target: { postMessage(message: unknown): void }): (event: ProcessEvent) => void {
+  const buffers = new Map<string, { event: ProcessEvent; text: string; done: boolean; timer: ReturnType<typeof setTimeout> | null }>();
+
+  const flush = (key: string): void => {
+    const buffer = buffers.get(key);
+    if (!buffer) return;
+    if (buffer.timer) clearTimeout(buffer.timer);
+    buffers.delete(key);
+    if (buffer.text.length === 0) return;
+    target.postMessage({ type: 'event', event: { ...buffer.event, content: buffer.text, done: buffer.done } });
+  };
+
+  const flushAll = (): void => {
+    for (const key of [...buffers.keys()]) flush(key);
+  };
+
+  return (event: ProcessEvent): void => {
+    if (event.type === 'stream' || event.type === 'reasoning') {
+      const key = `${event.pid.id}:${event.type}`;
+      const chunk = event.content ?? '';
+      const buffer = buffers.get(key);
+      if (!buffer) {
+        buffers.set(key, {
+          event,
+          text: chunk,
+          done: event.done === true,
+          timer: setTimeout(() => flush(key), 120),
+        });
+      } else {
+        buffer.event = event;
+        buffer.text += chunk;
+        buffer.done = event.done === true;
+      }
+      const current = buffers.get(key);
+      if (current && (current.done || current.text.length >= 500)) flush(key);
+      return;
+    }
+    flushAll();
+    target.postMessage({ type: 'event', event });
+  };
 }
 
 main().catch((error) => port.postMessage({ type: 'fatal', error: messageOf(error) }));

@@ -9,7 +9,7 @@ import * as path from 'path';
 
 import { createHarnessRepl, type HarnessRepl } from '../src/repl/index.js';
 import { createHarnessTools } from '../src/repl/harness-tools.js';
-import type { ProcessEvent } from '../src/repl/processes.js';
+import { pidTermText, type ProcessEvent } from '../src/repl/processes.js';
 
 let workspace: string;
 let repl: HarnessRepl;
@@ -192,5 +192,26 @@ describe('session-scoped subagents', () => {
     const log = repl.session.processLog();
     expect(log.some((entry) => entry.text.includes('logged line'))).toBe(true);
     expect(log.some((entry) => entry.kind === 'answer' && entry.text.includes('done'))).toBe(true);
+  });
+
+  it('fans out with a bounded concurrency window', async () => {
+    await define('mark/2', 'mark(X, marked(X)).');
+    await define('run_swarm1/1', 'run_swarm1(Results) :- swarm(mark, [a, b, c], Results, 1).');
+    const result = await repl.session.executeGoal('run_swarm1(R)', 1);
+    expect(result.error).toBeUndefined();
+    const value = result.bindings.find((binding) => binding.name === 'R')?.value ?? '';
+    expect(value).toContain('ok(marked(a))');
+    expect(value).toContain('ok(marked(b))');
+    expect(value).toContain('ok(marked(c))');
+  });
+
+  it('waits for a subagent and returns its outcome', async () => {
+    await define('answer_loud/0', 'answer_loud :- output("the answer"), answer("the answer").');
+    const pid = await repl.session.spawnProcess('answer_loud', { name: 'answer_loud' });
+    const result = await repl.session.executeGoal(`wait(${pidTermText(pid)}, Outcome)`, 1);
+    expect(result.error).toBeUndefined();
+    const value = result.bindings.find((binding) => binding.name === 'Outcome')?.value ?? '';
+    expect(value).toContain('ok(');
+    expect(value).toContain('the answer');
   });
 });
