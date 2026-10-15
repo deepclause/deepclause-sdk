@@ -1171,6 +1171,13 @@ A command is also killed when it produces no output for `DC_HOST_SHELL_IDLE_TIME
 (default 180 000 ms); `DC_HOST_SHELL_TIMEOUT_MS` sets a default wall-clock cap
 (0 = disabled). Exit code `124` means a timeout.
 
+**The host may refuse a tool.** A session can set a tool **policy** — a whitelist
+or blacklist, by name or glob. A refused `exec/2` fails exactly as a tool that
+returned failure, and the reason is reported to the operator. The policy applies
+to *every* `exec/2`, including one inside a `tool/2` body, so a tool cannot reach
+a capability the policy blocked. `ask_user` is exempt: it is the human channel,
+not a capability.
+
 ---
 
 ### Tool Definitions
@@ -1477,6 +1484,29 @@ agent_main :-
     answer("Explained!").
 ```
 
+#### `push_context` / `pop_context`
+
+Save the current memory to a stack and restore it, which makes memory
+**backtrackable**. `push_context(clear)` also empties the active memory.
+
+```prolog
+agent_main(Draft) :-
+    push_context(clear),
+    system("You are a terse reviewer."),
+    task("Review this in one line: {Draft}", string(Note)),
+    pop_context,
+    answer(Note).
+```
+
+#### `clear_memory`
+
+Clear the active memory without saving it.
+
+#### `get_memory(-Messages)`
+
+Bind the current memory as a list of `message{role, content, media}` dicts, for a
+predicate that needs to inspect or rebuild it.
+
 ---
 
 ### Media Predicates
@@ -1504,6 +1534,12 @@ agent_main :-
 
 Memory stores `media{path, mime}` — never the image bytes. Judgments
 (`choose`/`rate`/`verify`/`probability`) stay text-only.
+
+#### `save_image(+Media, +OutPath)`
+
+Write a media reference to a workspace file — a copied image
+(`save_image(media("in.png", "image/png"), "out.png")`) or inline SVG
+(`save_image(media{svg: Svg}, "out.svg")`). Parent directories must exist.
 
 ---
 
@@ -1670,6 +1706,24 @@ agent_main :-
 ```
 
 **Important:** `answer/1` commits the execution. After answering, the program completes and does not try alternative clauses.
+
+---
+
+### Human input
+
+#### `input(+Prompt, -Input)`
+
+Ask the human and bind their reply. In the REPL this opens the editor's input
+prompt; in a non-interactive run (`-g`, piped stdin, CI) it **fails** rather than
+hang, so guard it when a goal may run unattended:
+
+```prolog
+asker(Question, Answer) :-
+    (   input(Question, Answer)
+    ->  true
+    ;   Answer = "(no answer available)"
+    ).
+```
 
 ---
 
