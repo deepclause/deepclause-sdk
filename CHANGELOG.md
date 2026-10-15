@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.2.2 - 2026-10-15
+
+### Fixed
+
+- **The tool policy now governs `exec/2` inside a DML tool.** The top-level path
+  checked the policy; the tool-engine path did not, so a `tool/2` body could reach
+  a host capability the session had blocked. Both paths now check, and
+  `tests/tool-policy-exec.test.ts` covers each.
 
 ### Added
 
@@ -12,6 +19,12 @@
 
 ### Changed
 
+- **Curated `sdk-examples/`.** Replaced the stale grab-bags (`basic-usage`,
+  `no-api-key`, `deep-research`, `judge`) with a set where every example runs with
+  no credentials and demonstrates one idea: `quick-start`, `tools` (tools +
+  policy), `neurosymbolic` (prose -> declared schema -> exact logic), `judgments`,
+  and the `subagents`/`debate` examples. A shared scripted-model fallback makes
+  offline runs deterministic, and `examples:smoke` exercises the whole set.
 - **`sdk-examples/subagents.dml` is now a six-pattern tour** of the concurrency
   features: fan-out (`swarm`), best-of-N plus a judge, a stateful service,
   agents that route work between processes through tools, a hedged race with
@@ -25,6 +38,12 @@
   the default network rate limit from 512 KiB/s to 2 MiB/s. It requires Node
   ≥ 20 (0.0.5 already did), so the SDK's `engines.node` moves from `>=18` to
   `>=20.0.0`.
+
+### Docs
+
+- The bundled language reference now documents `input/2`, `push_context` /
+  `pop_context`, `clear_memory`, `get_memory/1`, `save_image/2`, and the host tool
+  policy. `AGENT_PROMPT.md` is regenerated from it.
 
 ## 0.2.1 - 2026-10-15
 
