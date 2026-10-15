@@ -252,6 +252,11 @@ interface RunnerExecutionContext {
   signal?: AbortSignal;
   toolPolicy?: ToolPolicy | null;
   onModelCall?: () => boolean | Promise<boolean>;
+  /** Handles a DML process primitive reached inside a tool engine. */
+  onProcessRequest?: (
+    request: ProcessRequestPayload,
+    signal?: AbortSignal,
+  ) => Promise<ProcessRequestResult>;
 }
 
 interface ParsedJudgment {
@@ -1146,6 +1151,7 @@ export class DMLRunner {
             signal: options.signal,
             toolPolicy: options.toolPolicy,
             onModelCall: options.onModelCall,
+            onProcessRequest: options.onProcessRequest,
           },
           withheld,
           emitToolCall,
@@ -2405,6 +2411,26 @@ export class DMLRunner {
           case 'log': {
             if (process.env.DEBUG_RUNNER) {
               console.log('[RUNNER] Tool log:', content);
+            }
+            break;
+          }
+
+          case 'request_proc': {
+            // A DML tool reached a process primitive (self/send/receive/...).
+            // Resolve it through the same host binding as the enclosing run, so
+            // `self` is the process the tool is running inside, then post the
+            // result back to the tool engine.
+            const procPayload = (payload ?? {}) as unknown as ProcessRequestPayload;
+            if (!runContext.onProcessRequest) {
+              this.postProcessResult(String(procPayload.op), 'error(no_process_host)');
+              break;
+            }
+            try {
+              const procResult = await runContext.onProcessRequest(procPayload, runContext.signal);
+              this.postProcessResult(procResult.key, procResult.term);
+            } catch (procError) {
+              const procMessage = procError instanceof Error ? procError.message : String(procError);
+              this.postProcessResult(String(procPayload.op), `error(${JSON.stringify(procMessage)})`);
             }
             break;
           }

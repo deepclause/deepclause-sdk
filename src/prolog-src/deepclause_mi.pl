@@ -3541,6 +3541,10 @@ process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolSco
 %% Legacy 4-arg format (no tool scope)
 process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory), request_agent_loop, '',
     payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: none, reasoningEffort: none, recipeContext: ""}) :- !.
+%% Process primitives (self/send/receive/spawn/...) reached inside a DML tool
+%% are yielded to the host exactly as in the main engine.
+process_tool_engine_result(request_proc(Request), request_proc, '', Payload) :-
+    proc_request_payload(Request, Payload).
 process_tool_engine_result(output(Text), output, Text, none) :- !.
 process_tool_engine_result(log(Text), log, Text, none) :- !.
 process_tool_engine_result(Other, error, Msg, none) :-

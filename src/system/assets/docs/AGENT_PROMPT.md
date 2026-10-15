@@ -1680,6 +1680,10 @@ memory, a private snapshot of this module, and a mailbox. Processes outlive the
 turn that started them, so a harness can background long work, wait for
 messages, or run many things at once.
 
+Process primitives work anywhere a goal runs, including inside a `tool/2` body:
+a tool executes in its own engine, but `self/1` is the process the tool runs in,
+so a tool can route work to other processes.
+
 ### `spawn(+Goal, -Pid)` / `spawn_opt(+Goal, -Pid, +Options)`
 
 Start `Goal` in a new process and return its pid immediately. `Goal` is **copied**:
