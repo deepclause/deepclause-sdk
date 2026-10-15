@@ -132,6 +132,9 @@ describe('RemoteProcessHost', () => {
     const { host, worker } = await startHost();
     const pid = await host.spawn('keeper', { name: 'keeper' });
     expect(pid.id).toBe('p1');
+    // The cache is refreshed before spawn resolves, so /spawn does not read
+    // "no subagents".
+    expect(host.processes()).toHaveLength(1);
     await delay(60);
     expect(host.processes()).toHaveLength(1);
     expect(host.info(pid)?.name).toBe('keeper');

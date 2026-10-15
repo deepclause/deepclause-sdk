@@ -46,6 +46,7 @@ async function main(): Promise<void> {
     'keeper(Notes) :-',
     '    receive(Msg),',
     '    (   Msg = stop -> output("keeper stopping"), answer(Notes)',
+    '    ;   Msg = request(From, Ref, Ping) -> send(From, reply(Ref, pong(Ping))), keeper(Notes)',
     '    ;   output(Msg), keeper([Msg|Notes])',
     '    ).',
   ].join('\n'));

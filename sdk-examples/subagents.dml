@@ -24,6 +24,9 @@ keeper(Notes) :-
     (   Msg = stop ->
         output("keeper stopping"),
         answer(Notes)
+    ;   Msg = request(From, Ref, Ping) ->
+        send(From, reply(Ref, pong(Ping))),
+        keeper(Notes)
     ;   output(Msg),
         keeper([Msg|Notes])
     ).

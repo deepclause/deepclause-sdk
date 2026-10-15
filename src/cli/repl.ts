@@ -818,6 +818,9 @@ async function printBanner(runtime: ReplRuntime, loaded: string[]): Promise<void
     '',
     `  ${accent('/goal')} ${dim('<dml>')}            run a DML goal, e.g. ${dim('/goal member(X, [1,2,3])')}`,
     `  ${accent('<plain English>')}        author the harness`,
+    `  ${accent('/spawn')} ${dim('<goal>')}           start a session-scoped subagent`,
+    `  ${accent('/ps')} ${dim('[--watch]')}         list subagents / pin the live panel`,
+    `  ${accent('/send')} ${accent('/call')} ${accent('/stop')}       message, call, or stop a subagent`,
     '',
     `  ${accent('/help')}  ${accent('/listing')}  ${accent('/viz')}  ${accent('/export')}  ${accent('/freeze')}  ${accent('/model')}  ${accent('/halt')}`,
   );
@@ -864,7 +867,7 @@ export async function dispatchReplInput(
     }
     case 'call': {
       try {
-        const reply = await repl.session.callProcess(input.target, input.message);
+        const reply = await repl.session.callProcess(input.target, input.message, 60_000);
         print(`${input.target} › ${reply}`);
       } catch (error) {
         print(`ERROR: ${(error as Error).message}`);
@@ -1329,7 +1332,7 @@ export async function runTui(
     },
   });
   runtime.renderer = renderer;
-  const runState = { running: false, steerable: false };
+  const runState = { running: false, steerable: false, bufferable: false };
   /** Lines typed during a goal query, consumed by the solution pager. */
   const bufferedInput: string[] = [];
   const statusBar = new StatusBarComponent({
@@ -1403,10 +1406,14 @@ export async function runTui(
         runtime.renderer.endTextBlock?.();
         transcript.append(text, 'steer');
         runtime.repl.steer(text);
-      } else {
+      } else if (runState.bufferable) {
         // A goal query is running: queue the line for the solution pager.
         bufferedInput.push(text);
         transcript.append(text, 'steer');
+      } else {
+        // A command (e.g. /call) is running and owns the prompt; typing does
+        // not steer it. Say so rather than mislabeling the line as steering.
+        transcript.append('  (a command is running — wait, or press Ctrl-C)');
       }
     }
 
@@ -1784,6 +1791,7 @@ export async function runTui(
       holder.turn = controller;
       runState.running = true;
       runState.steerable = input.kind === 'prompt';
+      runState.bufferable = input.kind === 'goal';
       bufferedInput.length = 0;
       tui.requestRender();
       try {

@@ -124,6 +124,9 @@ export class RemoteProcessHost implements ProcessBackend {
       error?: string;
     };
     if (!result.pid) throw new Error(result.error ?? 'worker spawn failed');
+    // Refresh before returning so `processes()` already includes the new
+    // process (otherwise the /spawn confirmation reads "no subagents").
+    await this.refresh();
     return result.pid;
   }
 
