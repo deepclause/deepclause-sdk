@@ -2,21 +2,31 @@
  * Live services panel: a dock row listing the session's subagents.
  *
  * Renders nothing when hidden or when no process exists, so the dock layout
- * does not reserve a row for it (the same trick `WorkingLine` uses). Toggled
- * with `/ps --watch`; `/ps` alone prints a snapshot into the transcript.
+ * does not reserve a row for it (the same trick `WorkingLine` uses).
+ *
+ * Two modes, toggled with `/ps --watch` and `/ps --watch --logs`:
+ *  - `summary` — one row per process with state, activity, queue and usage;
+ *  - `logs`    — a larger, chronological follow of every subagent's output.
  */
 
 import { truncateToWidth, visibleWidth, type Component } from '@earendil-works/pi-tui';
 
-import type { ProcessInfo, ProcessState } from '../processes.js';
+import type { ProcessInfo, ProcessLogEntry, ProcessState } from '../processes.js';
 import { dim, tuiStyle } from './theme.js';
+
+export type ServicesPanelMode = 'summary' | 'logs';
 
 export interface ServicesPanelOptions {
   getProcesses: () => ProcessInfo[];
+  getLog: () => ProcessLogEntry[];
   isVisible: () => boolean;
+  mode: () => ServicesPanelMode;
+  /** Rows of log shown in logs mode (default 16). */
+  maxLogLines?: number;
 }
 
 const ACTIVE: ProcessState[] = ['running', 'runnable', 'waiting', 'input'];
+const NAME_WIDTH = 12;
 
 function stateLabel(state: ProcessState): string {
   return state === 'input' ? 'input' : state;
@@ -28,8 +38,12 @@ export class ServicesPanel implements Component {
   render(width: number): string[] {
     if (!this.options.isVisible()) return [];
     const processes = this.options.getProcesses();
+    if (this.options.mode() === 'logs') return this.renderLogs(width, processes);
     if (processes.length === 0) return [];
+    return this.renderSummary(width, processes);
+  }
 
+  private renderSummary(width: number, processes: ProcessInfo[]): string[] {
     const active = processes.filter((process) => ACTIVE.includes(process.state));
     const attention = active.some((process) => process.state === 'input');
     const header = dim(`⚙ services (${processes.length})${attention ? ' — needs input' : ''}`);
@@ -44,13 +58,41 @@ export class ServicesPanel implements Component {
       return truncateToWidth(painted, Math.max(1, width), '…');
     });
 
-    return [header, ...rows].map((line) => (visibleWidth(line) > width ? truncateToWidth(line, width, '…') : line));
+    return [header, ...rows];
+  }
+
+  private renderLogs(width: number, processes: ProcessInfo[]): string[] {
+    const log = this.options.getLog();
+    if (processes.length === 0 && log.length === 0) return [];
+
+    const max = this.options.maxLogLines ?? 16;
+    const slice = log.slice(-max);
+    const active = processes.filter((process) => ACTIVE.includes(process.state)).length;
+    const header = dim(
+      `⚙ services — logs · ${processes.length} process${processes.length === 1 ? '' : 'es'}`
+      + `${active > 0 ? ` · ${active} active` : ''}`,
+    );
+
+    // Pad to a stable height so the panel does not jump as output arrives.
+    const rows: string[] = [];
+    for (let i = slice.length; i < max; i += 1) rows.push('');
+    for (const entry of slice) {
+      rows.push(truncateToWidth(this.formatLogLine(entry), Math.max(1, width), '…'));
+    }
+    return [header, ...rows];
+  }
+
+  private formatLogLine(entry: ProcessLogEntry): string {
+    const raw = entry.name.length > NAME_WIDTH
+      ? `${entry.name.slice(0, NAME_WIDTH - 1)}…`
+      : entry.name;
+    const padding = ' '.repeat(Math.max(0, NAME_WIDTH - visibleWidth(raw)));
+    const label = dim(`${raw}${padding}`);
+    const text = entry.kind === 'output' ? entry.text : tuiStyle.accent(entry.text);
+    return `  ${label}  ${text}`;
   }
 
   invalidate(): void {
     // Stateless: reads the host on each render.
   }
 }
-
-/** The accent style is exported for callers that want to highlight the panel. */
-export const servicesAccent = tuiStyle.accent;

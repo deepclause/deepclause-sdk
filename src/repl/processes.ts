@@ -155,6 +155,15 @@ export interface ProcessEvent {
   error?: string;
 }
 
+/** One line in the subagent log view (`/ps --watch --logs`). */
+export interface ProcessLogEntry {
+  at: number;
+  pid: Pid;
+  name: string;
+  kind: ProcessEvent['type'];
+  text: string;
+}
+
 // ---------------------------------------------------------------------------
 // Bodies and context
 // ---------------------------------------------------------------------------

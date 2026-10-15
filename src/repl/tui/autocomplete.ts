@@ -36,7 +36,7 @@ export const REPL_COMMANDS: SlashCommand[] = [
   { name: 'unfreeze', description: 'Allow edits again' },
   { name: 'params', description: 'Show session parameters' },
   { name: 'spawn', description: 'Start a session-scoped subagent', argumentHint: '<goal>' },
-  { name: 'ps', description: 'List subagents (process table)', argumentHint: '[--watch]' },
+  { name: 'ps', description: 'List subagents (process table)', argumentHint: '[--watch] [--logs]' },
   { name: 'send', description: 'Send a DML term to a subagent', argumentHint: '<name> <term>' },
   { name: 'call', description: 'Request/reply with a service subagent', argumentHint: '<name> <term>' },
   { name: 'stop', description: 'Stop a subagent', argumentHint: '<name>' },

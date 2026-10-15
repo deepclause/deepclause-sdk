@@ -184,4 +184,13 @@ describe('session-scoped subagents', () => {
     expect(maxActive).toBe(1);
     expect(order).toHaveLength(2);
   });
+
+  it('records subagent output and answers for the /ps --logs view', async () => {
+    await define('narrate/0', 'narrate :- output("logged line"), answer("done").');
+    const pid = await repl.session.spawnProcess('narrate', { name: 'narrate' });
+    await waitForDone(repl, pid.id);
+    const log = repl.session.processLog();
+    expect(log.some((entry) => entry.text.includes('logged line'))).toBe(true);
+    expect(log.some((entry) => entry.kind === 'answer' && entry.text.includes('done'))).toBe(true);
+  });
 });

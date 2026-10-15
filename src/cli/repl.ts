@@ -138,7 +138,7 @@ export type ReplInput =
   | { kind: 'goal'; goal: string }
   | { kind: 'prompt'; prompt: string }
   | { kind: 'spawn'; goal: string; name?: string }
-  | { kind: 'ps'; watch?: boolean }
+  | { kind: 'ps'; watch?: boolean; logs?: boolean }
   | { kind: 'send'; target: string; message: string }
   | { kind: 'call'; target: string; message: string }
   | { kind: 'stop'; target: string }
@@ -270,7 +270,8 @@ export function classifyReplInput(line: string): ReplInput {
       case 'ps':
       case 'processes': {
         const watch = /(?:^|\s)--watch(?:\s|$)/.test(arg);
-        return { kind: 'ps', watch };
+        const logs = /(?:^|\s)--logs(?:\s|$)/.test(arg);
+        return { kind: 'ps', watch, logs };
       }
       case 'send':
       case 'cast': {
@@ -827,7 +828,7 @@ async function printBanner(runtime: ReplRuntime, loaded: string[]): Promise<void
     `  ${accent('/goal')} ${dim('<dml>')}            run a DML goal, e.g. ${dim('/goal member(X, [1,2,3])')}`,
     `  ${accent('<plain English>')}        author the harness`,
     `  ${accent('/spawn')} ${dim('<goal>')}           start a session-scoped subagent`,
-    `  ${accent('/ps')} ${dim('[--watch]')}         list subagents / pin the live panel`,
+    `  ${accent('/ps')} ${dim('[--watch|--logs]')}  list subagents / follow their output`,
     `  ${accent('/send')} ${accent('/call')} ${accent('/stop')}       message, call, or stop a subagent`,
     '',
     `  ${accent('/help')}  ${accent('/listing')}  ${accent('/viz')}  ${accent('/export')}  ${accent('/freeze')}  ${accent('/model')}  ${accent('/halt')}`,
@@ -1058,7 +1059,7 @@ function helpText(): string {
     '',
     '  Commands',
     '    /spawn <goal>        start a session-scoped subagent (alias /serve)',
-    '    /ps [--watch]        list subagents; --watch pins a live panel',
+    '    /ps [--watch|--logs]  list subagents; --watch pins a panel, --logs follows their output',
     '    /send <name> <msg>   send a DML term to a subagent (alias /cast)',
     '    /call <name> <msg>   request/reply with a service subagent',
     '    /stop <name>         stop a subagent',
@@ -1717,9 +1718,12 @@ export async function runTui(
   harnessView.refresh();
   let harnessVisible = options.harnessView ?? false;
   let servicesVisible = false;
+  let servicesLogs = false;
   const servicesPanel = new ServicesPanel({
     getProcesses: () => runtime.repl.session.processes(),
+    getLog: () => runtime.repl.session.processLog(200),
     isVisible: () => servicesVisible,
+    mode: () => (servicesLogs ? 'logs' : 'summary'),
   });
   const refreshHarness = (): void => {
     if (!harnessVisible) return;
@@ -1734,7 +1738,7 @@ export async function runTui(
     const active = runtime.repl.session
       .processes()
       .some((process) => ['running', 'runnable', 'waiting', 'input'].includes(process.state));
-    if (active) tui.requestRender();
+    if (active || servicesLogs) tui.requestRender();
   }, 600);
 
   // Transcript grows and scrolls; everything below it stays put.
@@ -1807,8 +1811,15 @@ export async function runTui(
         await handleHarnessCommand(input.width);
         continue;
       }
-      if (input.kind === 'ps' && input.watch) {
-        servicesVisible = !servicesVisible;
+      if (input.kind === 'ps' && (input.watch || input.logs)) {
+        if (input.logs) {
+          // Toggle the follow-the-log view; it is always visible when on.
+          const turningOn: boolean = !(servicesVisible && servicesLogs);
+          servicesLogs = turningOn;
+          servicesVisible = true;
+        } else {
+          servicesVisible = !servicesVisible;
+        }
         tui.requestRender();
         continue;
       }

@@ -27,7 +27,7 @@ import { getWorkspaceDocAssetPath } from '../system/assets/index.js';
 import { DMLRunner, toJsValue, type Frame, type InternalRunOptions, type ProcessRequestPayload, type ProcessRequestResult, type RunnerOptions } from '../runner.js';
 import { DmlProcessExecutor } from './process-executor.js';
 import type { ProcessBackend } from './process-backend.js';
-import type { Pid, ProcessEvent, ProcessInfo, SpawnOptions } from './processes.js';
+import type { Pid, ProcessEvent, ProcessInfo, ProcessLogEntry, SpawnOptions } from './processes.js';
 import type { HarnessSnapshot, HarnessPredicate } from './tui/harness-view.js';
 import {
   compactMemory,
@@ -185,6 +185,23 @@ let sessionCounter = 0;
  */
 let sharedInputQueue: Promise<void> = Promise.resolve();
 
+/** The log-view line for an event, or undefined for per-tick noise. */
+function processLogText(event: ProcessEvent): string | undefined {
+  switch (event.type) {
+    case 'started':
+      return 'started';
+    case 'output':
+      return event.content ?? '';
+    case 'answer':
+      return `› ${String(event.answer ?? 'ok')}`;
+    case 'exited':
+      if (event.state === 'done') return 'finished';
+      return `${event.state}${event.error ? ` (${event.error})` : event.reason && event.reason !== 'normal' ? ` (${String(event.reason)})` : ''}`;
+    default:
+      return undefined; // state/activity are shown in the summary view
+  }
+}
+
 function nextSessionId(): string {
   sessionCounter += 1;
   return `repl_${Date.now().toString(36)}_${sessionCounter}`;
@@ -253,6 +270,9 @@ export class DMLSession {
   private processBackend?: ProcessBackend;
   private processBackendPromise?: Promise<ProcessBackend>;
   private processEventSink?: (event: ProcessEvent) => void;
+  /** Bounded log of subagent output for the `/ps --watch --logs` view. */
+  private readonly processLogEntries: ProcessLogEntry[] = [];
+  private static readonly PROCESS_LOG_LIMIT = 500;
   /** Service declarations replayed from the session record (resume only). */
   private recordedServices: Array<Record<string, unknown>> = [];
   /** Monotonic per-session turn counter used by history records. */
@@ -456,6 +476,7 @@ export class DMLSession {
 
   /** Record a process declaration/exit so a resumed session can replay it (§7). */
   private recordServiceEvent(event: ProcessEvent): void {
+    this.recordProcessLog(event);
     if (!this.history) return;
     if (event.type === 'started') {
       const info = this.processBackend?.info(event.pid);
@@ -483,6 +504,24 @@ export class DMLSession {
   /** Service declarations replayed from the session record (resume only). */
   recordedProcesses(): Array<Record<string, unknown>> {
     return this.recordedServices;
+  }
+
+  /**
+   * Recent subagent output for the log view, oldest first. Answers and exits are
+   * included; per-tick state/activity updates are not (the summary shows those).
+   */
+  processLog(limit = 200): ProcessLogEntry[] {
+    const entries = this.processLogEntries;
+    return limit >= entries.length ? [...entries] : entries.slice(entries.length - limit);
+  }
+
+  private recordProcessLog(event: ProcessEvent): void {
+    const text = processLogText(event);
+    if (text === undefined) return;
+    this.processLogEntries.push({ at: event.at, pid: event.pid, name: event.name, kind: event.type, text });
+    if (this.processLogEntries.length > DMLSession.PROCESS_LOG_LIMIT) {
+      this.processLogEntries.splice(0, this.processLogEntries.length - DMLSession.PROCESS_LOG_LIMIT);
+    }
   }
 
   /** Start a session-scoped subagent running `goal`; returns immediately. */
