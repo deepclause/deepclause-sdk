@@ -241,6 +241,21 @@ describe('TuiRenderer', () => {
     const { renderer } = build();
     expect(renderer.toggleLastPane()).toBe(false);
   });
+
+  it('keeps a multi-line argument on one indented line', () => {
+    // A `content` argument with newlines used to leak them into the pane: the
+    // wrapper did not split on them, so the text after a newline rendered at
+    // column 0 (the stray `"""` in the report).
+    const pane = new DmlToolPane({
+      toolName: 'write_file',
+      args: { content: '#!/usr/bin/env python3\n"""docstring"""\nprint(1)', path: 's.py' },
+    });
+    pane.setResult({ ok: true }, true, 1);
+    const lines = pane.render(80);
+    expect(lines.every((line) => !line.includes('\n'))).toBe(true);
+    expect(lines.join('\n')).toContain('#!/usr/bin/env python3');
+    expect(lines.join('\n')).toContain('⏎');
+  });
 });
 
 describe('the frame fills the terminal', () => {

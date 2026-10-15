@@ -961,13 +961,26 @@ export class ReplRenderer implements ReplEventRenderer {
       if (!this.atLineStart) {
         this.sink('\n');
       }
-      const prefix = this.frameLabel(event);
-      if (prefix) this.sink(prefix);
       this.lastStreamFrame = key;
+      this.atLineStart = true;
+    }
+    const prefix = this.frameLabel(event);
+    // A provider delta often ends one line and starts the next, so a chunk can
+    // contain newlines. Re-apply the frame prefix at the start of every line, or
+    // the text after an embedded newline loses the tree indentation (`reasoning`
+    // inside an `execute` was the visible case).
+    const parts = chunk.split('\n');
+    for (let index = 0; index < parts.length; index += 1) {
+      if (index > 0) {
+        this.sink('\n');
+        this.atLineStart = true;
+      }
+      const part = parts[index];
+      if (part === '') continue;
+      if (this.atLineStart && prefix) this.sink(prefix);
+      this.sink(part);
       this.atLineStart = false;
     }
-    this.sink(chunk);
-    this.atLineStart = chunk.endsWith('\n');
   }
 
   /** Close an open streamed-text region before writing a line. */

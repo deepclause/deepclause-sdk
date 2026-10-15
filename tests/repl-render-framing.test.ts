@@ -33,6 +33,28 @@ const bash = (result: Record<string, unknown>): DMLEvent => ({
   toolResult: result,
 });
 
+describe('streamed framing', () => {
+  it('re-applies the frame prefix after a newline inside a chunk', () => {
+    // A provider delta can end one line and start the next; the text after the
+    // newline used to render at column 0, outside the `execute` tree.
+    const lines = renderEvents([
+      { type: 'reasoning', frameKind: 'nested', depth: 1, content: 'first line\nsecond line' },
+    ]);
+    const withText = lines.filter((line) => line.includes('line'));
+    expect(withText.length).toBeGreaterThanOrEqual(2);
+    expect(withText.every((line) => line.includes('│'))).toBe(true);
+  });
+
+  it('indents a reasoning chunk that starts on a fresh line', () => {
+    const lines = renderEvents([
+      { type: 'reasoning', frameKind: 'nested', depth: 1, content: 'line one\n' },
+      { type: 'reasoning', frameKind: 'nested', depth: 1, content: 'line two' },
+    ]);
+    const withText = lines.filter((line) => line.includes('line '));
+    expect(withText.every((line) => line.includes('│'))).toBe(true);
+  });
+});
+
 describe('tool result framing', () => {
   it('summarises a large JSON result and shows its head, not its tail', () => {
     const stdout = `{\n${Array.from({ length: 400 }, (_, i) => `  "line${i}": "value ${i}",`).join('\n')}\n}`;

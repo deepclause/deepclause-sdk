@@ -251,9 +251,9 @@ export class DmlToolPane implements Component {
   }
 }
 
-/** Bound a value for a header line. */
+/** Bound a value for a header line. Newlines collapse so the value stays one line. */
 function shortValue(value: unknown): string {
-  const text = typeof value === 'string'
+  const raw = typeof value === 'string'
     ? value
     : (() => {
       try {
@@ -262,6 +262,10 @@ function shortValue(value: unknown): string {
         return String(value);
       }
     })();
+  // A multi-line argument (a script's `content`, say) must not carry its newlines
+  // into the pane: the wrapper does not split on them, so the text after a newline
+  // rendered at column 0, outside the tree indentation.
+  const text = raw.replace(/\s*\n\s*/g, ' ⏎ ');
   return text.length > 60 ? `${text.slice(0, 57)}…` : text;
 }
 
