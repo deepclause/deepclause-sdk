@@ -580,6 +580,19 @@ process_clause((:- Directive), SessionId) :-
     !,
     process_directive(Directive, SessionId).
 
+%% Handle tool/3: description plus per-input types.
+%%   tool(Head, Description, [object, number]) :- Body.
+%% The leading args are inputs (typed from the list); the last arg is the output.
+process_clause((tool(ToolHead, Description, Types) :- Body), SessionId) :-
+    !,
+    (catch(expand_dict_dots(Body, ExpandedBody), _, fail) -> true ; ExpandedBody = Body),
+    extract_tool_schema(ToolHead, Description, Types, ToolName, Schema),
+    assertz(session_user_tools(SessionId, ToolName)),
+    assertz(session_user_tool_schema(SessionId, ToolName, Schema)),
+    format_tool_source(ToolHead, Description, Types, Body, SourceCode),
+    assertz(SessionId:tool_source(ToolName, SourceCode)),
+    assertz(SessionId:(tool(ToolHead) :- ExpandedBody)).
+
 %% Handle tool/2 with description: tool(Head, Description) :- Body
 process_clause((tool(ToolHead, Description) :- Body), SessionId) :-
     !,
@@ -700,9 +713,16 @@ expand_dict_expr(Expr, Expr).
 
 %% extract_tool_schema(+ToolHead, +Description, -ToolName, -Schema)
 extract_tool_schema(ToolHead, Description, ToolName, Schema) :-
+    extract_tool_schema(ToolHead, Description, [], ToolName, Schema).
+
+%% extract_tool_schema(+Head, +Description, +Types, -ToolName, -Schema)
+%% `Types` is an optional list giving the type of each input (the leading args,
+%% in order); a missing entry defaults to `string`. This is what lets a tool take
+%% an object, an array or a number rather than only a string.
+extract_tool_schema(ToolHead, Description, Types, ToolName, Schema) :-
     ToolHead =.. [ToolName|Args],
     length(Args, Arity),
-    extract_params(Args, 1, Arity, Inputs, Outputs),
+    extract_params(Args, 1, Arity, Types, Inputs, Outputs),
     (Description == none -> Desc = "" ; Desc = Description),
     Schema = schema{
         name: ToolName,
@@ -711,18 +731,27 @@ extract_tool_schema(ToolHead, Description, ToolName, Schema) :-
         outputs: Outputs
     }.
 
-%% extract_params(+Args, +Index, +Arity, -Inputs, -Outputs)
-extract_params([], _, _, [], []) :- !.
-extract_params([_Arg|Rest], Index, Arity, Inputs, Outputs) :-
+%% extract_params(+Args, +Index, +Arity, +Types, -Inputs, -Outputs)
+%% The last argument is the output; the rest are inputs, typed from `Types`.
+extract_params([], _, _, _, [], []) :- !.
+extract_params([_Arg|Rest], Index, Arity, Types, Inputs, Outputs) :-
     format(atom(Name), 'arg~w', [Index]),
-    Type = string,
     NextIndex is Index + 1,
-    extract_params(Rest, NextIndex, Arity, RestInputs, RestOutputs),
-    Param = param{name: Name, type: Type},
+    extract_params(Rest, NextIndex, Arity, Types, RestInputs, RestOutputs),
     (   Index == Arity
+    ->  IsOutput = true, Type = string
+    ;   IsOutput = false, input_type(Index, Types, Type)
+    ),
+    Param = param{name: Name, type: Type},
+    (   IsOutput == true
     ->  Inputs = RestInputs, Outputs = [Param|RestOutputs]
     ;   Inputs = [Param|RestInputs], Outputs = RestOutputs
     ).
+
+%% input_type(+Index, +Types, -Type): the Index-th input's declared type.
+input_type(1, [T|_], T) :- !.
+input_type(N, [_|Rest], T) :- N > 1, N1 is N - 1, input_type(N1, Rest, T).
+input_type(_, [], string).
 
 module_reference_string(Module, ModuleStr) :-
     atom(Module),
@@ -832,29 +861,33 @@ enable_capability(SessionId, Name) :-
     forall(capability_clause(Name, Clause), process_clause(Clause, SessionId)).
 
 capability_clause(forms,
-    (tool(render_form(SpecJson, FormId),
-          "Open (or replace) a form. SpecJson is the form spec as a JSON object string. Returns the form id.")
-        :- atom_json_dict(SpecJson, Spec, []), form(Spec, FormId))).
+    (tool(render_form(Spec, FormId),
+          "Open (or replace) a form. `Spec` is the form spec (version, title, fields, actions). Returns the form id.",
+          [object])
+        :- form(Spec, FormId))).
 capability_clause(forms,
-    (tool(update_form(FormId, PatchJson, Result),
-          "Update form values. PatchJson is a JSON merge patch object string.")
-        :- atom_json_dict(PatchJson, Patch, []), form_update(FormId, Patch), Result = ok)).
+    (tool(update_form(FormId, Patch, Result),
+          "Update form values with a JSON merge patch.",
+          [string, object])
+        :- form_update(FormId, Patch), Result = ok)).
 capability_clause(forms,
-    (tool(set_form_issues(FormId, IssuesJson, Result),
-          "Attach per-field errors/warnings. IssuesJson is a JSON array of {path, level, message}.")
-        :- atom_json_dict(IssuesJson, Issues, []), form_errors(FormId, Issues), Result = ok)).
+    (tool(set_form_issues(FormId, Issues, Result),
+          "Attach per-field errors/warnings. Issues is a list of {path, level, message}.",
+          [string, array])
+        :- form_errors(FormId, Issues), Result = ok)).
 capability_clause(forms,
     (tool(wait_for_form_change(FormId, Change),
-          "Wait for the user to act on a form. Change is a dict with action, values, revision and changed.")
+          "Wait for the user to act on a form. Change is a dict with action, values, revision and changed.",
+          [string])
         :- await_form(FormId, Change))).
 capability_clause(forms,
-    (tool(validate_form(ValuesJson, Result),
-          "Hard-validate form values (a JSON object string) without submitting. Result is a list of issues.")
-        :- atom_json_dict(ValuesJson, Values, []),
-           get_session_id(SessionId),
+    (tool(validate_form(Values, Result),
+          "Hard-validate values without submitting. Result is a list of issues.",
+          [object])
+        :- get_session_id(SessionId),
            form_validate_values(SessionId, Values, Result))).
 capability_clause(forms,
-    (tool(close_form(FormId, Result), "Close a form.")
+    (tool(close_form(FormId, Result), "Close a form.", [string])
         :- close_form(FormId), Result = ok)).
 
 %% repl_capabilities(+SessionId, -Names) / repl_has_capability(+SessionId, +Name)
@@ -1644,7 +1677,22 @@ export_clause(Head, Body) :-
 %% format_tool_source(+Head, +Description, +Body, -SourceCode)
 %% Source text for a tool, used by `listing(tools)` and export. Reverses the
 %% load-time task/prompt rewrites so readers see `task/N`, not `task_named/3`.
-format_tool_source(Head, none, Body, SourceCode) :-
+%% Render a tool clause back to source for `listing`/`export`.
+format_tool_source(Head, Description, Body, SourceCode) :-
+    format_tool_source(Head, Description, none, Body, SourceCode).
+
+%% With an explicit input-type list: `tool(Head, Desc, [object]) :- Body.`
+format_tool_source(Head, Description, Types, Body, SourceCode) :-
+    Types \== none,
+    !,
+    copy_term(Head-Description-Types-Body, NH-ND-NT-NB),
+    numbervars(NH-ND-NT-NB, 0, _),
+    clean_clause_body(NB, CleanBody),
+    (   CleanBody == true
+    ->  format(string(SourceCode), "tool(~q, ~q, ~q).", [NH, ND, NT])
+    ;   format(string(SourceCode), "tool(~q, ~q, ~q) :-~n    ~q.", [NH, ND, NT, CleanBody])
+    ).
+format_tool_source(Head, none, _Types, Body, SourceCode) :-
     !,
     copy_term(Head-Body, NH-NB),
     numbervars(NH-NB, 0, _),
@@ -1653,7 +1701,7 @@ format_tool_source(Head, none, Body, SourceCode) :-
     ->  format(string(SourceCode), "tool(~q).", [NH])
     ;   format(string(SourceCode), "tool(~q) :-~n    ~q.", [NH, CleanBody])
     ).
-format_tool_source(Head, Description, Body, SourceCode) :-
+format_tool_source(Head, Description, _Types, Body, SourceCode) :-
     copy_term(Head-Description-Body, NH-ND-NB),
     numbervars(NH-ND-NB, 0, _),
     clean_clause_body(NB, CleanBody),

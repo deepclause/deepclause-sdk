@@ -37,12 +37,12 @@ function backend(): LLMBackend {
 
       if (results.length === 0) {
         return toolCall('render_form', {
-          arg1: JSON.stringify({
+          arg1: {
             version: 1,
             title: 'Note',
             fields: [{ name: 'subject', type: 'string' }],
             actions: [{ name: 'submit', title: 'Save' }],
-          }),
+          },
         });
       }
       if (results.length === 1) {
