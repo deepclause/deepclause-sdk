@@ -66,8 +66,9 @@ CLI commands: `init`, `login`, `logout`, `set-backend`, `set-model`, `show-model
   module snapshot, memory, and mailbox. Built-ins: `spawn`/`spawn_opt`, `send`/
   `receive`/`receive_match`, `serve`/`service_call`/`service_cast`, `swarm`/`pmap`,
   `wait`, `exit`, `register`/`whereis`, `process_info`. The REPL runs them with
-  the `spawn`/`ps`/`send`/`call`/`stop`/`swarm`/`wait` tools and the `/spawn`,
-  (`--logs` / `/stop`). Execution is `worker` (L2, the default: a `worker_threads`
+  the `ps`/`send`/`stop`/`swarm`/`wait` tools (and `execute` for `spawn` /
+  `service_call`) and the `/spawn`, `/ps`, `/send`, `/call`, `/stop` commands.
+  Execution is `worker` (L2, the default: a `worker_threads`
   thread with its own WASM, true parallelism and hard cancellation) or `inline`
   (L1, cooperative, in-process), selected by `--execution`; value semantics (copy
   on `spawn`/`send`) let the same DML run in both. See
