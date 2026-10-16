@@ -47,6 +47,8 @@ import type {
   LLMBackend,
   LLMBackendRequest,
   LLMBackendResponse,
+  FormEventPayload,
+  FormSubmitPayload,
   MemoryMessage,
   ToolDefinition,
   ToolPolicy,
@@ -78,6 +80,7 @@ import {
   type DiagramMode,
 } from '../visualize/index.js';
 import { generateLlmReply } from '../prolog/bridge.js';
+import { FormRegistry } from '../forms/registry.js';
 import type { Provider } from '../system/config/model-slots.js';
 import type { ModelResolver } from './model-resolver.js';
 import { formatModelCatalogEntry } from './model-resolver.js';
@@ -124,6 +127,11 @@ export interface DMLSessionOptions {
   onInputRequired?: (prompt: string) => Promise<string>;
   /** Unified human-in-the-loop channel for meta ask_user and harness input/2. */
   onInput?: (prompt: string, options?: string[]) => Promise<string | undefined>;
+  /**
+   * Called when a form opens, so an interactive host can collect values and
+   * call `submitForm` (docs/DML_FORMS.md §9). Awaited inside the turn.
+   */
+  onForm?: (form: FormEventPayload) => void | Promise<void>;
   initialHarnessMemory?: MemoryMessage[];
   /** Maximum nested frame depth (execute -> object task). Default 3. */
   maxDepth?: number;
@@ -286,6 +294,8 @@ export class DMLSession {
   private tools: Map<string, ToolDefinition>;
   private toolPolicy: ToolPolicy | null;
   private inputHandler?: (prompt: string, options?: string[]) => Promise<string | undefined>;
+  /** Host-side interaction for an opened form (docs/DML_FORMS.md). */
+  private formHandler?: (form: FormEventPayload) => void | Promise<void>;
   private maxDepth: number;
   private maxModelCalls: number;
   private hostToolsCatalog?: string;
@@ -337,6 +347,8 @@ export class DMLSession {
   /** Session-scoped subagents (spec §2). */
   private processBackend?: ProcessBackend;
   private processBackendPromise?: Promise<ProcessBackend>;
+  /** Form host state (docs/DML_FORMS.md); active only when the harness opts in. */
+  private readonly forms = new FormRegistry();
   /**
    * The harness snapshot new processes should run. On the main session this is
    * unset (children snapshot the live module); a worker host sets it to the
@@ -366,6 +378,7 @@ export class DMLSession {
       ?? (options.askUser ? (prompt, choices) => options.askUser!(prompt, choices).then((r) => ('cancelled' in r ? undefined : r.answer)) : undefined)
       ?? options.onInputRequired
       ?? undefined;
+    this.formHandler = options.onForm;
     this.maxDepth = options.maxDepth ?? 3;
     this.maxModelCalls = options.maxModelCalls ?? 100;
     this.modelCallBudget = this.maxModelCalls;
@@ -2136,6 +2149,7 @@ export class DMLSession {
       onInputRequired: inputHandler
         ? (prompt) => this.requireInput(prompt)
         : async () => undefined,
+      onForm: this.formHandler,
       signal: options.signal,
       onModelCall: () => this.reserveModelCall(),
       // A run that is not itself a process resolves primitives through the
@@ -2143,7 +2157,29 @@ export class DMLSession {
       onProcessRequest: options.process
         ? (request, signal) => options.process!.handle(request, signal)
         : (request, signal) => this.handleForeground(request, signal),
+      forms: this.forms,
     };
+  }
+
+  /** The session's form host (docs/DML_FORMS.md). */
+  formRegistry(): FormRegistry {
+    return this.forms;
+  }
+
+  /** Install the host-side interaction for opened forms. */
+  setFormHandler(handler?: (form: FormEventPayload) => void | Promise<void>): void {
+    this.formHandler = handler;
+  }
+
+  /**
+   * Send a form action from the UI (the REPL's half of the form protocol).
+   * Resolves an `await_form`/`wait_for_form_change` blocked in the session.
+   */
+  submitForm(formId: string, change: FormSubmitPayload): boolean {
+    const record = this.forms.get(formId);
+    if (!record || record.state !== 'open') return false;
+    this.forms.submit(formId, change.action, change.values ?? {}, change.errors ?? []);
+    return true;
   }
 
   // ---- TypeScript compaction (ported from pi) ----

@@ -3,6 +3,28 @@
 Status: **in progress.** Design lives in [`DML_FORMS.md`](DML_FORMS.md); this is
 how it gets built, in an order where every step is testable before the next one.
 
+## Progress
+
+| Phase | Status |
+|---|---|
+| 0 docs | done |
+| 1 spec + registry | done — `src/forms/{spec,registry}.ts`, 22 unit tests |
+| 2 event + `submitForm` | done — `form` `DMLEvent`, `sdk.submitForm`, `session.submitForm` |
+| 3 primitives | done — `form/2`, `form_update/2`, `form_errors/2`, `await_form/2,3`, `close_form/1`; runner handles both statuses at all three sites |
+| 4 capability + tools | done — `:- capability(forms)`, `require_capability/1`, and the `tool/2` wrappers loaded through `process_clause` |
+| 5 model-driven e2e | done — a `tool/2` body drives render → wait → submit under a scripted model |
+| 6 REPL | **partial** — the field-by-field wizard runs **live** (`onForm` in `src/cli/repl.ts`); the pi-tui form widget is next |
+
+Two things fixed along the way that the feature forced out:
+
+- **Host events were only drained mid-agent-loop when `streaming` was on.** A tool
+  blocking on a host request (a form wait, `exec(ask_user(...))`) could never reach
+  the consumer — a latent deadlock. The drain now always runs; non-streaming
+  queues no stream chunks, so behaviour is unchanged elsewhere.
+- **`tool/2` inputs are all typed `string`** (`extract_params/5`), so a structured
+  argument is rejected. The capability tools take a JSON *string* for the spec and
+  the patch until typed tool inputs land.
+
 Guiding rule: **build the vertical slice that lets us drive a form in the REPL,
 then widen.** No phase depends on a later one.
 

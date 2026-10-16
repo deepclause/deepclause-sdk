@@ -6,6 +6,7 @@ import type { SWIPLModule } from './prolog/loader.js';
 import type {
   DMLBinding,
   DMLEvent,
+  FormEventPayload,
   FrameKind,
   ImageBackend,
   LLMBackendMedia,
@@ -256,6 +257,11 @@ export interface InternalRunOptions {
   initialMessages?: MemoryMessage[];
   /** Form host state, when the `forms` capability is active (docs/DML_FORMS.md). */
   forms?: FormRegistry;
+  /**
+   * Called when a form opens, so an interactive host can collect values. Awaited
+   * inside the step (like `onInputRequired`), so the run pauses until it returns.
+   */
+  onForm?: (form: FormEventPayload) => void | Promise<void>;
   /** Per-run default judgment backend name override. */
   judgeBackend?: string;
   /**
@@ -650,7 +656,10 @@ export class DMLRunner {
           // back so Prolog/MI keeps the encoding (docs/DML_FORMS.md §7).
           const payload = (step.payload ?? {}) as Record<string, unknown>;
           const event = this.handleFormRequest(payload, options.forms);
-          if (event) yield event;
+          if (event) {
+            yield event;
+            if (event.form?.op === 'open' && options.onForm) await options.onForm(event.form);
+          }
           break;
         }
 

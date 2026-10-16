@@ -8,6 +8,7 @@
 
 import type {
   DMLEvent,
+  FormEventPayload,
   ImageBackend,
   LLMBackend,
   MemoryMessage,
@@ -67,6 +68,8 @@ export interface HarnessReplOptions {
   executionBackend?: ExecutionBackendKind;
   /** Human-in-the-loop channel for DML `input/2` / `exec(ask_user(...))`. */
   askUser?: (prompt: string, options?: string[]) => Promise<{ answer: string } | { cancelled: true }>;
+  /** Called when a form opens (docs/DML_FORMS.md). */
+  onForm?: (form: FormEventPayload) => void | Promise<void>;
   /** Explicit judgment backend registry. When omitted, an `llm` backend is built from the active model. */
   judgeSelection?: JudgeSelection;
   /** Default judgment backend name (default: `'llm'`). */
@@ -243,6 +246,7 @@ export async function createHarnessRepl(options: HarnessReplOptions): Promise<Ha
     toolPolicy: options.toolPolicy,
     onInputRequired: options.onInputRequired,
     onInput: options.onInput,
+    onForm: options.onForm,
     maxDepth: options.maxDepth,
     maxModelCalls: options.maxModelCalls,
     hostToolsCatalog: options.hostToolsCatalog,

@@ -47,7 +47,8 @@ import { createReplToolset, type ReplToolset } from '../repl/toolset.js';
 import { takeStartupPrologMessages } from '../prolog/loader.js';
 import { createPiImageBackend } from '../repl/imagegen.js';
 import { EnvModelResolver, PiModelResolver, type ModelResolver } from '../repl/model-resolver.js';
-import type { ImageBackend } from '../types.js';
+import type { FormEventPayload, ImageBackend } from '../types.js';
+import type { JsonObject } from '../forms/spec.js';
 import { parseModelId, resolveModelSlotConfig, type Provider } from '../system/config/model-slots.js';
 import { loadReplConfig, resolveReplCompactionConfig, updateConfig } from './config.js';
 import {
@@ -376,6 +377,40 @@ export async function runGoalWithRenderer(
   return hadError ? 1 : 0;
 }
 
+/**
+ * The REPL's form interaction (v0): a field-by-field wizard over the existing
+ * input channel. The pi-tui form widget is the next step (docs/DML_FORMS.md §9).
+ */
+async function presentForm(repl: HarnessRepl, form: FormEventPayload): Promise<void> {
+  const spec = form.spec;
+  if (!spec) return;
+  const values: JsonObject = { ...(form.values ?? {}) };
+  const fields = (spec.fields ?? []).filter(
+    (field) => field.type !== 'object' && field.widget !== 'hidden',
+  );
+  for (const field of fields) {
+    const label = field.title ?? field.name;
+    const current = values[field.name];
+    const hint = current === undefined || current === '' ? '' : ` (${String(current)})`;
+    const answer = await repl.session.requestHumanInput(`${label}${field.required ? ' *' : ''}${hint}`);
+    if (answer === undefined) {
+      repl.session.submitForm(form.formId, { action: 'cancel', values });
+      return;
+    }
+    if (answer.trim() !== '') values[field.name] = coerceFieldValue(field.type, answer.trim());
+  }
+  repl.session.submitForm(form.formId, { action: 'submit', values });
+}
+
+function coerceFieldValue(type: string, raw: string): string | number | boolean {
+  if (type === 'number' || type === 'integer') {
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : raw;
+  }
+  if (type === 'boolean') return /^(y|yes|true|1)$/i.test(raw);
+  return raw;
+}
+
 function selectRenderMode(options: ReplCliOptions): RenderMode {
   if (options.json) return 'json';
   if (options.plain) return 'plain';
@@ -677,6 +712,7 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
     judgeSelection,
     imageBackend,
     modelResolver,
+    onForm: (form) => presentForm(repl, form),
     history: historyOptions,
     harness: harnessName,
     execution: options.execution,
