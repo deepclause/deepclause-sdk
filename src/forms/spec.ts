@@ -369,12 +369,13 @@ function validateLayout(
 export function validateValues(spec: FormSpec, values: JsonObject): FormIssue[] {
   const issues: FormIssue[] = [];
   for (const ref of walkFields(spec.fields)) {
-    validateValue(ref.field, ref.path, valueAt(values, ref.path), issues);
+    validateValue(ref.field, ref.path, valueAtPath(values, ref.path), issues);
   }
   return issues;
 }
 
-function valueAt(values: JsonObject, path: string): Json | undefined {
+/** Read a dotted field path out of a value tree. */
+export function valueAtPath(values: JsonObject, path: string): Json | undefined {
   const parts = path.split('.');
   let current: Json | undefined = values;
   for (const part of parts) {
