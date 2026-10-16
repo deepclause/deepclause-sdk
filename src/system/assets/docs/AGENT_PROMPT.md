@@ -1199,6 +1199,29 @@ tool(count_words(File, Count), "Count words in a workspace file.") :-
     count_words(File, Count).
 ```
 
+The tool head's **last argument is the output**; the ones before it are inputs. A
+tool that needs more than one input therefore needs a **result argument**: a write
+tool is `fs_write(Path, Content, Result)`, not `fs_write(Path, Content)` —
+otherwise the content is taken for the output, the model is never offered a way
+to pass it, and the write silently does nothing.
+
+```prolog
+fs_write(Path, Content, ok) :-
+    file_directory_name(Path, Dir),
+    ( Dir == "." -> true ; make_directory_path(Dir) ),
+    write_file(Path, Content).
+
+tool(fs_write(Path, Content, Result),
+     "Write a text file, creating parent directories.",
+     [string, string]) :-
+    fs_write(Path, Content, Result).
+```
+
+`tool/3` takes the **input types** after the description, in order, one per input
+(`[string, string]` above); the last argument is still the output. A tool whose
+output argument is left unbound fails with an explanation rather than reporting a
+silent success.
+
 The head and its delegate must have the **same name and the same arity**. The
 tool body is what runs when the nested agent calls the tool, so a body that
 calls a different arity either calls nothing (`existence_error`) or calls the

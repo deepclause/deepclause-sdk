@@ -724,6 +724,7 @@ extract_tool_schema(ToolHead, Description, ToolName, Schema) :-
 extract_tool_schema(ToolHead, Description, Types, ToolName, Schema) :-
     ToolHead =.. [ToolName|Args],
     length(Args, Arity),
+    tool_type_warning(ToolName, Arity, Types),
     extract_params(Args, 1, Arity, Types, Inputs, Outputs),
     (Description == none -> Desc = "" ; Desc = Description),
     Schema = schema{
@@ -754,6 +755,23 @@ extract_params([_Arg|Rest], Index, Arity, Types, Inputs, Outputs) :-
 input_type(1, [T|_], T) :- !.
 input_type(N, [_|Rest], T) :- N > 1, N1 is N - 1, input_type(N1, Rest, T).
 input_type(_, [], string).
+
+%% tool_type_warning(+Name, +Arity, +Types)
+%% The last argument of a tool head is the output, so a type list should label
+%% the other (Arity - 1) inputs. When it does not, the author has almost
+%% certainly written a tool whose second input was taken for its output — the
+%% `tool(fs_write(Path, Content), …)` shape, which silently writes nothing.
+tool_type_warning(ToolName, Arity, Types) :-
+    is_list(Types),
+    Types \== [],
+    length(Types, Declared),
+    Inputs is Arity - 1,
+    Declared =\= Inputs,
+    !,
+    format(user_error,
+        'Warning: tool ~w/~w declares ~w input type(s) but has ~w input argument(s). The last argument of a tool head is the output; a tool with another input needs a result argument (e.g. fs_write(Path, Content, ok)).~n',
+        [ToolName, Arity, Declared, Inputs]).
+tool_type_warning(_, _, _).
 
 module_reference_string(Module, ModuleStr) :-
     atom(Module),
@@ -3668,9 +3686,22 @@ create_tool_engine(SessionId, ToolName, Args, ToolEngineId) :-
         Goal = (
             nb_setval(current_session_id, SessionId),
             catch(
-                (mi_call(Body, InitialState, _FinalState),
-                 extract_tool_result_simple(TotalArity, InputArity, HeadArgs, ToolResult),
-                 engine_yield(tool_finished(ToolResult))),
+                (   mi_call(Body, InitialState, _FinalState),
+                    % A tool that declares an output but leaves it unbound has no
+                    % result. `extract_tool_result_simple/4` maps that to `true`, which
+                    % is how a `tool(fs_write(Path, Content), …)` (content taken for the
+                    % output) reported success while writing nothing.
+                    (   TotalArity > InputArity,
+                        last(HeadArgs, LastArg),
+                        var(LastArg)
+                    ->  format(atom(NoResult),
+                            'tool ~w returned no result: the last argument of the tool head is its output. To pass another input, give the predicate a result argument (e.g. fs_write(Path, Content, ok)) and declare its types with tool/3.',
+                            [ToolNameAtom]),
+                        engine_yield(tool_no_result(NoResult))
+                    ;   extract_tool_result_simple(TotalArity, InputArity, HeadArgs, ToolResult),
+                        engine_yield(tool_finished(ToolResult))
+                    )
+                ),
                 Error,
                 (handle_tool_engine_error(Error, ErrResult),
                  engine_yield(tool_finished(ErrResult)))
@@ -3714,6 +3745,9 @@ step_tool_engine(ToolEngineId, Status, Content, Payload) :-
 
 %% process_tool_engine_result(+Result, -Status, -Content, -Payload)
 process_tool_engine_result(tool_finished(ToolResult), finished, '', payload{result: ToolResult}) :- !.
+%% A tool whose output argument was never bound: surface it as an error, not a
+%% silent success (see create_tool_engine/4).
+process_tool_engine_result(tool_no_result(Message), error, Message, none) :- !.
 process_tool_engine_result(request_exec(Tool, Args), request_exec, '',
     payload{toolName: Tool, args: Args}) :- !.
 process_tool_engine_result(request_sample_token(Prompt, Allowed), request_sample_token, '',

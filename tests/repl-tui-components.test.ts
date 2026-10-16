@@ -183,6 +183,15 @@ describe('TuiRenderer', () => {
     return { document, working, renderer };
   }
 
+  it('observes every event, including the ones it does not draw', () => {
+    const seen: string[] = [];
+    const renderer = new TuiRenderer({ document: new TranscriptDocument(), onEvent: (event) => seen.push(event.type) });
+    renderer.render({ type: 'usage', usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } } as never);
+    renderer.render({ type: 'stream', content: 'hi' } as never);
+    // The status tracker is fed here; otherwise the TUI footer loses its counters.
+    expect(seen).toEqual(['usage', 'stream']);
+  });
+
   it('turns a tool call into a pane, and a result into its body', () => {
     const { document, renderer } = build();
     renderer.render({ type: 'tool_call', toolName: 'bash', toolState: 'starting', toolArgs: { command: 'ls' } });

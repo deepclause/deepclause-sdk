@@ -2512,6 +2512,9 @@ export class DMLRunner {
           }
 
           case 'error': {
+            // A tool-engine error (a thrown body, or a tool that returned no
+            // result). Report it as a failure so it is not mistaken for success.
+            onToolEvent?.(buildToolFailureEvent(toolName, {}, new Error(content)));
             return { result: { error: content }, outputs };
           }
           

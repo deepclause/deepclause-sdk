@@ -49,7 +49,7 @@ import { createReplToolset, type ReplToolset } from '../repl/toolset.js';
 import { takeStartupPrologMessages } from '../prolog/loader.js';
 import { createPiImageBackend } from '../repl/imagegen.js';
 import { EnvModelResolver, PiModelResolver, type ModelResolver } from '../repl/model-resolver.js';
-import type { FormEventPayload, ImageBackend } from '../types.js';
+import type { DMLEvent, FormEventPayload, ImageBackend } from '../types.js';
 import type { JsonObject } from '../forms/spec.js';
 import { pickForm } from '../repl/form-widget.js';
 import { parseModelId, resolveModelSlotConfig, type Provider } from '../system/config/model-slots.js';
@@ -508,6 +508,8 @@ export interface ReplRuntime {
   inputHistory: string[];
   /** Current usage/context/model status for the status bar. */
   statusSnapshot(): ReplStatusSnapshot;
+  /** Feed an event to the status tracker (the TUI renders through its own path). */
+  observeEvent(event: DMLEvent): void;
   /** Resolved interactive UI mode (`auto` unless overridden by config/flags). */
   tuiMode: 'auto' | 'on' | 'off';
   /** Replace the input channel (the interactive loop uses its own readline). */
@@ -605,7 +607,10 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
       llmBackend = pi.backend;
       harnessModel = pi.modelId.split('/').slice(1).join('/') || pi.modelId;
       harnessProvider = (pi.provider as Provider) ?? harnessProvider;
-      contextWindow = pi.contextWindow;
+      contextWindow = pi.contextWindow ?? resolveModelSlotConfig(config, 'run', {
+        modelId: options.model ?? config.models.run,
+        temperature: options.temperature ?? config.temperatures.run,
+      }).contextWindow;
       reasoning = pi.reasoning;
       thinkingLevel = pi.thinkingLevel;
       modelResolver = new PiModelResolver(pi.registry);
@@ -789,6 +794,7 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
     historyEnabled: Boolean(historyOptions),
     inputHistory,
     statusSnapshot: () => statusTracker.snapshot(),
+    observeEvent: (event) => statusTracker.observe(event),
     tuiMode: options.tui ?? config.repl.tui ?? 'auto',
     setOnInput: (handler) => repl.setOnInput(handler),
     missingCredential,
@@ -1432,6 +1438,9 @@ export async function runTui(
   const working = new WorkingLine(tui);
   const renderer = new TuiRenderer({
     document,
+    // The TUI draws through its own switch, but the status tracker must still see
+    // every event (usage, model_call, …) or the footer loses its counters.
+    onEvent: (event) => runtime.observeEvent(event),
     onWorking: (label) => {
       working.set(label);
       tui.requestRender();
