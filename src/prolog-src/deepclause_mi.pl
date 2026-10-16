@@ -111,7 +111,8 @@
     post_form_result/2,
     repl_capabilities/2,
     repl_has_capability/2,
-    form_validate_values/3
+    form_validate_values/3,
+    form_advisory_values/3
 ]).
 
 :- use_module(deepclause_strings).
@@ -888,6 +889,12 @@ capability_clause(forms,
         :- get_session_id(SessionId),
            form_validate_values(SessionId, Values, Result))).
 capability_clause(forms,
+    (tool(advisories(Values, Result),
+          "Advisory check of values (never blocks). Result is a list of issues.",
+          [object])
+        :- get_session_id(SessionId),
+           form_advisory_values(SessionId, Values, Result))).
+capability_clause(forms,
     (tool(close_form(FormId, Result), "Close a form.", [string])
         :- close_form(FormId), Result = ok)).
 
@@ -903,6 +910,15 @@ repl_has_capability(SessionId, Name) :-
 %% dicts. With no such predicate, there are no hard errors.
 form_validate_values(SessionId, Values, IssueDicts) :-
     (   catch((call(SessionId:form_validate(Values, Issues)), is_list(Issues)), _, fail)
+    ->  form_issue_dicts(Issues, IssueDicts)
+    ;   IssueDicts = []
+    ).
+
+%% form_advisory_values(+SessionId, +Values, -IssueDicts)
+%% The advisory twin of `form_validate_values/3`: reads the harness's
+%% `form_advisories/2` when it defines one. Never blocks anything.
+form_advisory_values(SessionId, Values, IssueDicts) :-
+    (   catch((call(SessionId:form_advisories(Values, Issues)), is_list(Issues)), _, fail)
     ->  form_issue_dicts(Issues, IssueDicts)
     ;   IssueDicts = []
     ).

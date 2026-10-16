@@ -110,3 +110,16 @@ describe('form widget', () => {
     expect(KEY(initialState(spec), 'escape').action?.type).toBe('cancel');
   });
 });
+
+describe('FormView (TUI panel)', () => {
+  it('renders nothing until a state is set, then the form lines', async () => {
+    const { FormView } = await import('../src/repl/tui/form-view.js');
+    const view = new FormView();
+    expect(view.render(80)).toEqual([]);
+    view.setState(initialState(spec, { vendor: 'acme' }));
+    expect(view.render(80).join('\n')).toContain('Vendor *: acme');
+    expect(() => view.invalidate()).not.toThrow();
+    view.setState(undefined);
+    expect(view.render(80)).toEqual([]);
+  });
+});

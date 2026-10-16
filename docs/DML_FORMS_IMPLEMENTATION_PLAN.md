@@ -15,12 +15,13 @@ how it gets built, in an order where every step is testable before the next one.
 | 5 model-driven e2e | done — a `tool/2` body drives render → wait → submit under a scripted model |
 | 6 REPL | done — a field widget (`src/repl/form-widget.ts`: focus, edit, toggle, `^s` submit, esc cancel) on the plain-TTY path, the wizard elsewhere, and the renderer shows the form + issues |
 | 7 typed tool inputs | done — `tool(Head, Desc, [Type, …])`, so a tool takes an object/number/array |
+| 8 TUI panel + advisories | done — a docked `FormView` (TUI edits fields through the editor, the panel updates live) and the `advisories/1` tool for `form_advisories/2` |
 
 ## Not yet built
 
-- **The widget in the TUI.** The TUI keeps the wizard: the widget takes over raw
-  stdin, which would fight the TUI's renderer. A pi-tui overlay (keys routed to a
-  `Component`) is the next step if the wizard is not enough there.
+- **In-place navigation in the TUI.** The panel shows the form and fields are
+  entered one prompt at a time; the raw widget (arrow between fields) is plain-TTY
+  only. A `Component` that owns keys would add it.
 - **Subagent-owned forms** (L2 forwarding), repeaters, `tabs`, cross-turn surfaces.
 
 Two things fixed along the way that the feature forced out:

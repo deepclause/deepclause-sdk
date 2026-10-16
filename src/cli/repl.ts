@@ -41,6 +41,8 @@ import {
 } from '@earendil-works/pi-tui';
 import { editorTheme, formatInputAnswer } from '../repl/tui/theme.js';
 import { PromptEditor } from '../repl/tui/editor.js';
+import { FormView } from '../repl/tui/form-view.js';
+import { applyFormKey, initialState, rows } from '../repl/form-widget.js';
 import { loadProjectContext } from '../repl/project-context.js';
 import { createPiBackend, THINKING_LEVELS } from '../repl/backend.js';
 import { createReplToolset, type ReplToolset } from '../repl/toolset.js';
@@ -1943,9 +1945,13 @@ export async function runTui(
   // the first and last line of output are not jammed against the chrome. Fixed
   // spacers rather than padding inside the scroll view: they do not scroll away and
   // do not consume scrollback.
+  // The form panel: shown while a form is open, and the TUI edits its fields
+  // through the editor (one prompt each), updating this panel as it goes.
+  const formView = new FormView();
   const dock = new VStack([
     { component: working, basis: 'auto', grow: 0, shrink: 1, minSize: 0 },
     { component: servicesPanel, basis: 'auto', grow: 0, shrink: 1, minSize: 0 },
+    { component: formView, basis: 'auto', grow: 0, shrink: 1, minSize: 0 },
     { component: new Spacer(1), basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
     { component: editorContainer, basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
     { component: statusBar, basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
@@ -1972,6 +1978,37 @@ export async function runTui(
     ]));
   };
   applyLayout();
+
+  // A form opened by the running turn is shown in the dock and edited field by
+  // field through the editor; the plain-TTY path uses the raw widget instead.
+  runtime.repl.session.setFormHandler(async (form) => {
+    const spec = form.spec;
+    if (!spec) return;
+    let state = initialState(spec, form.values ?? {}, form.issues ?? []);
+    formView.setState(state);
+    tui.requestRender();
+    const list = rows(spec);
+    try {
+      for (let index = 0; index < list.length; index += 1) {
+        const row = list[index];
+        if (row.kind !== 'field') continue;
+        const answer = await runtime.repl.session.requestHumanInput(`${row.title}${row.required ? ' *' : ''}`);
+        if (answer === undefined) {
+          runtime.repl.session.submitForm(form.formId, { action: 'cancel', values: state.values });
+          return;
+        }
+        if (answer !== '') {
+          state = applyFormKey({ ...state, focus: index, editing: true, buffer: answer }, 'enter').state;
+          formView.setState(state);
+          tui.requestRender();
+        }
+      }
+      runtime.repl.session.submitForm(form.formId, { action: 'submit', values: state.values });
+    } finally {
+      formView.setState(undefined);
+      tui.requestRender();
+    }
+  });
 
   tui.start();
 
