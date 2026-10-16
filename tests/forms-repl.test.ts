@@ -14,7 +14,6 @@ let workspace: string;
 let repl: HarnessRepl | undefined;
 
 const DML = `
-:- capability(forms).
 
 probe(Out) :-
     form(_{version: 1, title: "Note",
@@ -82,14 +81,21 @@ describe('forms in the REPL session', () => {
     expect(JSON.stringify(solution?.solution)).toContain('submit:hello:3');
   });
 
-  it('does not offer the form tools without the capability', async () => {
+  it('offers the form tools without any directive', async () => {
     repl = await createHarnessRepl({ workspacePath: workspace, model: 'test-model', provider: 'openai' });
+
+    // No `:- capability(forms).`: the tools are installed into every session, so
+    // they are visible to `task/N` / `with_tools` from the first turn.
+    const manifest = await repl.session.manifest();
+    expect(manifest).toContain('render_form');
+    expect(manifest).toContain('wait_for_form_change');
+
     await repl.session.beginTurn();
-    await repl.session.loadCode('probe :- form(_{version: 1, title: "X", fields: [_{name: n, type: string}]}, F), close_form(F).');
+    await repl.session.loadCode('probe(ok) :- form(_{version: 1, title: "X", fields: [_{name: n, type: string}]}, F), close_form(F).');
     await repl.session.endTurn();
 
     const events: DMLEvent[] = [];
-    for await (const event of repl.query('probe')) events.push(event);
-    expect(events.some((event) => event.type === 'error' && /not enabled/.test(event.content ?? ''))).toBe(true);
+    for await (const event of repl.query('probe(Out)')) events.push(event);
+    expect(events.some((event) => event.type === 'error')).toBe(false);
   });
 });

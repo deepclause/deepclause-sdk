@@ -107,12 +107,8 @@
     step_tool_engine/4,
     destroy_tool_engine/1,
     post_tool_agent_result/5,
-    % Forms capability (docs/DML_FORMS.md)
+    % Forms (docs/DML_FORMS.md)
     post_form_result/2,
-    repl_capabilities/2,
-    repl_has_capability/2,
-    repl_available_capabilities/1,
-    repl_capability_lines/2,
     form_validate_values/3,
     form_advisory_values/3,
     repl_normalize_message/2
@@ -166,7 +162,7 @@
 :- dynamic session_user_input/2.   % session_user_input(SessionId, Input) - for ask_user tool
 :- dynamic session_input_cancelled/1. % session_input_cancelled(SessionId) - input/2 should fail (non-interactive)
 :- dynamic session_form_result/2.  % session_form_result(SessionId, Result) - forms primitive results
-:- dynamic session_capability/2.   % session_capability(SessionId, Name) - enabled capabilities
+:- dynamic session_builtin_tool/2. % session_builtin_tool(SessionId, ToolName) - runtime-installed tools
 
 %% ============================================================
 %% DML Parsing
@@ -213,7 +209,7 @@ parse_dml_string(Code, SessionId) :-
 parse_clauses(Stream, SessionId) :-
     read_term(Stream, Term, [module(SessionId), variable_names(Bindings)]),
     (   Term == end_of_file
-    ->  true
+    ->  install_builtin_tools(SessionId)
     ;   preprocess_loaded_term(Term, Bindings, PreparedTerms),
         forall(member(PreparedTerm, PreparedTerms), process_clause(PreparedTerm, SessionId)),
         parse_clauses(Stream, SessionId)
@@ -861,96 +857,81 @@ process_directive(repl_delete(Name/Arity), SessionId) :-
     Arity >= 0,
     catch(abolish(SessionId:Name/Arity), _, true).
 
-%% process_directive(capability(+Name), +SessionId)
-%% A harness opts into a host capability. Recorded transactionally in
-%% session_capability/2, so rollback/reset revert it. See docs/DML_FORMS.md §4.
-process_directive(capability(Name), SessionId) :-
-    !,
-    (   capability_library(Name)
-    ->  assertz(session_capability(SessionId, Name)),
-        enable_capability(SessionId, Name)
-    ;   format(atom(Message), 'unknown capability: ~w', [Name]),
-        throw(error(domain_error(capability, Name), Message))
+%% ============================================================
+%% Built-in tools (docs/DML_FORMS.md)
+%% ============================================================
+%%
+%% These `tool/2` wrappers are installed into every session, so a harness can
+%% hand the model the form tools without declaring anything. They are ordinary
+%% `tool/N` clauses: assert them through `process_clause/2` (never into a
+%% harness's own clause set) and `task/N` offers them, `with_tools/2` scopes
+%% them, and an export carries the source so a standalone run works.
+%%
+%% The gate that used to guard this — `:- capability(forms).` — was removed: it
+%% was file-scoped (processed at load), so it was invisible to a module built
+%% through the edit tools, and a harness could not discover it, because a gated
+%% primitive is a handler and `current_predicate/1` reports `no` for handlers.
+
+install_builtin_tools(SessionId) :-
+    % The marker keeps these out of the harness's own surface — `listing`, the
+    % manifest's predicates, the export, and the end_turn probes — while they
+    % stay in `session_user_tool_schema/3`, so `task/N` and `with_tools/2` offer
+    % them. They are built in, not authored.
+    forall(builtin_tool_name(Name),
+        (   session_builtin_tool(SessionId, Name)
+        ->  true
+        ;   assertz(session_builtin_tool(SessionId, Name))
+        )),
+    % Idempotent: `parse_clauses/2` runs on every load, and a duplicate schema
+    % would show the model the same tool twice.
+    (   session_user_tool_schema(SessionId, render_form, _)
+    ->  true
+    ;   forall(builtin_tool_clause(Clause), process_clause(Clause, SessionId))
     ).
 
-%% capability_library(+Name)
-%% The host features a harness may declare. Add to this as capabilities grow.
-capability_library(forms).
+builtin_tool_name(render_form).
+builtin_tool_name(update_form).
+builtin_tool_name(set_form_issues).
+builtin_tool_name(wait_for_form_change).
+builtin_tool_name(validate_form).
+builtin_tool_name(advisories).
+builtin_tool_name(close_form).
 
-%% enable_capability(+SessionId, +Name)
-%% Loads the capability's DML surface through the normal clause path, so the
-%% `tool/2` wrappers land in session_user_tools/2 and `task/N` offers them.
-enable_capability(SessionId, Name) :-
-    forall(capability_clause(Name, Clause), process_clause(Clause, SessionId)).
-
-capability_clause(forms,
+builtin_tool_clause(
     (tool(render_form(Spec, FormId),
           "Open (or replace) a form. `Spec` is the form spec (version, title, fields, actions). Returns the form id.",
           [object])
         :- form(Spec, FormId))).
-capability_clause(forms,
+builtin_tool_clause(
     (tool(update_form(FormId, Patch, Result),
           "Update form values with a JSON merge patch.",
           [string, object])
         :- form_update(FormId, Patch), Result = ok)).
-capability_clause(forms,
+builtin_tool_clause(
     (tool(set_form_issues(FormId, Issues, Result),
           "Attach per-field errors/warnings. Issues is a list of {path, level, message}.",
           [string, array])
         :- form_errors(FormId, Issues), Result = ok)).
-capability_clause(forms,
+builtin_tool_clause(
     (tool(wait_for_form_change(FormId, Change),
           "Wait for the user to act on a form. Change is a dict with action, values, revision and changed.",
           [string])
         :- await_form(FormId, Change))).
-capability_clause(forms,
+builtin_tool_clause(
     (tool(validate_form(Values, Result),
           "Hard-validate values without submitting. Result is a list of issues.",
           [object])
         :- get_session_id(SessionId),
            form_validate_values(SessionId, Values, Result))).
-capability_clause(forms,
+builtin_tool_clause(
     (tool(advisories(Values, Result),
           "Advisory check of values (never blocks). Result is a list of issues.",
           [object])
         :- get_session_id(SessionId),
            form_advisory_values(SessionId, Values, Result))).
-capability_clause(forms,
+builtin_tool_clause(
     (tool(close_form(FormId, Result), "Close a form.", [string])
         :- close_form(FormId), Result = ok)).
-
-%% repl_capabilities(+SessionId, -Names) / repl_has_capability(+SessionId, +Name)
-repl_capabilities(SessionId, Names) :-
-    findall(Name, session_capability(SessionId, Name), Names).
-repl_has_capability(SessionId, Name) :-
-    session_capability(SessionId, Name).
-
-%% repl_available_capabilities(-Names)
-%% Every gated capability this runtime knows, enabled or not. A harness cannot
-%% discover a gated primitive with current_predicate/1 (handlers are not
-%% clauses), so the runtime has to say so.
-repl_available_capabilities(Names) :-
-    findall(Name, capability_library(Name), Names0),
-    sort(Names0, Names).
-
-%% repl_capability_lines(+SessionId, -Text)
-%% A one-line summary for the manifest: `forms (disabled)`. The agent sees this
-%% every turn, so the feature is discoverable before it is enabled.
-repl_capability_lines(SessionId, Text) :-
-    findall(Line,
-        (   capability_library(Name),
-            (   session_capability(SessionId, Name)
-            ->  Status = enabled
-            ;   Status = disabled
-            ),
-            format(atom(Line), '~w (~w)', [Name, Status])
-        ),
-        Lines0),
-    sort(Lines0, Lines),
-    (   Lines == []
-    ->  Text = none
-    ;   atomic_list_concat(Lines, ', ', Text)
-    ).
 
 %% form_validate_values(+SessionId, +Values, -IssueDicts)
 %% Runs the harness's hard rules if it defines `form_validate/2`, and normalises
@@ -1020,6 +1001,10 @@ repl_benign_directive(discontiguous(_)).
 repl_benign_directive(discontiguous(_, _)).
 repl_benign_directive(multifile(_)).
 repl_benign_directive(multifile(_, _)).
+%% The capability gate was removed — every host feature is always available. An
+%% older file that still declares one loads unchanged; the directive is ignored
+%% rather than reported as a mystery "unhandled directive".
+repl_benign_directive(capability(_)).
 
 %% sandbox_kind_atom(+Raw, -Atom)
 %% A JS string or an atom in, an atom out.
@@ -1213,7 +1198,8 @@ create_session(SessionId, Params, HarnessMemory, MetaMemory) :-
     ),
     retractall(session_sandbox_backend(SessionId, _)),
     assertz(session_sandbox_backend(SessionId, SandboxKind)),
-    repl_inject_workspace_predicates(SessionId).
+    repl_inject_workspace_predicates(SessionId),
+    install_builtin_tools(SessionId).
 
 %% repl_abolish_user_predicates(+SessionId)
 %% Removes only the harness's own predicates; imported builtins are untouched.
@@ -1251,8 +1237,9 @@ clear_session(SessionId) :-
     retractall(repl_snapshot(SessionId, _)),
     retractall(session_user_tools(SessionId, _)),
     retractall(session_user_tool_schema(SessionId, _, _)),
-    retractall(session_capability(SessionId, _)),
-    repl_abolish_user_predicates(SessionId).
+    retractall(session_builtin_tool(SessionId, _)),
+    repl_abolish_user_predicates(SessionId),
+    install_builtin_tools(SessionId).
 
 %% destroy_session(+SessionId)
 %% Tears a REPL session down completely: clears the module/frames and removes
@@ -1527,6 +1514,13 @@ repl_user_predicate(_SessionId, Name, _Arity) :-
     history_predicate(Name),
     !,
     fail.
+%% Runtime-installed tools (the built-in form tools) are visible to `task/N` but
+%% are not part of the harness: they do not appear in `listing`, the manifest's
+%% predicates, the exported clauses, or the counts.
+repl_user_predicate(SessionId, Name, _Arity) :-
+    session_builtin_tool(SessionId, Name),
+    !,
+    fail.
 repl_user_predicate(SessionId, Name, Arity) :-
     % User DML clauses are asserted (interpreted) into the session module.
     % Exclude predicates imported via use_module (e.g. library(clpfd)) and
@@ -1539,6 +1533,7 @@ repl_user_predicate(SessionId, Name, Arity) :-
 
 internal_session_predicate(param).
 internal_session_predicate(param_decl).
+internal_session_predicate(tool).
 internal_session_predicate(tool_source).
 internal_session_predicate('__session__').
 internal_session_predicate(Name) :- workspace_predicate_name(Name).
@@ -1695,7 +1690,14 @@ export_directives(SessionId) :-
     ).
 
 export_tools(SessionId) :-
-    findall(Name, session_user_tool_schema(SessionId, Name, _), Names0),
+    % Built-in tools are re-installed on load (install_builtin_tools/1), so they
+    % are not written into the harness — an export carries the harness, not the
+    % runtime.
+    findall(Name,
+        (   session_user_tool_schema(SessionId, Name, _),
+            \+ session_builtin_tool(SessionId, Name)
+        ),
+        Names0),
     sort(Names0, Names),
     forall(member(Name, Names),
         (   SessionId:tool_source(Name, Source)
@@ -1737,7 +1739,11 @@ export_stats(SessionId, Clauses, Tools, Scripts) :-
         ),
         PredCounts),
     sum_list(PredCounts, Clauses),
-    findall(Name, session_user_tool_schema(SessionId, Name, _), ToolNames0),
+    findall(Name,
+        (   session_user_tool_schema(SessionId, Name, _),
+            \+ session_builtin_tool(SessionId, Name)
+        ),
+        ToolNames0),
     sort(ToolNames0, ToolNames),
     length(ToolNames, Tools),
     (   current_predicate(SessionId:script_file/2)
@@ -2384,7 +2390,6 @@ repl_manifest(SessionId, Manifest) :-
     ->  findall(PI-DocText, SessionId:doc(PI, DocText), Docs0)
     ;   Docs0 = []
     ),
-    repl_capability_lines(SessionId, CapabilityLines),
     repl_history_summary(SessionId, HistorySummary),
     with_output_to(string(Manifest),
         (   (   Summary == ""
@@ -2394,7 +2399,6 @@ repl_manifest(SessionId, Manifest) :-
             format("- predicates: ~w~n", [Preds]),
             format("- tools: ~w~n", [Tools]),
             format("- directives: ~w~n", [Directives]),
-            format("- capabilities: ~w~n", [CapabilityLines]),
             (   Docs0 == []
             ->  format("- docs: (none; add doc(Name/Arity, Text) facts)~n")
             ;   forall(member(PI-DocText, Docs0), format("- doc(~w): ~w~n", [PI, DocText]))
@@ -2687,6 +2691,9 @@ tool_contract_violation(SessionId, Warning) :-
     clause(SessionId:tool(Head), Body),
     compound(Head),
     Head =.. [Name|HeadArgs],
+    % Built-in tools call host handlers (`form/2`, …), which are not session
+    % predicates by design — they are not the author's to define.
+    \+ session_builtin_tool(SessionId, Name),
     length(HeadArgs, Arity),
     tool_body_goal(Body, Call),
     Call =.. [Callee|Args],
@@ -5142,26 +5149,12 @@ mi_call(input(Prompt, Input), StateIn, StateIn) :-
     ).
 
 %% ============================================================
-%% Forms (docs/DML_FORMS.md) — gated by `:- capability(forms).`
+%% Forms (docs/DML_FORMS.md)
 %% ============================================================
-
-%% require_capability(+Name)
-%% A capability a harness must declare. Fails with a precise message, so a
-%% missing directive never reads like a typo.
-require_capability(Name) :-
-    get_session_id(SessionId),
-    (   session_capability(SessionId, Name)
-    ->  true
-    ;   format(atom(Message),
-            'the `~w` capability is not enabled: add `:- capability(~w).` to the harness',
-            [Name, Name]),
-        throw(error(permission_error(use, capability, Name), Message))
-    ).
 
 %% mi_call(form(+Spec, -FormId), +StateIn, -StateOut)
 mi_call(form(Spec, FormId), StateIn, StateIn) :-
     !,
-    require_capability(forms),
     get_session_id(SessionId),
     engine_yield(request_form(open, Spec)),
     get_next_signal(SessionId, _),
@@ -5175,7 +5168,6 @@ mi_call(form(Spec, FormId), StateIn, StateIn) :-
 %% mi_call(form_update(+FormId, +Patch), +StateIn, -StateOut)
 mi_call(form_update(FormId, Patch), StateIn, StateIn) :-
     !,
-    require_capability(forms),
     get_session_id(SessionId),
     engine_yield(request_form(update, FormId, Patch)),
     get_next_signal(SessionId, _),
@@ -5185,7 +5177,6 @@ mi_call(form_update(FormId, Patch), StateIn, StateIn) :-
 %% Issues are `error(Path, Message)` / `warning(Path, Message)` terms.
 mi_call(form_errors(FormId, Issues), StateIn, StateIn) :-
     !,
-    require_capability(forms),
     form_issue_dicts(Issues, Dicts),
     get_session_id(SessionId),
     engine_yield(request_form(errors, FormId, Dicts)),
@@ -5195,7 +5186,6 @@ mi_call(form_errors(FormId, Issues), StateIn, StateIn) :-
 %% mi_call(close_form(+FormId), +StateIn, -StateOut)
 mi_call(close_form(FormId), StateIn, StateIn) :-
     !,
-    require_capability(forms),
     get_session_id(SessionId),
     engine_yield(request_form(close, FormId)),
     get_next_signal(SessionId, _),
@@ -5208,7 +5198,6 @@ mi_call(await_form(FormId, Change), StateIn, StateIn) :-
     mi_call(await_form(FormId, -1, Change), StateIn, StateIn).
 mi_call(await_form(FormId, Since, Change), StateIn, StateIn) :-
     !,
-    require_capability(forms),
     get_session_id(SessionId),
     engine_yield(wait_form(FormId, Since, 0)),
     get_next_signal(SessionId, _),
@@ -6104,7 +6093,7 @@ consult_string(Code, SessionId) :-
 consult_clauses(Stream, SessionId) :-
     read_term(Stream, Term, [module(SessionId), variable_names(Bindings)]),
     (   Term == end_of_file
-    ->  true
+    ->  install_builtin_tools(SessionId)
     ;   preprocess_loaded_term(Term, Bindings, PreparedTerms),
         forall(member(PreparedTerm, PreparedTerms), consult_process_term(PreparedTerm, SessionId)),
         consult_clauses(Stream, SessionId)
@@ -6372,7 +6361,7 @@ is_mi_special_predicate(wait(_)).
 is_mi_special_predicate(wait(_,_)).
 is_mi_special_predicate(param(_,_)).
 is_mi_special_predicate(param(_,_,_)).
-%% Forms (docs/DML_FORMS.md) — gated by `:- capability(forms).`
+%% Forms (docs/DML_FORMS.md)
 is_mi_special_predicate(form(_,_)).
 is_mi_special_predicate(form_update(_,_)).
 is_mi_special_predicate(form_errors(_,_)).

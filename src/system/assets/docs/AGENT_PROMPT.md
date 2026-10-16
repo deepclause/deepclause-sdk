@@ -130,8 +130,9 @@ variable: a predicate's arguments are how a caller supplies values.
 
 - `listing` — the whole module: skill description, predicates, and docs.
 - `listing("Name/Arity")` — one predicate.
-- `listing("tools")` / `listing("scripts")` — the module's tool annotations /
-  linked scripts.
+- `listing("tools")` / `listing("scripts")` — the tools a nested agent can call
+  (the module's own annotations, plus the built-in form tools) / the linked
+  scripts.
 
 Call `listing` at the start of a session and again after every change.
 
@@ -187,43 +188,21 @@ harness (`-l`, `/load`) is a user action; if that is what is wanted, say so rath
 than performing it as an edit.
 
 Other tools: `reference(topic)` reads the DeepClause docs (`language`,
-`authoring`, `forms`, `capabilities`, `patterns`, `examples`, `snippets`,
-`tools`).
+`authoring`, `forms`, `patterns`, `examples`, `snippets`, `tools`).
 
-# Capabilities (opt-in host features)
+# Forms (structured input)
 
-Some host features are **gated**: a harness must opt in with a directive at the
-top of the file.
-
-```prolog
-:- capability(forms).
-```
-
-The manifest you see each turn has a `- capabilities:` line (`forms (disabled)`),
-and `reference("capabilities")` lists what is available, what each offers, and how
-to enable it. Check there — **not** `current_predicate/1`.
-
-A gated primitive is an **interpreter handler, not a clause**. Exactly like
-`exec/2`, `current_predicate(form/2)` reports `no` in a session where forms work,
-so a probe concludes the opposite of the truth.
-
-The directive is **file-scoped**. It is processed when a **file** is loaded, so
-capabilities apply to a harness loaded from disk or run as a runner — not to a
-module assembled only through the edit tools above. There is no place for a
-directive in `begin_turn`/`define`; to use a capability, put the directive in a
-`.dml` file and load or run that (tell the user if that is what is wanted).
-
-**Forms** are the capability today: a harness renders a form, waits for the user
-to act, and acts on the answer.
+When a skill needs a decision or a few fields from the user, use a **form**
+rather than prose: the host renders it, validates it, and hands back values keyed
+by field name. Forms are always available — no directive, nothing to enable.
 
 ```prolog
-:- capability(forms).
 agent_main :-
     form(_{version: 1, title: "Note",
            fields: [_{name: subject, type: string, required: true},
                     _{name: body, type: string, widget: textarea}],
            actions: [_{name: submit, title: "Save"},
-                      _{name: cancel, title: "Cancel"}]}, F),
+                     _{name: cancel, title: "Cancel"}]}, F),
     await_form(F, Change),                 % Change.action is an atom
     (   Change.action == submit
     ->  get_dict(values, Change, Values),  % dict keyed by field name
@@ -232,11 +211,24 @@ agent_main :-
     ).
 ```
 
-The **host enforces the spec** (`required`, `enum`, ranges, `pattern`) on submit;
-add domain rules with `form_validate(+Values, -Errors)`. A rejected submit comes
-back as `action == invalid` with `errors`, so re-show them with
-`form_errors/2` and wait again. Never fabricate values. Full reference:
+The **host enforces the spec** on submit (`required`, `enum`, ranges, `pattern`),
+and you can add domain rules with `form_validate(+Values, -Errors)`. A rejected
+submit never arrives as `submit`: it comes back as `action == invalid` with
+`errors`, so re-show them with `form_errors/2` and wait again. Never fabricate
+values.
+
+`form/2` is a **host handler, not a clause**, so `current_predicate(form/2)`
+reports `no` — exactly as it does for `exec/2`. That is expected. The
+model-facing tools (`render_form`, `update_form`, `set_form_issues`,
+`wait_for_form_change`, `validate_form`, `advisories`, `close_form`) are built in,
+so `with_tools([render_form, wait_for_form_change, close_form, set_result,
+finish], task(…))` lets the model drive the loop itself. Full reference:
 `reference("forms")`.
+
+A form needs a **human**. `await_form/2` blocks the run until the UI submits, and
+a run with no UI resolves the wait (`cancel` / `unavailable`) rather than hanging.
+So exercise the logic *around* a form with `execute`, or ask the user to run it —
+never treat a missing answer as a real one.
 
 # Concurrency and subagents
 
@@ -361,9 +353,9 @@ country(ch, "Switzerland").
 rate(chf, 1.08, "2026-01").
 ```
 
-Facts persist across turns and sessions, appear in `listing` and the manifest,
-and travel with `export`. Prefer a fact for stable knowledge the user will ask
-about again; keep large datasets in a file or a linked script.
+Facts persist across turns and sessions, appear in `listing`, and travel with
+`export`. Prefer a fact for stable knowledge the user will ask about again; keep
+large datasets in a file or a linked script.
 
 The module also records its own **history**, queryable from DML (system-owned:
 excluded from `listing`/`export`, but callable):
@@ -851,7 +843,7 @@ More patterns: `reference("patterns")`; shapes: `reference("examples")`.
   - [system/1, user/1](#memory-predicates)
   - [output/1, yield/1, log/1](#output-predicates)
   - [answer/1](#answer1)
-  - [Forms (structured human input)](#forms-structured-human-input--opt-in)
+  - [Forms (structured human input)](#forms-structured-human-input)
 - [Processes and concurrency](#processes-and-concurrency)
 - [Control Flow](#control-flow)
 - [String Interpolation](#string-interpolation)
@@ -1798,16 +1790,13 @@ asker(Question, Answer) :-
     ).
 ```
 
-### Forms (structured human input) — opt-in
+### Forms (structured human input)
 
-A harness can ask the human a **structured question** and act on the answer.
-Forms are **off by default**: the file must declare the capability at the top.
+A harness can ask the human a **structured question** and act on the answer —
+typed, validated input instead of free text. Forms are always available: there is
+no directive and nothing to enable.
 
-```prolog
-:- capability(forms).
-```
-
-Then, in DML:
+In DML:
 
 ```prolog
 agent_main :-
@@ -1871,15 +1860,14 @@ Primitives: `form/2`, `form_update/2`, `form_errors/2`, `await_form/2,3`,
   `task/N` — `task("Design it.", object(Spec)), form(Spec, F)` — which the host
   validates and drives exactly the same way.
 
-Two things trip authors up:
+One thing surprises authors: `form/2` and friends are **host handlers, not
+clauses**, so `current_predicate(form/2)` reports `no` — exactly as it does for
+`exec/2`. That is expected; it does not mean forms are unavailable.
 
-- `form/2` and friends are **handlers, not clauses**: `current_predicate(form/2)`
-  reports `no` (as it does for `exec/2`). Do not use `current_predicate/1` to
-  test availability — read `reference("capabilities")` or the manifest's
-  `- capabilities:` line.
-- `:- capability(forms).` is **file-scoped**: it is processed at load, so it
-  applies to a harness loaded from a file (or run as a runner), not to a module
-  assembled only through REPL tools.
+The model-facing tools — `render_form`, `update_form`, `set_form_issues`,
+`wait_for_form_change`, `validate_form`, `advisories`, `close_form` — are **built
+in**, so `with_tools([render_form, wait_for_form_change], task(…))` works with no
+declaration.
 
 Full reference: `reference("forms")`.
 

@@ -2134,69 +2134,11 @@ export class DMLSession {
       case 'forms':
       case 'dml-forms':
         return this.loadDocAsset('dml-forms');
-      case 'capabilities':
-      case 'capability':
-        return this.capabilitiesReference();
       case 'tools':
         return this.hostToolsCatalog ?? '(no host capability tools registered)';
       default:
-        return `unknown reference topic '${topic}'. Topics: language, authoring, examples, patterns, snippets, forms, capabilities, tools.`;
+        return `unknown reference topic '${topic}'. Topics: language, authoring, examples, patterns, snippets, forms, tools.`;
     }
-  }
-
-  /**
-   * What a harness can be *allowed* to do, and how to allow it.
-   *
-   * Gated primitives (`form/2`, and future `http`/`sqlite`/…) are installed by a
-   * `:- capability(Name).` directive rather than declared as clauses, so
-   * `current_predicate/1` reports `no` for them — a working session looks like a
-   * missing feature. This topic (and the manifest's `- capabilities:` line) is
-   * how the authoring agent learns they exist.
-   */
-  capabilitiesReference(): string {
-    const available = toNameList(this.prologQuery(`deepclause_mi:repl_available_capabilities(Names)`)?.Names);
-    const enabled = new Set(
-      toNameList(this.prologQuery(`deepclause_mi:repl_capabilities('${this.sessionId}', Names)`)?.Names),
-    );
-
-    const lines = [
-      '# Capabilities',
-      '',
-      'Some host features are **gated**: a harness must opt in with a directive at',
-      'the top of the file, for example `:- capability(forms).`. The gate keeps the',
-      'default surface small, and the directive is recorded with the harness, so it',
-      'is versioned with it.',
-      '',
-      'Two facts matter when probing:',
-      '',
-      '- A gated primitive is an **interpreter handler, not a clause**.',
-      '  `current_predicate(form/2)` reports `no` in a session where forms work —',
-      '  exactly as `current_predicate(exec/2)` does. Use this topic (or the',
-      '  manifest) instead of `current_predicate/1` to test availability.',
-      '- The directive is **file-scoped**. It is processed at load, so it applies',
-      '  to a harness **loaded from a file** or run as a runner — not to a module',
-      '  assembled only through REPL tools (`begin_turn`/`define`/`execute` on a',
-      '  blank harness). To use a capability, put the directive in a `.dml` file',
-      '  and load or run that file.',
-      '',
-      '## Available',
-      '',
-    ];
-
-    if (available.length === 0) {
-      lines.push('(none in this runtime)');
-    }
-    for (const name of available) {
-      const meta = CAPABILITY_META[name];
-      lines.push(`- \`${name}\` — **${enabled.has(name) ? 'enabled' : 'disabled'}**${meta ? `: ${meta.summary}` : ''}`);
-      lines.push('');
-      lines.push(`  Enable with \`:- capability(${name}).\``);
-      if (meta?.primitives) lines.push(`  Primitives: ${meta.primitives}`);
-      if (meta?.tools) lines.push(`  Model tools (\`with_tools([...])\`): ${meta.tools}`);
-      if (meta?.reference) lines.push(`  Reference: \`reference("${meta.reference}")\``);
-    }
-
-    return lines.join('\n');
   }
 
   async execute(
@@ -2491,35 +2433,6 @@ export class DMLSession {
       .map((message) => `message{role: ${message.role}, content: ${quoteString(message.content)}}`)
       .join(', ');
   }
-}
-
-/**
- * The gated host features this runtime knows, and what each one offers. Kept
- * here (not in the `.pl`) because it is presentation: the live enabled/disabled
- * state comes from `repl_capabilities/2` and the list from
- * `capability_library/1`.
- *
- * When a capability is added: extend `capability_library/1`, this table, and the
- * bundled reference doc it points at.
- */
-const CAPABILITY_META: Record<
-  string,
-  { summary: string; primitives?: string; tools?: string; reference?: string }
-> = {
-  forms: {
-    summary:
-      'structured human input — render a form, wait for the user to act, and act on the result; the host enforces `required`/`enum`/range on submit',
-    primitives: 'form/2, form_update/2, form_errors/2, await_form/2,3, close_form/1',
-    tools:
-      'render_form, update_form, set_form_issues, wait_for_form_change, validate_form, advisories, close_form',
-    reference: 'forms',
-  },
-};
-
-/** A Prolog list result (atoms or strings) as a plain `string[]`. */
-function toNameList(value: unknown): string[] {
-  const raw = toJsValue(value);
-  return Array.isArray(raw) ? raw.map((item) => String(item)) : [];
 }
 
 /**

@@ -1,10 +1,11 @@
-%% sdk-examples/forms.dml — opt-in forms (docs/DML_FORMS.md).
+%% sdk-examples/forms.dml — forms (docs/DML_FORMS.md).
 %%
 %%   deepclause repl -l sdk-examples/forms.dml
 %%   /goal agent_main      # one round: render, wait, answer with what came back
 %%   /goal demo_loop       # the same form, re-rendered with errors until valid
 %%
-%% No model is needed for either. `agent_llm/0` is the model-driven variant.
+%% No model is needed for either; forms are built in, no directive. `agent_llm/0`
+%% is the model-driven variant.
 %%
 %% From a shell, without a model:
 %%   deepclause repl -l sdk-examples/forms.dml -g agent_main --answer 5     # accepted
@@ -12,8 +13,6 @@
 %%
 %% On a TTY, add `--plain` to get the field widget (arrows, enter, ^s submit)
 %% instead of the field-by-field wizard.
-
-:- capability(forms).
 
 %% ---------------------------------------------------------------- the form
 

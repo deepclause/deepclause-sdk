@@ -36,17 +36,15 @@ CLI commands: `init`, `login`, `logout`, `set-backend`, `set-model`, `show-model
   `delete`/`execute`/`reference`/`models`/`write_file`/`show_image`/
   `generate_image`/`visualize`), and can run several
   committed turns in one request.
-- **Capabilities (opt-in host features)**: a harness opts in with a directive at
-  the top of a file — `:- capability(forms).` — recorded transactionally, so a
-  failed turn that enabled one leaves nothing behind. **Forms** give a harness
-  typed, validated human input: `form/2` renders, `await_form/2` blocks until the
-  user acts (`submit`/`cancel`/`invalid`), the **host** enforces the spec
-  (`required`/`enum`/ranges) and the harness's `form_validate/2` on submit, and
-  `form_update/2`/`form_errors/2` re-render. Model-facing tools (`render_form`,
-  `wait_for_form_change`, …) let the loop live in `task/N`. Gated primitives are
-  **handlers, not clauses** (`current_predicate(form/2)` reports `no` in a
-  working session), so `reference("capabilities")` and the manifest's
-  `- capabilities:` line are how a harness discovers them.
+- **Forms**: a harness asks the human a **structured question** and acts on the
+  answer. Always available — no directive, no `use_module`. `form/2` renders,
+  `await_form/2` blocks until the user acts (`submit`/`cancel`/`invalid`), the
+  **host** enforces the spec (`required`/`enum`/ranges) and the harness's
+  `form_validate/2` on submit, and `form_update/2`/`form_errors/2` re-render. The
+  model-facing tools (`render_form`, `wait_for_form_change`, …) are installed as
+  built-in `tool/N` wrappers, so the loop can live in `task/N`. They are host
+  handlers, not clauses — `current_predicate(form/2)` reports `no`, exactly as it
+  does for `exec/2`.
 - **Transactions**: each turn snapshots the module and commits
   replace-by-predicate; a failed turn leaves the harness unchanged.
 - **Auditability**: `.deepclause/repl/` holds `history.dml` (append-only

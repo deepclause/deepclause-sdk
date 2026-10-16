@@ -15,7 +15,7 @@
   - [system/1, user/1](#memory-predicates)
   - [output/1, yield/1, log/1](#output-predicates)
   - [answer/1](#answer1)
-  - [Forms (structured human input)](#forms-structured-human-input--opt-in)
+  - [Forms (structured human input)](#forms-structured-human-input)
 - [Processes and concurrency](#processes-and-concurrency)
 - [Control Flow](#control-flow)
 - [String Interpolation](#string-interpolation)
@@ -962,16 +962,13 @@ asker(Question, Answer) :-
     ).
 ```
 
-### Forms (structured human input) — opt-in
+### Forms (structured human input)
 
-A harness can ask the human a **structured question** and act on the answer.
-Forms are **off by default**: the file must declare the capability at the top.
+A harness can ask the human a **structured question** and act on the answer —
+typed, validated input instead of free text. Forms are always available: there is
+no directive and nothing to enable.
 
-```prolog
-:- capability(forms).
-```
-
-Then, in DML:
+In DML:
 
 ```prolog
 agent_main :-
@@ -1035,15 +1032,14 @@ Primitives: `form/2`, `form_update/2`, `form_errors/2`, `await_form/2,3`,
   `task/N` — `task("Design it.", object(Spec)), form(Spec, F)` — which the host
   validates and drives exactly the same way.
 
-Two things trip authors up:
+One thing surprises authors: `form/2` and friends are **host handlers, not
+clauses**, so `current_predicate(form/2)` reports `no` — exactly as it does for
+`exec/2`. That is expected; it does not mean forms are unavailable.
 
-- `form/2` and friends are **handlers, not clauses**: `current_predicate(form/2)`
-  reports `no` (as it does for `exec/2`). Do not use `current_predicate/1` to
-  test availability — read `reference("capabilities")` or the manifest's
-  `- capabilities:` line.
-- `:- capability(forms).` is **file-scoped**: it is processed at load, so it
-  applies to a harness loaded from a file (or run as a runner), not to a module
-  assembled only through REPL tools.
+The model-facing tools — `render_form`, `update_form`, `set_form_issues`,
+`wait_for_form_change`, `validate_form`, `advisories`, `close_form` — are **built
+in**, so `with_tools([render_form, wait_for_form_change], task(…))` works with no
+declaration.
 
 Full reference: `reference("forms")`.
 

@@ -1,4 +1,11 @@
-# Implementation plan: forms (`:- capability(forms)`)
+# Implementation plan: forms
+
+> **Superseded in one respect.** Forms shipped, but the opt-in capability
+> directive this plan was built around (`:- capability(forms)`) was **removed** —
+> the primitives and the `tool/N` wrappers are now installed into every session
+> (`install_builtin_tools/1`). See [`DML_FORMS.md`](DML_FORMS.md) §4 for why. The
+> rest of this document is the record of how forms were built, and the phase
+> notes below still describe the shipped code apart from the gate.
 
 Status: **in progress.** Design lives in [`DML_FORMS.md`](DML_FORMS.md); this is
 how it gets built, in an order where every step is testable before the next one.

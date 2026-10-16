@@ -1,5 +1,5 @@
 /**
- * The model-facing path: a `task/N` agent calls the capability's form tools, and
+ * The model-facing path: a `task/N` agent calls the built-in form tools, and
  * the tool engine resolves the primitives through the same registry.
  */
 import { afterEach, describe, expect, it } from 'vitest';
@@ -15,7 +15,6 @@ afterEach(async () => {
 });
 
 const DML = `
-:- capability(forms).
 
 agent_main :-
     with_tools([render_form, wait_for_form_change, close_form],

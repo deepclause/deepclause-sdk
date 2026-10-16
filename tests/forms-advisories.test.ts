@@ -15,7 +15,6 @@ afterEach(async () => {
 });
 
 const DML = `
-:- capability(forms).
 
 form_advisories(Values, Advisories) :-
     findall(warning(amount, "an unusually large claim"),

@@ -5,11 +5,11 @@ answer, over several rounds, with the UI living outside the model. The agent
 declares a form, waits for a change, calls tools with the updated values, updates
 the form, and waits again.
 
-> **Status: implemented and opt-in.** A harness must declare
-> `:- capability(forms).` (section 4); without it the primitives fail with an
-explaining error. This document is both the reference and the design record.
+> **Status: implemented.** Forms are always available — there is no directive and
+> nothing to enable (§4 records why the original opt-in gate was removed). This
+> document is both the reference and the design record.
 >
-> **Built:** the directive and its transaction/snapshot handling; the primitives
+> **Built:** the primitives
 > `form/2`, `form_update/2`, `form_errors/2`, `await_form/2,3`, `close_form/1`;
 > the model tools `render_form`, `update_form`, `set_form_issues`,
 > `wait_for_form_change`, `validate_form`, `advisories`, `close_form`;
@@ -136,76 +136,42 @@ agent_main :-
 `form/2` is a *display* primitive (like `output/1`); `await_form/2` is the
 request. A program may render a form and never await it.
 
-## 4. Activation: opt-in capability libraries
+## 4. Activation: none — forms are always available
 
-Nothing above is active by default. A harness opts in once, at the top:
+There is nothing to enable. A harness calls `form/2` and it works, in the REPL, in
+`execute`, and in a `deepclause run` file.
 
-```prolog
-:- capability(forms).
-```
+This section is the record of why. Forms were first built behind an opt-in
+capability directive (`:- capability(forms).`). The gate was **removed**: it cost
+more than it bought, because the feature was invisible and the probe for it was
+actively misleading.
 
-`capability/1` is a DeepClause directive: it names a **host feature** a harness
-declares it needs. It is deliberately *not* spelled `use_module(library(...))` —
-there is no SWI module to load, and pretending otherwise would fail under plain
-SWI. The directive is intercepted in `process_directive/2`
-(`deepclause_mi.pl`) and does three things:
+- **A gated primitive is a handler, not a clause.** `current_predicate(form/2)`
+  reports `no` in a session where forms work — exactly as it does for `exec/2`.
+  An agent that checks availability the obvious way concludes the opposite of
+  the truth, and nothing in the language tells it otherwise.
+- **The directive was file-scoped.** It was processed at load, so it applied to a
+  harness loaded from a file, not to a module assembled through the edit tools
+  (`begin_turn`/`define`). A form could not be used until the author noticed and
+  moved to a file — a second, unrelated concept to learn.
+- **The gate guarded nothing dangerous.** A form is inert data rendered by the
+  host; the operations a model performs *after* reading it are gated by the
+  ordinary tool policy. Opting in bought no isolation.
 
-1. **Records it transactionally** as `session_capability(SessionId, forms)`. It
-   participates in `repl_snapshot_save/restore`, `rollback`, and `reset`, so a
-   failed turn that enabled forms leaves nothing behind — the same discipline as
-   `session_user_tools`.
-2. **Loads the DML surface through the normal clause path.** The `tool/2`
-   wrappers (`render_form`, `wait_for_form_change`, `update_form`, `close_form`)
-   and any helpers go through `process_clause/2`, so they land in
-   `session_user_tools/2` / `session_user_tool_schema/3` exactly like authored
-   tools. `task/N` therefore offers them, `with_tools/2` scopes them, and
-   `listing(tools)` shows them — with no special case in the agent loop.
-3. **Signals the host to activate its half.** After a load/commit, the session
-   reads `repl_capabilities(SessionId, Caps)` and registers the host tools and
-   the form host (registry + adapters).
+So the `tool/N` wrappers are now **installed into every session** by
+`install_builtin_tools/1` (`deepclause_mi.pl`), through the same `process_clause/2`
+path an authored tool takes. They land in `session_user_tools/2` /
+`session_user_tool_schema/3`, so `task/N` offers them, `with_tools/2` scopes them,
+`listing(tools)` shows them, and an export carries their source (a standalone run
+of a harness that uses them keeps working). The install is idempotent —
+`parse_clauses/2` runs on every load, and a duplicated schema would show the model
+the same tool twice.
 
-The primitives are always *defined* but **gated**: every `mi_call(form(...))` /
-`mi_call(await_form(...))` clause begins with `require_capability(forms)`, which
-throws a precise error when the directive is missing:
+The primitives themselves (`form/2`, `await_form/2`, …) are `mi_call` handlers and
+were always defined; only the gate in front of them was removed.
 
-```
-error: the `forms` capability is not enabled:
-       add `:- capability(forms).` to the harness
-```
-
-so a call cannot half-work, and a missing directive does not read like a typo.
-
-**Deactivation is the inverse.** `reset`/`rollback` retract
-`session_capability/2` and the capability's tool facts; the host re-syncs and
-drops the registered tools and the registry. Capability-provided tools are marked
-(`session_capability_tool/3`) so `export_harness` does **not** inline them —
-otherwise an exported harness that also carries the directive would load them
-twice.
-
-### Why a directive, not a config flag
-
-- **The requirement travels with the code.** A harness that needs forms says so;
-  its behaviour does not depend on ambient session config.
-- **It is transactional.** A turn that adds the directive and then fails rolls it
-  back, unlike a flag set once.
-- **It is the security story.** Enabling a capability is an explicit act by the
-  author, so there is no "forms are on and nobody noticed".
-
-### Refusing a capability
-
-A host may decline one — a headless run with no UI, or a locked-down embedding.
-The session exposes `onCapability(name)`; returning false either makes
-`await_form` resolve `unavailable` or refuses the load, the host's choice.
-Rendering is inert data either way; the tools the agent calls *afterwards* still
-pass the normal tool policy.
-
-### Generalization
-
-`forms` is one capability. The mechanism is deliberately generic so `http`,
-`sqlite`, `charts`, or a host-specific `approvals` library plug in the same way:
-each declares a name, a DML surface (tool declarations + helpers), and a host
-surface, and defaults to off. `library(clpfd)` keeps its SWI meaning; only names
-the host knows are capabilities.
+A file written against the old directive still loads: `capability/1` is a benign
+directive, ignored rather than reported as an unhandled one.
 
 ---
 
@@ -472,9 +438,10 @@ why `tabs` degrades in v1 rather than introducing a component.
 
 ## 10. Security and limits
 
-- **Off by default.** None of the surface exists unless the harness declares
-  `:- capability(forms).` (§4). That opt-in is the primary gate; there is
-  no ambient "forms are on".
+- **No gate.** The surface is installed into every session (§4). A form is
+  inert data rendered by the host; the operations a model performs *after*
+  reading it are gated by the ordinary tool policy, which is where the real
+  boundary sits.
 - Specs are **inert data**; renderers sanitize. Rendering is not a capability, so
   there is nothing further to gate once the capability is on.
 - **Submitting** leads the agent to call tools, and those already pass through the
@@ -535,8 +502,9 @@ validation.
 
 ## 12. What is built, and what is next
 
-**Built** (the status note at the top is the full list): the
-`:- capability(forms).` directive (§4); field types `string`, `number`,
+**Built** (the status note at the top is the full list): the primitives
+`form/2`, `form_update/2`, `form_errors/2`, `await_form/2,3`, `close_form/1` plus
+the built-in `tool/2` wrappers; field types `string`, `number`,
 `integer`, `boolean`, plus `object`/`array` groups; `enum`, `required`,
 `minLength`/`maxLength`, `minimum`/`maximum`, `pattern`; layout
 `row`/`column`/`grid`/`box`/`field`/`text`/`divider`; one active form per session;
@@ -578,7 +546,7 @@ Prolog `review_loop/2`. The DML owns policy; the model owns flow.
 | | Provided by | |
 |---|---|---|
 | Loop: when to generate, validate, finish | the model, inside `task/N` | tool calls |
-| Form tools | the capability | `render_form`, `update_form`, `close_form`, `wait_for_form_change`, `validate_form`, `advisories` |
+| Form tools | built in | `render_form`, `update_form`, `close_form`, `wait_for_form_change`, `validate_form`, `advisories` |
 | **Hard** rules | the harness | `form_validate(Values, Errors)` — Prolog |
 | **Soft** rules | the harness | `form_advisories(Values, Warnings)` — Prolog |
 | Domain facts | the harness | plain facts |
@@ -597,8 +565,6 @@ Two properties make a model-driven loop safe:
 ### A.1 Expense claim (mostly-fixed fields)
 
 ```prolog
-:- capability(forms).
-
 vendor(acme). vendor(globex). vendor(initech).
 category(travel). category(meals). category(supplies). category(software).
 currency(eur). currency(usd). currency(gbp).
@@ -672,8 +638,6 @@ email and country; a business also needs a legal name and, in the EU, a VAT id.
 The model decides what to render; the hard rules do not bend.
 
 ```prolog
-:- capability(forms).
-
 country(de). country(fr). country(gb). country(us).
 eu(de). eu(fr).
 vat_prefix(de, "DE"). vat_prefix(fr, "FR"). vat_prefix(gb, "GB").

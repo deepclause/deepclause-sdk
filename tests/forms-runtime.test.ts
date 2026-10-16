@@ -1,6 +1,7 @@
 /**
- * The forms capability, headless: a DML program renders a form, waits, and a
- * scripted consumer submits. No model, no UI.
+ * The forms, headless: a DML program renders a form, waits, and a
+ * scripted consumer submits. No model, no UI, and no directive — forms are built
+ * in.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -15,7 +16,6 @@ afterEach(async () => {
 });
 
 const WITH_CAPABILITY = `
-:- capability(forms).
 
 agent_main :-
     form(_{version: 1, title: "Note",
@@ -49,7 +49,7 @@ async function run(
   return { events, submitted };
 }
 
-describe('forms capability', () => {
+describe('forms', () => {
   it('renders a form and resumes when the UI submits', async () => {
     const { events, submitted } = await run(WITH_CAPABILITY);
     expect(submitted).toBe(true);
@@ -66,24 +66,26 @@ describe('forms capability', () => {
     expect(events.some((event) => event.type === 'answer' && event.content === 'cancel:')).toBe(true);
   });
 
-  it('refuses the primitives without the capability directive', async () => {
+  it('needs no directive: the primitives work in a plain run', async () => {
+    // The opt-in gate (`:- capability(forms).`) was removed; this is the guard
+    // that it does not come back and silently make forms unavailable again.
     const { events, submitted } = await run(
-      'agent_main :- form(_{version: 1, title: "X", fields: [_{name: n, type: string}]}, F), answer(F).',
+      'agent_main :- form(_{version: 1, title: "X", fields: [_{name: n, type: string}]}, F), await_form(F, C), answer(C.action).',
     );
-    expect(submitted).toBe(false);
-    const error = events.find((event) => event.type === 'error');
-    expect(error?.content).toContain('capability');
-    expect(error?.content).toContain('not enabled');
+    expect(submitted).toBe(true);
+    expect(events.some((event) => event.type === 'error')).toBe(false);
   });
 
-  it('rejects an unknown capability by name', async () => {
-    const { events } = await run(':- capability(nonsense).\nagent_main :- answer("ok").');
-    expect(events.some((event) => event.type === 'error' && /unknown capability/.test(event.content ?? ''))).toBe(true);
+  it('ignores a leftover capability directive', async () => {
+    // An older file still loads; `capability/1` is benign, not an "unhandled
+    // directive" warning the author has to decode.
+    const { events } = await run(':- capability(forms).\nagent_main :- answer("ok").');
+    expect(events.some((event) => event.type === 'answer' && event.content === 'ok')).toBe(true);
+    expect(events.some((event) => event.type === 'error')).toBe(false);
   });
 });
 
 const HARD_RULES = `
-:- capability(forms).
 
 form_validate(Values, Errors) :-
     findall(error(amount, "must be positive"),
@@ -102,7 +104,6 @@ agent_main :-
 describe('host-enforced hard validation', () => {
   it('enforces the declared spec constraints without a form_validate/2', async () => {
     const code = `
-:- capability(forms).
 agent_main :-
     form(_{version: 1, title: "T",
            fields: [_{name: subject, type: string, required: true}],

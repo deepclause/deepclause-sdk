@@ -671,7 +671,7 @@ concurrency), [`STATUS.md`](docs/STATUS.md) (current state),
 [`DML_MEDIA.md`](docs/DML_MEDIA.md),
 [`DML_MODEL_SWITCHING.md`](docs/DML_MODEL_SWITCHING.md),
 [`DML_REPL_WORKER_EXECUTION.md`](docs/DML_REPL_WORKER_EXECUTION.md) (plan),
-[`DML_FORMS.md`](docs/DML_FORMS.md) (design: auto-generated forms),
+[`DML_FORMS.md`](docs/DML_FORMS.md) (structured human input),
 [`JUDGMENT_BACKENDS.md`](docs/JUDGMENT_BACKENDS.md).
 
 ## License

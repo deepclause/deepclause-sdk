@@ -174,12 +174,9 @@ enter clauses or memory. Judgments stay text-only.
 ## 9. Forms: structured input from the user (opt-in)
 
 Use a form when the program needs **typed, validated** input rather than free
-text. Forms are off by default. The directive goes at the top of a **file** — the
-capability is processed at load, so it cannot be added through the edit tools:
+text. Forms are always available — no directive:
 
 ```prolog
-:- capability(forms).
-
 doc(collect_claim/0, "Collect an expense claim and file it. Example: /goal collect_claim.").
 
 collect_claim :-
@@ -216,9 +213,9 @@ form_validate(Values, Errors) :-
 
 `Change.action` is an **atom** (`submit`, `cancel`, `invalid`) — compare with
 `==`, never against `"submit"`. `current_predicate(form/2)` reports `no` even
-when forms work (it is a handler, like `exec/2`); check
-`reference("capabilities")`. The loop above is deterministic — no model. To let
-the **model** choose the form, drive the same primitives from `task/N` with
-`with_tools([render_form, wait_for_form_change, set_form_issues, advisories,
-close_form, set_result, finish], task(…))`; either way the host validates. See
-`reference("forms")` and `sdk-examples/forms.dml`.
+when forms work (it is a host handler, like `exec/2`). The loop above is
+deterministic — no model. To let the **model** choose the form, drive the same
+built-in tools from `task/N` with `with_tools([render_form,
+wait_for_form_change, set_form_issues, advisories, close_form, set_result,
+finish], task(…))`; either way the host validates. See `reference("forms")` and
+`sdk-examples/forms.dml`.

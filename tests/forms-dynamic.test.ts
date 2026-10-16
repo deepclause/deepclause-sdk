@@ -23,7 +23,6 @@ const SPEC = {
 };
 
 const FROM_TASK = `
-:- capability(forms).
 
 agent_main :-
     task("Design a one-field intake form and return the spec.", object(Spec)),
@@ -85,7 +84,6 @@ describe('forms created by task/N', () => {
 });
 
 const DETERMINISTIC_LOOP = `
-:- capability(forms).
 
 form_validate(Values, Errors) :-
     findall(error(amount, "must be positive"),

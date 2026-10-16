@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Changed
+
+- **Forms are built in; the `:- capability(forms).` directive is gone.** The
+  opt-in gate made the feature effectively undiscoverable: `form/2` is a host
+  handler, so `current_predicate(form/2)` reports `no` even when forms work, and
+  the directive was file-scoped (processed at load), so it could not be added to
+  a module built through the edit tools. The primitives and the `tool/N` wrappers
+  (`render_form`, `update_form`, `set_form_issues`, `wait_for_form_change`,
+  `validate_form`, `advisories`, `close_form`) are now installed into every
+  session, and `reference("forms")` documents them. An older file that still
+  carries the directive loads unchanged — `capability/1` is ignored. The built-in
+  tools are not part of a harness: they stay out of `listing`, the manifest's
+  predicates, the export, and the `end_turn` probes, but appear in
+  `listing("tools")` and are offered to `task/N` / `with_tools/2`.
+- **A form's `action` is an atom in DML.** The host sent it as a JSON string, so
+  `Change.action == submit` — the documented idiom, and what every example used —
+  was silently always false, and a no-model loop fell through and answered
+  `invalid`. It is converted at the boundary; the model-facing tools re-serialize
+  to JSON, where it is a string again.
+
+### Added
+
+- **`reference("forms")`.** The bundled `DML_FORMS.md`, so the authoring agent can
+  discover the feature at runtime. `HARNESS_EXAMPLES.md` gained a runnable forms
+  example, and a Forms section (`AGENT_PROMPT.md` / `DML_REFERENCE.md`) explains the
+  primitives, the field vocabulary, and the submit/`invalid` loop.
+
 ### Fixed
 
 - **`--json` output is now pure JSON.** `repl --json -g` wrote a raw `false.`
