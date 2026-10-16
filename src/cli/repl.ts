@@ -434,6 +434,22 @@ function selectRenderMode(options: ReplCliOptions): RenderMode {
 }
 
 /**
+ * Should a form re-presented after a rejected submit be cancelled instead?
+ *
+ * A scripted run (`--answer`) supplies the same canned reply to every prompt. The
+ * host re-shows a refused submit so a *person* can correct it — but re-feeding the
+ * canned answer would refuse, re-show, refuse … forever. So in that mode the
+ * second presentation cancels and the run finishes. A model's own `update_form`
+ * carries no issues and is unaffected.
+ */
+export function cancelsScriptedRetry(
+  options: ReplCliOptions,
+  form: FormEventPayload,
+): boolean {
+  return options.answer !== undefined && form.op === 'update' && (form.issues?.length ?? 0) > 0;
+}
+
+/**
  * Build the unified input channel from CLI flags (proposal §13.6):
  *  - `--answer` supplies a canned reply; `--no-ask` fails immediately;
  *  - a TTY (or `--interactive-input`) prompts;
@@ -733,9 +749,15 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
     judgeSelection,
     imageBackend,
     modelResolver,
-    onForm: (form) => (options.plain && process.stdin.isTTY && process.stdout.isTTY
-      ? presentFormWidget(repl, form)
-      : presentForm(repl, form)),
+    onForm: async (form) => {
+      if (cancelsScriptedRetry(options, form)) {
+        repl.session.submitForm(form.formId, { action: 'cancel', values: form.values ?? {} });
+        return;
+      }
+      return options.plain && process.stdin.isTTY && process.stdout.isTTY
+        ? presentFormWidget(repl, form)
+        : presentForm(repl, form);
+    },
     history: historyOptions,
     harness: harnessName,
     execution: options.execution,

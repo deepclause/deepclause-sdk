@@ -51,13 +51,18 @@ function backend(value: unknown): LLMBackend {
   };
 }
 
-async function run(code: string, values: Record<string, unknown>): Promise<DMLEvent[]> {
+async function run(code: string, ...attempts: Array<Record<string, unknown>>): Promise<DMLEvent[]> {
   const events: DMLEvent[] = [];
-  for await (const event of sdk!.runDML(code)) {
+  let next = 0;
+  for await (const event of sdk!.runDML(code, {
+    onForm: async (form) => {
+      const values = attempts[next];
+      if (values === undefined) return;
+      next += 1;
+      sdk!.submitForm(form.formId, { action: 'submit', values: values as never });
+    },
+  })) {
     events.push(event);
-    if (event.type === 'form' && event.form?.op === 'open') {
-      sdk!.submitForm(event.form.formId, { action: 'submit', values: values as never });
-    }
   }
   return events;
 }
@@ -77,9 +82,11 @@ describe('forms created by task/N', () => {
   it('enforces the model-authored spec\'s own constraints', async () => {
     sdk = await createDeepClause({ model: 'test-model', llmBackend: backend(SPEC) });
 
-    // `subject` is required in the *generated* spec: the host rejects an empty submit.
-    const events = await run(FROM_TASK, { subject: '' });
-    expect(events.some((event) => event.type === 'answer' && event.content === 'invalid')).toBe(true);
+    // `subject` is required in the *generated* spec, so the host refuses the empty
+    // submit and waits; the harness only ever sees the valid one.
+    const events = await run(FROM_TASK, { subject: '' }, { subject: 'hello' });
+    expect(events.some((event) => event.type === 'answer' && event.content === 'submit')).toBe(true);
+    expect(events.some((event) => event.type === 'answer' && event.content === 'invalid')).toBe(false);
   });
 });
 
@@ -94,35 +101,23 @@ agent_main :-
     form(_{version: 1, title: "Claim",
            fields: [_{name: amount, type: integer}],
            actions: [_{name: submit, title: "Go"}]}, F),
-    loop(F).
-
-loop(F) :-
-    await_form(F, Change),
-    get_dict(action, Change, Action),
-    (   Action == invalid
-    ->  get_dict(errors, Change, Errors),
-        form_errors(F, Errors),
-        loop(F)
-    ;   close_form(F),
-        answer(Action)
-    ).
+    await_form(F, Change),          % waits through refused submits
+    close_form(F),
+    answer(Change.action).
 `;
 
 describe('forms driven by a Prolog loop (no model)', () => {
-  it('re-renders on invalid, then accepts', async () => {
+  it('waits through a refused submit and answers with the accepted one', async () => {
     sdk = await createDeepClause({ model: 'test-model' });
     const events: DMLEvent[] = [];
-    const opens: string[] = [];
     const answers: string[] = [];
     let submits = 0;
 
     for await (const event of sdk.runDML(DETERMINISTIC_LOOP)) {
       events.push(event);
       if (event.type === 'answer' && event.content) answers.push(event.content);
-      if (event.type === 'form' && event.form?.op === 'open') opens.push(event.form.formId);
       if (event.type === 'form' && (event.form?.op === 'open' || event.form?.op === 'update')) {
         submits += 1;
-        // First submit is invalid, the second is accepted.
         sdk.submitForm(event.form.formId, {
           action: 'submit',
           values: { amount: submits === 1 ? -1 : 5 } as never,
@@ -131,6 +126,8 @@ describe('forms driven by a Prolog loop (no model)', () => {
     }
 
     expect(answers).toContain('submit');
-    expect(events.some((event) => event.type === 'form' && event.form?.op === 'update')).toBe(true);
+    expect(submits).toBe(2);
+    // The refusal was surfaced on the form, not returned to the harness.
+    expect(events.some((event) => event.type === 'form' && (event.form?.issues?.length ?? 0) > 0)).toBe(true);
   });
 });

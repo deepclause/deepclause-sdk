@@ -3,7 +3,13 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { classifyReplInput, formatTurnInput, runGoalWithRenderer, runInteractiveGoal } from '../src/cli/repl.js';
+import {
+  cancelsScriptedRetry,
+  classifyReplInput,
+  formatTurnInput,
+  runGoalWithRenderer,
+  runInteractiveGoal,
+} from '../src/cli/repl.js';
 import { ReplRenderer } from '../src/repl/render.js';
 import type { DMLEvent } from '../src/types.js';
 import type { HarnessRepl } from '../src/repl/index.js';
@@ -184,5 +190,27 @@ describe('runInteractiveGoal pager', () => {
     await runInteractiveGoal(fakeRepl(events), renderer, 'member(X,[a,b])', {} as never, async () => '.');
     expect(lines.join('')).toContain('X = a');
     expect(lines.join('')).not.toContain('X = b');
+  });
+});
+
+describe('scripted form answers', () => {
+  // The host re-shows a rejected submit so a person can correct it. With
+  // `--answer` the same canned reply would be refused, re-shown, refused …
+  // forever, so the retry cancels instead. This hung `repl -g agent_main
+  // --answer ""` on sdk-examples/forms.dml.
+  const rejection = { op: 'update' as const, formId: 'f1', revision: 2, issues: [{ path: 'amount', level: 'error' as const, message: 'is required' }] };
+
+  it('cancels a retry when the run is scripted', () => {
+    expect(cancelsScriptedRetry({ answer: '' } as never, rejection)).toBe(true);
+    expect(cancelsScriptedRetry({ answer: '5' } as never, rejection)).toBe(true);
+  });
+
+  it('leaves interactive runs, the first presentation, and plain updates alone', () => {
+    // No canned answer: a person is there to answer again.
+    expect(cancelsScriptedRetry({} as never, rejection)).toBe(false);
+    // The first presentation is not a retry.
+    expect(cancelsScriptedRetry({ answer: '' } as never, { ...rejection, op: 'open', issues: [] })).toBe(false);
+    // A model's `update_form` carries no issues and must not be cancelled.
+    expect(cancelsScriptedRetry({ answer: '' } as never, { ...rejection, issues: [] })).toBe(false);
   });
 });

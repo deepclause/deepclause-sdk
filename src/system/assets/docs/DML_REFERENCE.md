@@ -964,82 +964,74 @@ asker(Question, Answer) :-
 
 ### Forms (structured human input)
 
-A harness can ask the human a **structured question** and act on the answer —
-typed, validated input instead of free text. Forms are always available: there is
-no directive and nothing to enable.
+A form asks the human for typed, validated input and hands the values back keyed
+by field name. Forms are always available — there is no directive and nothing to
+enable.
 
-In DML:
+**Two shapes**, by where the fields come from: **dynamic** — the model designs
+the form from a description (give `task/N` the form tools); **fixed** — the spec
+is written in the code, with no model. Both use the same registry and the same
+validation.
+
+**The spec.** `version` is not needed and a field's `type` defaults to `string`:
+
+```prolog
+Spec = _{ title: "Refund request",
+          fields: [ _{name: amount, type: number, required: true},
+                    _{name: reason, type: string, widget: select, required: true,
+                      enum: ["duplicate_charge", "not_received", "other"]},
+                    _{name: notes,  widget: textarea, maxLength: 500} ],
+          actions: [ _{name: submit, title: "Issue refund", kind: primary},
+                     _{name: cancel, title: "Cancel", kind: link} ] }.
+```
+
+Field `type` is `string` (default), `number`, `integer`, `boolean`, or an
+`object` / `array` group; `enum` requires a `string` field. `widget` is a
+presentation hint only — `text | textarea | number | slider | select | radio |
+multiselect | checkbox | switch | date | time | datetime | hidden` — and never
+affects validation. `actions` defaults to submit/cancel.
+
+**Dynamic: a model drives the loop.** Give `task/N` the form tools and it
+designs the form from the prompt, waits, and reports:
+
+```prolog
+with_tools([render_form, wait_for_form_change, close_form, set_result, finish],
+    task("Ask for the amount and a reason, then report what the user entered.",
+         string(Summary)))
+```
+
+The model's three calls: `render_form(Spec)` → a form id;
+`wait_for_form_change(FormId)` → `{action, values, changed, errors}` with
+`action` = `"submit"` | `"cancel"`; `close_form(FormId)`.
+
+**Fixed: the harness drives it itself**, with no model, using the primitives
+`form/2`, `form_update/2`, `form_errors/2`, `await_form/2,3` and `close_form/1`:
 
 ```prolog
 agent_main :-
-    Spec = _{ version: 1, id: "refund", title: "Refund request",
-              description: "Review the charge.",
-              fields: [ _{name: amount, type: number, title: "Amount", required: true},
-                        _{name: reason, type: string, widget: select, required: true,
-                          enum: ["duplicate_charge", "not_received", "other"]},
-                        _{name: notes,  type: string, widget: textarea, maxLength: 500} ],
-              actions: [ _{name: submit, title: "Issue refund", kind: primary},
-                         _{name: cancel, title: "Cancel", kind: link} ] },
     form(Spec, F),                       % render; F is the form handle
     await_form(F, Change),               % blocks until the user acts
-    (   Change.action == submit
-    ->  get_dict(values, Change, Values),
-        get_dict(amount, Values, Amount),
-        close_form(F),
-        format(string(Msg), "refunding ~w", [Amount]),
-        answer(Msg)
-    ;   close_form(F),
-        answer(cancelled)
+    close_form(F),
+    (   Change.action == submit          % an atom: submit, cancel, …
+    ->  Change.values = Values           % dict keyed by field name
+    ;   Values = _{}
     ).
 ```
 
-`Change` is a dict `{ formId, revision, action, values, changed, errors }`.
-`action` is an **atom** — `submit`, `cancel`, `invalid`, `closed`, `cancelled`,
-`timeout`, `unavailable`, or an action the spec declared; `values` is a dict
-keyed by field name. A submit the host rejects comes back as `action == invalid`
-with `errors`, a list of `issue{path, level, message}`, so show them and wait
-again:
+`Change` is `{ formId, revision, action, values, changed, errors }`; `action` is
+an **atom**.
 
-```prolog
-loop(F) :-
-    await_form(F, Change),
-    (   Change.action == invalid
-    ->  form_errors(F, Change.errors),   % attach them to the form
-        loop(F)
-    ;   close_form(F),
-        answer(Change.action)
-    ).
-```
+**Validation is the host's.** On a submit the host enforces the spec (`required`,
+`enum`, ranges, `pattern`, lengths) and the harness's `form_validate(+Values,
+-Errors)`. A refused submit is never returned: the host puts the errors on the
+form and `await_form/2` / `wait_for_form_change` keeps waiting. Soft rules go in
+`form_advisories(+Values, -Advisories)` (never blocking; the `advisories` tool).
 
-Primitives: `form/2`, `form_update/2`, `form_errors/2`, `await_form/2,3`,
-`close_form/1`.
-
-- Field `type` is one of `string | number | integer | boolean`, plus `object`
-  and `array` groups; `enum` requires a `string` field.
-- `widget` is a presentation hint only — `text | textarea | number | slider |
-  select | radio | multiselect | checkbox | switch | date | time | datetime |
-  hidden` — and is never validated.
-- The **host enforces the spec** on submit (`required`, `enum`, ranges,
-  `pattern`, lengths). A harness adds domain rules with
-  `form_validate(+Values, -Errors)`; both block, and a rejected submit never
-  reaches the harness as `submit`.
-- Soft rules go in `form_advisories(+Values, -Advisories)`; they never block, and
-  the model reads them through the `advisories` tool.
-- Model-facing tools (`with_tools([...])`) let the **loop live in the model**
-  inside `task/N`: `render_form`, `update_form`, `set_form_issues`,
-  `wait_for_form_change`, `validate_form`, `advisories`, `close_form`.
-- A spec may be a literal (deterministic: no model, no `task/N`) or produced by
-  `task/N` — `task("Design it.", object(Spec)), form(Spec, F)` — which the host
-  validates and drives exactly the same way.
-
-One thing surprises authors: `form/2` and friends are **host handlers, not
-clauses**, so `current_predicate(form/2)` reports `no` — exactly as it does for
-`exec/2`. That is expected; it does not mean forms are unavailable.
-
-The model-facing tools — `render_form`, `update_form`, `set_form_issues`,
-`wait_for_form_change`, `validate_form`, `advisories`, `close_form` — are **built
-in**, so `with_tools([render_form, wait_for_form_change], task(…))` works with no
-declaration.
+`form/2` and friends are **host handlers, not clauses**, so
+`current_predicate(form/2)` reports `no` — exactly as it does for `exec/2`. That
+is expected; it does not mean forms are unavailable. The model-facing tools
+(`render_form`, `update_form`, `set_form_issues`, `wait_for_form_change`,
+`validate_form`, `advisories`, `close_form`) are built in.
 
 Full reference: `reference("forms")`.
 

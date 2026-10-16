@@ -100,14 +100,16 @@ describe('the reference tool serves forms', () => {
 describe('the forms example in HARNESS_EXAMPLES.md', () => {
   it('loads and runs (so the agent copies a shape that works)', async () => {
     const examples = await fs.readFile(examplesDoc, 'utf8');
-    const snippet = prologBlocks(examples).find((block) => block.includes('collect_claim'));
-    expect(snippet, 'HARNESS_EXAMPLES.md has no forms snippet').toBeTruthy();
+    // The no-model snippet: it is the one a test can drive end to end.
+    const snippet = prologBlocks(examples).find((block) => block.includes('claim_form(Values)'));
+    expect(snippet, 'HARNESS_EXAMPLES.md has no runnable forms snippet').toBeTruthy();
 
     let sdk: DeepClauseSDK | undefined;
     try {
       sdk = await createDeepClause({ model: 'test-model', provider: 'openai' });
       const answers: string[] = [];
-      for await (const event of sdk.runDML(`${snippet}\nagent_main :- collect_claim.`, {
+      const code = `${snippet}\nagent_main :- claim_form(V), format(string(M), "filed: ~w", [V]), answer(M).`;
+      for await (const event of sdk.runDML(code, {
         onForm: async (form) => {
           sdk!.submitForm(form.formId, {
             action: 'submit',

@@ -14,7 +14,8 @@ the form, and waits again.
 > the model tools `render_form`, `update_form`, `set_form_issues`,
 > `wait_for_form_change`, `validate_form`, `advisories`, `close_form`;
 > host-enforced hard validation (the spec's own constraints *and* the harness's
-> `form_validate/2`) with `action: invalid` + `errors`; soft `form_advisories/2`;
+> `form_validate/2`) — a refused submit is re-shown by the host and the wait
+> continues; soft `form_advisories/2`;
 > the `form` event and `submitForm`; a TUI panel and a plain-TTY widget;
 > `object`/`array` groups, `enum`, and the `row`/`column`/`grid`/`box` layout.
 >
@@ -66,15 +67,18 @@ In DML the `action` is an **atom**, so a harness tests it with `==`:
 await_form(F, Change),
 (   Change.action == submit -> ...
 ;   Change.action == cancel -> ...
-;   Change.action == invalid -> ...   % a submit the hard rules rejected
 ).
 ```
 
-One of `submit`, `cancel`, `invalid`, `closed`, `cancelled`, `timeout`,
-`unavailable`, or an action the spec declared. `action: invalid` additionally
-carries `errors`. (Under `:>`, a `task/N` output wrapped in a dict, the change
-reaches the model as JSON, where the same value is the string `"submit"` — the
-atom is a DML-side convenience, applied by `form_change_atom_action/2`.)
+One of `submit`, `cancel`, `closed`, `cancelled`, `timeout`, `unavailable`, or an
+action the spec declared. (Under `:>`, a `task/N` output wrapped in a dict, the
+change reaches the model as JSON, where the same value is the string `"submit"` —
+the atom is a DML-side convenience, applied by `form_change_atom_action/2`.)
+
+**A refused submit never appears here.** The host validates on submit (the spec's
+constraints and the harness's `form_validate/2`); when they reject it, the host
+attaches the errors to the form and the wait continues — see §9. So the loop above
+has no error branch, and a caller only ever sees an action the rules accepted.
 
 The loop:
 
@@ -357,6 +361,21 @@ drive UI messages and the tool result the agent sees:
 Cross-field rules (`end > start`) are **not** in the spec; that is logic, and the
 agent (or a tool) owns it — the same line DML already draws elsewhere.
 
+**Who acts on a rejection.** The host does, and only the host. On a submit it runs
+both checks; when they produce errors it attaches them to the form (so the person
+filling it in sees what is wrong, next to the value they typed) and keeps the
+wait open. `await_form/2` loops internally: it returns the next *accepted* change,
+or a cancel. So a harness reads
+
+```prolog
+await_form(F, Change),          % Change.action is submit or cancel — never a refusal
+```
+
+with no error branch, and a model driving the loop with
+`wait_for_form_change/1` likewise never sees a refusal. A caller that wants the
+raw errors before submitting can ask: `form_validate/2` (the `validate_form`
+tool) runs the same checks without touching the form.
+
 ## 7. Protocol
 
 **Host → consumer** is the existing event stream; one new `DMLEvent`:
@@ -365,10 +384,14 @@ agent (or a tool) owns it — the same line DML already draws elsewhere.
 { type: 'form'; formId: string; revision: number;
   op: 'open' | 'update' | 'close';
   form?: FormSpec; patch?: JsonMergePatch; values?: Record<string, Json>;
+  issues?: FormIssue[];                       // errors to show against fields
   state?: 'open' | 'submitted' | 'cancelled';
   source?: { name?: string; pid?: string }   // attribution when a subagent owns it
 }
 ```
+
+`spec` travels with an `update` too: a renderer that only receives the update
+still needs the fields to draw, and the `issues` to show against them.
 
 **Consumer → host** mirrors `provideInput`:
 
@@ -553,11 +576,12 @@ Prolog `review_loop/2`. The DML owns policy; the model owns flow.
 
 Two properties make a model-driven loop safe:
 
-1. **Hard validation is host-enforced on submit.** `form_validate/2` runs when a
-   `validates: hard` action fires; if it returns errors the change is
-   `action: invalid` with `errors`, so the model never receives a `submit` it can
-   act on. "The model decides when to validate" cannot mean "the model may skip
-   validation".
+1. **Hard validation is host-enforced on submit, and stays in the host.**
+   `form_validate/2` runs when a `validates: hard` action fires; if it returns
+   errors the host puts them on the form and keeps waiting (`await_form/2` loops —
+   §9), so neither the model nor the harness ever receives a `submit` it can act
+   on, and neither has to write the re-show loop. "The model decides when to
+   validate" cannot mean "the model may skip validation".
 2. **`validate_form` / `advisories` are affordances, not the gate.** The model
    calls them for live feedback (`wait_for_form_change` returns `changed`), but
    the authoritative check is the host's.
@@ -618,12 +642,12 @@ agent_main(Context) :-
          Loop:\n\
          1. Design the form and call render_form (vendor, category, amount, \
             currency, date; add a receipt/notes field when the context implies it).\n\
-         2. Call wait_for_form_change. It returns {action, values, errors, changed}.\n\
-         3. action=invalid: the host rejected a submit. Show errors with update_form, \
-            then wait again.\n\
-         4. action=submit: the hard rules passed. Optionally call advisories(values) \
+         2. Call wait_for_form_change. It returns {action, values, changed}.\n\
+         3. action=submit: the rules passed. Optionally call advisories(values) \
             and surface anything material before finishing.\n\
-         5. action=cancel: close_form and finish.\n\
+         4. action=cancel: close_form and finish.\n\
+         A refused submit is handled for you: the host shows the errors on the \
+         form and wait_for_form_change keeps waiting, so you never see it.\n\
          Never invent values. End with set_result, then finish."),
     with_tools([render_form, update_form, close_form, wait_for_form_change,
                 advisories, set_result, finish],
@@ -679,10 +703,11 @@ agent_main(Context) :-
         "You onboard a customer. What the form needs depends on the context: an \
          individual needs name, email and country; a business also needs a legal \
          name and, in the EU, a VAT id.\n\
-         Loop with render_form -> wait_for_form_change. The host enforces the hard \
-         rules on submit and returns action=invalid with errors; show them with \
-         update_form and wait again. On action=submit, call advisories(values) and \
-         surface anything material before finishing. Offer `country` as a select. \
+         Loop with render_form -> wait_for_form_change. The host enforces the \
+         rules on submit: a refused submit is shown on the form and the wait \
+         continues, so you only ever see action=submit or cancel. On submit, call \
+         advisories(values) and surface anything material before finishing. Offer \
+         `country` as a select. \
          Never invent values."),
     with_tools([render_form, update_form, close_form, wait_for_form_change,
                 advisories, set_result, finish],

@@ -105,7 +105,9 @@ runs under `runDML` with a scripted UI, **with no model**.
 - `src/repl/session.ts` — `syncCapabilities()` after load/commit/rollback: read
   `repl_capabilities/2`, register/unregister the host side; expose `submitForm`.
 - Host enforcement: a `validates: hard` action runs the harness's
-  `form_validate/2`; on errors the change is `action: 'invalid'` + `errors`.
+  `form_validate/2`; on errors the host returns `action: 'invalid'` + `errors`
+  internally, and `await_form/2` re-shows them and keeps waiting (so a caller
+  never sees a refusal — see DML_FORMS.md §6).
 
 **Done when:** a harness with `:- capability(forms).` sees the form tools in
 `task/N`, and one *without* it gets the precise "not enabled" error.

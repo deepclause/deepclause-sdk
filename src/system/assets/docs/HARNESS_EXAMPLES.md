@@ -171,51 +171,55 @@ Images are files; `media(Path, Mime)` is the reference. The bytes are read from
 the workspace at call time, only PNG/JPEG/GIF/WebP are accepted, and they never
 enter clauses or memory. Judgments stay text-only.
 
-## 9. Forms: structured input from the user (opt-in)
+## 9. Forms: structured input from the user
 
 Use a form when the program needs **typed, validated** input rather than free
-text. Forms are always available — no directive:
+text. Forms are always available — no directive, nothing to import.
+
+**Let the model design and drive the form** (the usual shape). Give `task/N` the
+form tools and describe what you need:
 
 ```prolog
-doc(collect_claim/0, "Collect an expense claim and file it. Example: /goal collect_claim.").
+doc(collect_claim/0, "Collect an expense claim and report it. Example: /goal collect_claim.").
 
-collect_claim :-
-    Spec = _{ version: 1, title: "New expense claim",
-              fields: [ _{name: vendor, type: string,  title: "Vendor", required: true},
-                        _{name: amount, type: integer, title: "Amount", required: true, minimum: 0},
-                        _{name: notes,  type: string,  title: "Notes",  widget: textarea} ],
-              actions: [ _{name: submit, title: "Submit", kind: primary},
-                         _{name: cancel, title: "Cancel", kind: link} ] },
-    form(Spec, F),
-    claim_loop(F).
+collect_claim(Summary) :-
+    system("You collect a new expense claim. Ask for the vendor, the amount and a note."),
+    with_tools([render_form, wait_for_form_change, close_form, set_result, finish],
+        task("Ask for the three fields, then report exactly what the user entered.",
+             string(Summary))).
+```
 
-%% The host refuses a submit the rules reject, so `invalid` is the only way in
-%% here — never act on values the rules did not accept.
-claim_loop(F) :-
+The model's loop is three calls: `render_form(spec)` → a form id,
+`wait_for_form_change(formId)` → `{action, values}`, `close_form(formId)`.
+
+**Or drive it from DML**, with no model:
+
+```prolog
+doc(claim_form/1, "Collect an expense claim. claim_form(-Values) returns the entered values.").
+
+claim_form(Values) :-
+    form(_{ title: "New expense claim",
+           fields: [ _{name: vendor, type: string,  required: true},
+                     _{name: amount, type: integer, required: true, minimum: 0},
+                     _{name: notes,  widget: textarea} ] }, F),
     await_form(F, Change),
-    (   Change.action == invalid
-    ->  form_errors(F, Change.errors),        % show them on the form
-        claim_loop(F)
-    ;   Change.action == cancel
-    ->  close_form(F), answer(cancelled)
-    ;   close_form(F),
-        get_dict(values, Change, Values),
-        format(string(Msg), "filed: ~w", [Values]),
-        answer(Msg)
+    close_form(F),
+    (   Change.action == submit               % an atom: submit, cancel
+    ->  Change.values = Values
+    ;   Values = _{}
     ).
 
-%% Domain rules on top of the spec's own constraints; both block a submit.
+%% Domain rules on top of the spec's own constraints; both block a submit, and a
+%% refused submit is never returned — the host shows the errors and waits again.
 form_validate(Values, Errors) :-
     findall(error(amount, "the amount looks implausible"),
             ( get_dict(amount, Values, A), A > 100000 ),
             Errors).
 ```
 
-`Change.action` is an **atom** (`submit`, `cancel`, `invalid`) — compare with
-`==`, never against `"submit"`. `current_predicate(form/2)` reports `no` even
-when forms work (it is a host handler, like `exec/2`). The loop above is
-deterministic — no model. To let the **model** choose the form, drive the same
-built-in tools from `task/N` with `with_tools([render_form,
-wait_for_form_change, set_form_issues, advisories, close_form, set_result,
-finish], task(…))`; either way the host validates. See `reference("forms")` and
+Note what is *not* here: no `version`, no loop for rejected submits, no error
+branch. A field's `type` defaults to `string`, and the host owns validation.
+`Change.action` is an **atom** (`submit`, `cancel`) — compare with `==`, never
+against `"submit"`. `current_predicate(form/2)` reports `no` even when forms work
+(it is a host handler, like `exec/2`). See `reference("forms")` and
 `sdk-examples/forms.dml`.

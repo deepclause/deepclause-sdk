@@ -265,6 +265,63 @@ export function isPlainObject(value: unknown): value is JsonObject {
 }
 
 // ---------------------------------------------------------------------------
+// Normalization: fill in what a spec may leave out
+// ---------------------------------------------------------------------------
+
+const FIELD_TYPES: ReadonlySet<string> = new Set([
+  'string',
+  'number',
+  'integer',
+  'boolean',
+  'object',
+  'array',
+  'null',
+]);
+
+/**
+ * Accept a spec the way a caller would naturally write one.
+ *
+ * `version` and a field's `type` are boilerplate: a model asked for "a form with
+ * an amount and a reason" should be able to answer `{title: "Refund", fields:
+ * [{name: "amount", type: "number"}, {name: "reason"}]}` and have it work.
+ * A bare string field is shorthand for a `string` field of that name.
+ *
+ * This only fills gaps. Anything genuinely broken (no fields, a duplicate or
+ * illegal name, a layout that references an unknown field) is still reported by
+ * `validateSpec`.
+ */
+export function normalizeSpec(raw: unknown): FormSpec {
+  const source = isPlainObject(raw) ? (raw as Record<string, unknown>) : {};
+  const spec: Record<string, unknown> = { ...source };
+  if (spec.version === undefined) spec.version = 1;
+  spec.fields = (Array.isArray(spec.fields) ? spec.fields : []).map(normalizeField);
+  if (spec.layout !== undefined && !Array.isArray(spec.layout)) delete spec.layout;
+  return spec as unknown as FormSpec;
+}
+
+function normalizeField(raw: unknown): Field {
+  if (typeof raw === 'string') return { name: raw, type: 'string' } as Field;
+  if (!isPlainObject(raw)) return raw as unknown as Field;
+  const field: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
+  // Missing type is a string. An explicit unknown type is left for validation to
+  // report rather than being silently reinterpreted.
+  if (field.type === undefined || field.type === null || field.type === '') field.type = 'string';
+  if (field.type === 'object') {
+    field.properties = (Array.isArray(field.properties) ? field.properties : []).map(normalizeField);
+  }
+  if (field.type === 'array' && field.items !== undefined) {
+    field.items = normalizeField(field.items);
+  }
+  if (field.required === 'true' || field.required === 'yes') field.required = true;
+  return field as unknown as Field;
+}
+
+/** True when `type` is one this runtime knows. */
+export function isFieldType(type: unknown): type is FieldType {
+  return typeof type === 'string' && FIELD_TYPES.has(type);
+}
+
+// ---------------------------------------------------------------------------
 // Static validation: is this a well-formed spec?
 // ---------------------------------------------------------------------------
 
@@ -295,6 +352,9 @@ export function validateSpec(spec: FormSpec): FormIssue[] {
 function validateFieldSpec(field: Field, path: string, err: (path: string, message: string) => void): void {
   if (!field.name || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(field.name)) {
     err(path, `invalid field name: ${JSON.stringify(field.name)}`);
+  }
+  if (!isFieldType(field.type)) {
+    err(path, `unknown field type ${JSON.stringify(field.type)}: use string, number, integer, boolean, object or array`);
   }
   if (field.type === 'string') {
     const s = field as StringField;

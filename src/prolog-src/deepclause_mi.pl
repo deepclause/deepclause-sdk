@@ -5193,18 +5193,38 @@ mi_call(close_form(FormId), StateIn, StateIn) :-
 
 %% mi_call(await_form(+FormId, -Change) / await_form(+FormId, +Since, -Change))
 %% The 2-arity form waits for the next change (the registry's cursor).
+%%
+%% A submit the host's rules reject never reaches the caller: the host returns
+%% `action: invalid` with the errors, and this loops — attaching them to the form
+%% so the user sees what is wrong, then waiting for the next attempt. So a harness
+%% (or a model's `wait_for_form_change`) only ever sees an action the rules
+%% accepted, and neither has to write the reject-and-re-show loop.
 mi_call(await_form(FormId, Change), StateIn, StateIn) :-
     !,
     mi_call(await_form(FormId, -1, Change), StateIn, StateIn).
 mi_call(await_form(FormId, Since, Change), StateIn, StateIn) :-
     !,
     get_session_id(SessionId),
+    await_form_loop(SessionId, FormId, Since, StateIn, Change).
+
+await_form_loop(SessionId, FormId, Since, StateIn, Change) :-
     engine_yield(wait_form(FormId, Since, 0)),
     get_next_signal(SessionId, _),
     session_form_result(SessionId, Result),
     retract(session_form_result(SessionId, _)),
     (   Result = ok(Dict0)
-    ->  form_change_atom_action(Dict0, Change)
+    ->  form_change_atom_action(Dict0, Dict),
+        (   get_dict(action, Dict, invalid)
+        ->  (   get_dict(errors, Dict, Errors)
+            ->  mi_call(form_errors(FormId, Errors), StateIn, _)
+            ;   true
+            ),
+            % Follow the registry's cursor, not the caller's original `Since`,
+            % so the retry waits for a new attempt instead of re-reading the
+            % submit that was just refused.
+            await_form_loop(SessionId, FormId, -1, StateIn, Change)
+        ;   Change = Dict
+        )
     ;   throw(error(form_wait_failed(Result), await_form/3))
     ).
 

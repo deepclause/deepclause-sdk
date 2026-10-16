@@ -49,6 +49,27 @@ async function run(
   return { events, submitted };
 }
 
+/** Drive a run, submitting attempts in turn: a rejected submit re-shows and waits. */
+async function runAttempts(
+  code: string,
+  attempts: Array<Record<string, unknown>>,
+): Promise<{ events: DMLEvent[]; submissions: number }> {
+  sdk = await createDeepClause({ model: 'test-model' });
+  const events: DMLEvent[] = [];
+  let submissions = 0;
+  for await (const event of sdk.runDML(code, {
+    onForm: async (form) => {
+      const attempt = attempts[submissions];
+      if (attempt === undefined) return;
+      submissions += 1;
+      sdk!.submitForm(form.formId, { action: 'submit', values: attempt as never });
+    },
+  })) {
+    events.push(event);
+  }
+  return { events, submissions };
+}
+
 describe('forms', () => {
   it('renders a form and resumes when the UI submits', async () => {
     const { events, submitted } = await run(WITH_CAPABILITY);
@@ -112,18 +133,28 @@ agent_main :-
     get_dict(action, Change, Action),
     answer(Action).
 `;
-    const bad = await run(code, 'submit', {});
-    expect(bad.events.some((event) => event.type === 'answer' && event.content === 'invalid')).toBe(true);
-
-    const good = await run(code, 'submit', { subject: 'ok' });
-    expect(good.events.some((event) => event.type === 'answer' && event.content === 'submit')).toBe(true);
+    // `required` is in the spec: the empty submit is refused by the host, so the
+    // harness only ever sees the second (valid) attempt.
+    const { events, submissions } = await runAttempts(code, [{}, { subject: 'ok' }]);
+    expect(submissions).toBe(2);
+    expect(events.some((event) => event.type === 'answer' && event.content === 'submit')).toBe(true);
+    expect(events.some((event) => event.type === 'answer' && event.content === 'invalid')).toBe(false);
   });
 
-  it('turns a rejected submit into `invalid` with the rules\' errors', async () => {
-    const { events } = await run(HARD_RULES, 'submit', { amount: -1 });
-    // The model never sees `submit`; it sees `invalid` and can re-render.
-    expect(events.some((event) => event.type === 'answer' && event.content === 'invalid')).toBe(true);
-    expect(events.some((event) => event.type === 'answer' && event.content === 'submit')).toBe(false);
+  it('shows a rejected submit\'s errors on the form, then waits again', async () => {
+    const { events, submissions } = await runAttempts(HARD_RULES, [{ amount: -1 }, { amount: 5 }]);
+    expect(submissions).toBe(2);
+    // The harness never saw `invalid`: only the submit the rules accepted.
+    expect(events.some((event) => event.type === 'answer' && event.content === 'submit')).toBe(true);
+    expect(events.some((event) => event.type === 'answer' && event.content === 'invalid')).toBe(false);
+    // The refusal reached the person filling the form, with the message and the
+    // value they typed (so they can correct it).
+    const shown = events.find(
+      (event) => event.type === 'form' && event.form?.op === 'update' && (event.form.issues?.length ?? 0) > 0,
+    );
+    expect(shown?.form?.issues?.[0]?.message).toContain('must be positive');
+    expect(shown?.form?.values).toEqual({ amount: -1 });
+    expect(shown?.form?.spec?.fields?.length).toBe(1);
   });
 
   it('passes a submit the rules accept', async () => {
@@ -134,5 +165,28 @@ agent_main :-
   it('never validates a cancel', async () => {
     const { events } = await run(HARD_RULES, 'cancel', { amount: -1 });
     expect(events.some((event) => event.type === 'answer' && event.content === 'cancel')).toBe(true);
+  });
+
+  it('terminates when the host cancels a retry instead of answering again', async () => {
+    // The CLI's `--answer` mode: it answers once, then cancels a re-presented
+    // form. Without that, a refused submit would be re-asked forever.
+    sdk = await createDeepClause({ model: 'test-model' });
+    const answers: string[] = [];
+    let presented = 0;
+    for await (const event of sdk.runDML(HARD_RULES, {
+      onForm: async (form) => {
+        presented += 1;
+        sdk!.submitForm(
+          form.formId,
+          presented === 1
+            ? { action: 'submit', values: { amount: -1 } }
+            : { action: 'cancel', values: form.values ?? {} },
+        );
+      },
+    })) {
+      if (event.type === 'answer' && event.content) answers.push(event.content);
+    }
+    expect(presented).toBe(2);
+    expect(answers).toContain('cancel');
   });
 });

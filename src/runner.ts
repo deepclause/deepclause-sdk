@@ -24,7 +24,7 @@ import { takePrologMessages } from './prolog/loader.js';
 import { validateToolArguments } from './repl/tool-arguments.js';
 import type { FormRegistry } from './forms/registry.js';
 import type { FormIssue, FormSpec, JsonObject } from './forms/spec.js';
-import { validateValues } from './forms/spec.js';
+import { normalizeSpec, validateValues } from './forms/spec.js';
 import { judgeAnswersToValues, judgeCacheKey, normalizeJudgeState, parseJudgeQuestions, validateJudgeAnswers, valuesToPrologList } from './judge/marshal.js';
 import type { JudgeAnswer, JudgeCapabilities, JudgeSelection, JudgeUsage, JsonValue, JudgeQuestion } from './judge/types.js';
 import {
@@ -677,7 +677,11 @@ export class DMLRunner {
           const event = this.handleFormRequest(payload, options.forms);
           if (event) {
             yield event;
-            if (event.form?.op === 'open' && options.onForm) await options.onForm(event.form);
+            // `update` re-presents too: a rejected submit (or a model editing the
+            // form) must reach the person filling it in, with the errors on it.
+            if ((event.form?.op === 'open' || event.form?.op === 'update') && options.onForm) {
+              await options.onForm(event.form);
+            }
           }
           break;
         }
@@ -687,7 +691,9 @@ export class DMLRunner {
           const formId = String(toJsValue(payload.formId) ?? '');
           const since = Number(toJsValue(payload.since) ?? 0);
           const timeoutMs = Number(toJsValue(payload.timeout) ?? 0);
-          this.postFormResult(await this.handleFormWait(formId, since, timeoutMs, options.forms, options.signal));
+          this.postFormResult(
+            await this.handleFormWait(formId, since, timeoutMs, options.forms, options.signal),
+          );
           break;
         }
 
@@ -2497,7 +2503,9 @@ export class DMLRunner {
               // The host interaction must run here too: a form opened by a tool
               // (`render_form`) is the common case, and without this nothing
               // prompts and the run just blocks on the wait.
-              if (event.form?.op === 'open' && runContext.onForm) await runContext.onForm(event.form);
+              if ((event.form?.op === 'open' || event.form?.op === 'update') && runContext.onForm) {
+                await runContext.onForm(event.form);
+              }
             }
             break;
           }
@@ -2507,7 +2515,9 @@ export class DMLRunner {
             const formId = String(toJsValue(formPayload.formId) ?? '');
             const since = Number(toJsValue(formPayload.since) ?? 0);
             const timeoutMs = Number(toJsValue(formPayload.timeout) ?? 0);
-            this.postFormResult(await this.handleFormWait(formId, since, timeoutMs, runContext.forms, runContext.signal));
+            this.postFormResult(
+              await this.handleFormWait(formId, since, timeoutMs, runContext.forms, runContext.signal),
+            );
             break;
           }
 
@@ -2651,7 +2661,9 @@ export class DMLRunner {
     const op = String(toJsValue(payload.op) ?? '');
 
     if (op === 'open') {
-      const spec = toJsValue(payload.spec) as FormSpec;
+      // A caller (a harness, or a model that designed the form) may leave out the
+      // boilerplate: `version`, and each field's `type`.
+      const spec = normalizeSpec(toJsValue(payload.spec));
       const opened = forms.open(spec);
       this.postFormResult(`ok(${this.toPrologTerm({ formId: opened.formId, revision: opened.revision })})`);
       return {
@@ -2666,8 +2678,10 @@ export class DMLRunner {
       forms.update(formId, patch);
       this.postFormResult('ok');
       const record = forms.get(formId);
+      // `spec` travels with every form event: a renderer that only gets an update
+      // still needs the fields to draw (and to show the issues against them).
       return record
-        ? { type: 'form', form: { op: 'update', formId, revision: record.revision, patch, values: record.values, issues: record.issues } }
+        ? { type: 'form', form: { op: 'update', formId, revision: record.revision, spec: record.spec, patch, values: record.values, issues: record.issues } }
         : undefined;
     }
     if (op === 'errors') {
@@ -2676,7 +2690,7 @@ export class DMLRunner {
       this.postFormResult('ok');
       const record = forms.get(formId);
       return record
-        ? { type: 'form', form: { op: 'update', formId, revision: record.revision, values: record.values, issues } }
+        ? { type: 'form', form: { op: 'update', formId, revision: record.revision, spec: record.spec, values: record.values, issues } }
         : undefined;
     }
     if (op === 'close') {
@@ -2691,6 +2705,14 @@ export class DMLRunner {
   }
 
   /** Await a form change and return the result term to post to Prolog. */
+  /**
+   * Wait for a UI change, enforcing the rules the host owns.
+   *
+   * A submit the rules reject comes back as `invalid` with the errors. The DML
+   * side (see `mi_call(await_form(...))`) turns that into "show the errors, wait
+   * again", so neither a harness nor a model ever acts on a refused submit — and
+   * neither has to write the re-show loop.
+   */
   private async handleFormWait(
     formId: string,
     since: number,
@@ -2704,12 +2726,10 @@ export class DMLRunner {
         timeoutMs: timeoutMs > 0 ? timeoutMs : undefined,
         signal,
       });
-      // Host-enforced hard validation: the harness's `form_validate/2` runs on a
-      // submit, so a model cannot act on a submit that the rules reject.
+      // Layer 1: the spec's own constraints (required, enum, min/max, pattern).
+      // Layer 2: the harness's `form_validate/2` domain rules. Both block.
       const record = forms.get(formId);
       if (record && shouldValidate(record.spec, change.action)) {
-        // Layer 1: the host enforces the spec's own constraints (required, enum,
-        // min/max, pattern). Layer 2: the harness's domain rules. Both block.
         const errors = [
           ...validateValues(record.spec, change.values),
           ...this.validateFormValues(change.values),

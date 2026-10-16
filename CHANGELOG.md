@@ -4,33 +4,51 @@
 
 ### Changed
 
-- **Forms are built in; the `:- capability(forms).` directive is gone.** The
-  opt-in gate made the feature effectively undiscoverable: `form/2` is a host
-  handler, so `current_predicate(form/2)` reports `no` even when forms work, and
-  the directive was file-scoped (processed at load), so it could not be added to
-  a module built through the edit tools. The primitives and the `tool/N` wrappers
-  (`render_form`, `update_form`, `set_form_issues`, `wait_for_form_change`,
-  `validate_form`, `advisories`, `close_form`) are now installed into every
-  session, and `reference("forms")` documents them. An older file that still
-  carries the directive loads unchanged — `capability/1` is ignored. The built-in
-  tools are not part of a harness: they stay out of `listing`, the manifest's
-  predicates, the export, and the `end_turn` probes, but appear in
-  `listing("tools")` and are offered to `task/N` / `with_tools/2`.
-- **A form's `action` is an atom in DML.** The host sent it as a JSON string, so
-  `Change.action == submit` — the documented idiom, and what every example used —
-  was silently always false, and a no-model loop fell through and answered
-  `invalid`. It is converted at the boundary; the model-facing tools re-serialize
-  to JSON, where it is a string again.
+- **A refused submit is now the host's business, not the caller's.** The host
+  enforced the rules on submit but returned `action: invalid` with the errors, so
+  every harness and every model-driven loop carried a reject-and-re-show branch
+  (`form_errors` / `set_form_issues`, then wait again). `await_form/2` now loops
+  internally: on a rejection the host attaches the errors to the form (which is
+  re-presented, with the values the user typed) and keeps waiting. A caller only
+  ever sees an action the rules accepted — so the loop is
+  `form` → `await_form` → `close_form`, with no error branch, and
+  `wait_for_form_change` likewise returns only `submit`/`cancel`. A caller that
+  wants the raw errors up front can still call `form_validate/2` (the
+  `validate_form` tool).
+- **A form spec no longer needs `version`, and a field's `type` defaults to
+  `string`.** A model asked for "a form with an amount and a reason" can answer
+  `{title: "Refund", fields: [{name: "amount", type: "number"}, {name: "reason"}]}`,
+  and a bare string field (`"reason"`) is shorthand. `normalizeSpec` fills the
+  gaps; genuinely broken specs are still reported by `validateSpec`.
+- **`spec` travels with every `form` event, and `update` events re-present the
+  form.** Previously an update (a model's `update_form`, or the host showing
+  errors) carried no `spec`, so a renderer could not draw it — the errors were
+  effectively invisible.
 
 ### Added
 
 - **`reference("forms")`.** The bundled `DML_FORMS.md`, so the authoring agent can
   discover the feature at runtime. `HARNESS_EXAMPLES.md` gained a runnable forms
-  example, and a Forms section (`AGENT_PROMPT.md` / `DML_REFERENCE.md`) explains the
-  primitives, the field vocabulary, and the submit/`invalid` loop.
+  example, and a Forms section (`AGENT_PROMPT.md` / `DML_REFERENCE.md`) teaches the
+  three-call model loop first, with the DML primitives second. `docs/DML_FORMS.md`
+  §4 records why the gate was removed.
+
+### Removed
+
+- **The `:- capability(forms).` directive.** Forms are always available; the
+  primitives and the `tool/N` wrappers are installed into every session. An older
+  file that still carries the directive loads unchanged (`capability/1` is
+  ignored). The built-in tools stay out of a harness's own surface — `listing`,
+  the manifest's predicates, the export, the counts, and the `end_turn` probes —
+  but appear in `listing("tools")` and are offered to `task/N` / `with_tools/2`.
 
 ### Fixed
 
+- **A form's `action` is an atom in DML.** The host sent it as a JSON string, so
+  `Change.action == submit` — the documented idiom, and what every example used —
+  was silently always false, and a no-model loop fell through and answered
+  `invalid`. It is converted at the boundary; the model-facing tools re-serialize
+  to JSON, where it is a string again.
 - **`--json` output is now pure JSON.** `repl --json -g` wrote a raw `false.`
   line when a goal produced no solution, corrupting the one-object-per-line
   stream for any tooling that reads it. It now emits `{"type":"no_solution"}`.

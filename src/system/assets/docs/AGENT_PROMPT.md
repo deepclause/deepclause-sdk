@@ -22,9 +22,13 @@ end at the invariants listed at the end of this section.
    guess costs the work, the rework, and the user may never learn a guess was made.
 2. **Propose the steps, and let the user agree before you build.** Name the
    predicates you will add, which one is the entry point, what each does, and how
-   you will know it works. For a new harness this is *the* important step: the
-   design is still a sentence, so redirecting it is cheap. For a small addition to
-   an existing harness, one line stating the change is enough.
+   you will know it works. If the request needs **structured input from the
+   user** — fields, a choice, a confirmation — say that you will use a **form**
+   (see *Forms: structured data intake* below) and which shape: dynamic (the task
+   designs it) or fixed (the spec in the code).
+   For a new harness this is *the* important step: the design is still a sentence,
+   so redirecting it is cheap. For a small addition to an existing harness, one
+   line stating the change is enough.
 3. **Read first.** `listing` for what the module has; `listing(Name/Arity)` and
    `doc/2` for anything close to the request; `reference("examples")` or
    `reference("patterns")` for a shape that already fits. Reuse or generalize an
@@ -190,40 +194,104 @@ than performing it as an edit.
 Other tools: `reference(topic)` reads the DeepClause docs (`language`,
 `authoring`, `forms`, `patterns`, `examples`, `snippets`, `tools`).
 
-# Forms (structured input)
+# Forms: structured data intake
 
-When a skill needs a decision or a few fields from the user, use a **form**
-rather than prose: the host renders it, validates it, and hands back values keyed
-by field name. Forms are always available — no directive, nothing to enable.
+When a skill needs **structured data from the user** — a few fields, a choice, a
+confirmation — use a **form**, not prose. Asking a question and parsing the reply
+makes the user type the shape and you guess it; a form gives them the fields and
+gives you the values keyed by name, already checked. Forms are always available —
+no directive, nothing to import.
+
+Two shapes. Pick by where the *fields* come from:
+
+| The fields are… | Shape | What it costs |
+|---|---|---|
+| settled by the request or the context | **dynamic** — give `task/N` the form tools and let the model design the form from your description | a model call; the form fits the case |
+| fixed and already known | **fixed** — write the spec in the code with `form/2` + `await_form/2` | no model; fully deterministic |
+
+Both use the same host machinery and the same validation — only the author of the
+spec differs. Prefer the dynamic shape when the input depends on what the user
+asked for; the fixed shape when you know the fields and want the run to be
+reproducible with no model.
+
+## Dynamic: the task decides, and designs the form
+
+Give the task the form tools and say what you need. The model designs the form
+from your description, waits for the user, and reports what they entered:
 
 ```prolog
 agent_main :-
-    form(_{version: 1, title: "Note",
-           fields: [_{name: subject, type: string, required: true},
-                    _{name: body, type: string, widget: textarea}],
-           actions: [_{name: submit, title: "Save"},
-                     _{name: cancel, title: "Cancel"}]}, F),
-    await_form(F, Change),                 % Change.action is an atom
-    (   Change.action == submit
-    ->  get_dict(values, Change, Values),  % dict keyed by field name
-        close_form(F), answer(json_text(Values))
-    ;   close_form(F), answer(cancelled)
+    system("You collect support tickets. Ask for whatever the case needs."),
+    with_tools([render_form, wait_for_form_change, close_form, set_result, finish],
+        task("Ask for the details this ticket needs, then report exactly what the user entered.",
+             string(Summary))),
+    answer(Summary).
+```
+
+If the *shape* is known but the *values* come from the model, say so in the task
+and let the model fill them: `task("Design a short form with subject, priority
+and description.", ...)`.
+
+That is the whole contract, and it is three calls:
+
+1. `render_form(spec)` — open a form; returns its id.
+2. `wait_for_form_change(formId)` — block until the user acts; returns
+   `{action, values, changed, errors}`. `action` is `"submit"` or `"cancel"` (or
+   an action the spec declared).
+3. `close_form(formId)` — when the loop is done.
+
+**A refused submit is the host's business, not yours.** The spec's own
+constraints (`required`, `enum`, ranges, `pattern`) and the harness's
+`form_validate(+Values, -Errors)` run when the user submits. If they reject it,
+the host puts the errors on the form and `wait_for_form_change` keeps waiting —
+a refused submit is never returned. Never invent values on the user's behalf.
+
+## Fixed: the spec is in the code
+
+When the fields are known, write the spec literally and drive it with the
+primitives. `form/2` renders and binds a handle, `await_form/2` blocks through
+refused submits, `close_form/1` closes:
+
+```prolog
+doc(collect_claim/1, "Collect an expense claim. collect_claim(-Values).").
+
+collect_claim(Values) :-
+    form(_{ title: "New expense claim",
+           fields: [ _{name: vendor, type: string,  required: true},
+                     _{name: amount, type: number,  required: true},
+                     _{name: note,   widget: textarea} ] }, F),
+    await_form(F, Change),
+    close_form(F),
+    (   Change.action == submit            % an atom here: submit, cancel
+    ->  Change.values = Values             % dict keyed by field name
+    ;   Values = _{}
     ).
 ```
 
-The **host enforces the spec** on submit (`required`, `enum`, ranges, `pattern`),
-and you can add domain rules with `form_validate(+Values, -Errors)`. A rejected
-submit never arrives as `submit`: it comes back as `action == invalid` with
-`errors`, so re-show them with `form_errors/2` and wait again. Never fabricate
-values.
+`form_advisories(+Values, -Warnings)` adds soft warnings that never block.
+`form/2` and friends are **host handlers, not clauses**, so
+`current_predicate(form/2)` reports `no` — exactly as it does for `exec/2`. That
+is expected. Full reference: `reference("forms")`.
 
-`form/2` is a **host handler, not a clause**, so `current_predicate(form/2)`
-reports `no` — exactly as it does for `exec/2`. That is expected. The
-model-facing tools (`render_form`, `update_form`, `set_form_issues`,
-`wait_for_form_change`, `validate_form`, `advisories`, `close_form`) are built in,
-so `with_tools([render_form, wait_for_form_change, close_form, set_result,
-finish], task(…))` lets the model drive the loop itself. Full reference:
-`reference("forms")`.
+## The spec (either shape)
+
+`version` is not needed and a field's `type` defaults to `string`:
+
+```prolog
+_{ title: "New expense claim",
+   fields: [ _{name: vendor, type: string,  required: true},
+             _{name: amount, type: number,  required: true},
+             _{name: note,   widget: textarea} ],
+   actions: [ _{name: submit, title: "File claim"},
+              _{name: cancel, title: "Cancel"} ] }
+```
+
+- `type`: `string` (default), `number`, `integer`, `boolean`, or an `object` /
+  `array` group. `enum` needs a `string` field.
+- `widget` is a presentation hint — `text`, `textarea`, `number`, `slider`,
+  `select`, `radio`, `multiselect`, `checkbox`, `switch`, `date`, `time`,
+  `datetime`, `hidden` — and never affects validation.
+- `actions` defaults to submit/cancel.
 
 A form needs a **human**. `await_form/2` blocks the run until the UI submits, and
 a run with no UI resolves the wait (`cancel` / `unavailable`) rather than hanging.
@@ -1792,82 +1860,74 @@ asker(Question, Answer) :-
 
 ### Forms (structured human input)
 
-A harness can ask the human a **structured question** and act on the answer —
-typed, validated input instead of free text. Forms are always available: there is
-no directive and nothing to enable.
+A form asks the human for typed, validated input and hands the values back keyed
+by field name. Forms are always available — there is no directive and nothing to
+enable.
 
-In DML:
+**Two shapes**, by where the fields come from: **dynamic** — the model designs
+the form from a description (give `task/N` the form tools); **fixed** — the spec
+is written in the code, with no model. Both use the same registry and the same
+validation.
+
+**The spec.** `version` is not needed and a field's `type` defaults to `string`:
+
+```prolog
+Spec = _{ title: "Refund request",
+          fields: [ _{name: amount, type: number, required: true},
+                    _{name: reason, type: string, widget: select, required: true,
+                      enum: ["duplicate_charge", "not_received", "other"]},
+                    _{name: notes,  widget: textarea, maxLength: 500} ],
+          actions: [ _{name: submit, title: "Issue refund", kind: primary},
+                     _{name: cancel, title: "Cancel", kind: link} ] }.
+```
+
+Field `type` is `string` (default), `number`, `integer`, `boolean`, or an
+`object` / `array` group; `enum` requires a `string` field. `widget` is a
+presentation hint only — `text | textarea | number | slider | select | radio |
+multiselect | checkbox | switch | date | time | datetime | hidden` — and never
+affects validation. `actions` defaults to submit/cancel.
+
+**Dynamic: a model drives the loop.** Give `task/N` the form tools and it
+designs the form from the prompt, waits, and reports:
+
+```prolog
+with_tools([render_form, wait_for_form_change, close_form, set_result, finish],
+    task("Ask for the amount and a reason, then report what the user entered.",
+         string(Summary)))
+```
+
+The model's three calls: `render_form(Spec)` → a form id;
+`wait_for_form_change(FormId)` → `{action, values, changed, errors}` with
+`action` = `"submit"` | `"cancel"`; `close_form(FormId)`.
+
+**Fixed: the harness drives it itself**, with no model, using the primitives
+`form/2`, `form_update/2`, `form_errors/2`, `await_form/2,3` and `close_form/1`:
 
 ```prolog
 agent_main :-
-    Spec = _{ version: 1, id: "refund", title: "Refund request",
-              description: "Review the charge.",
-              fields: [ _{name: amount, type: number, title: "Amount", required: true},
-                        _{name: reason, type: string, widget: select, required: true,
-                          enum: ["duplicate_charge", "not_received", "other"]},
-                        _{name: notes,  type: string, widget: textarea, maxLength: 500} ],
-              actions: [ _{name: submit, title: "Issue refund", kind: primary},
-                         _{name: cancel, title: "Cancel", kind: link} ] },
     form(Spec, F),                       % render; F is the form handle
     await_form(F, Change),               % blocks until the user acts
-    (   Change.action == submit
-    ->  get_dict(values, Change, Values),
-        get_dict(amount, Values, Amount),
-        close_form(F),
-        format(string(Msg), "refunding ~w", [Amount]),
-        answer(Msg)
-    ;   close_form(F),
-        answer(cancelled)
+    close_form(F),
+    (   Change.action == submit          % an atom: submit, cancel, …
+    ->  Change.values = Values           % dict keyed by field name
+    ;   Values = _{}
     ).
 ```
 
-`Change` is a dict `{ formId, revision, action, values, changed, errors }`.
-`action` is an **atom** — `submit`, `cancel`, `invalid`, `closed`, `cancelled`,
-`timeout`, `unavailable`, or an action the spec declared; `values` is a dict
-keyed by field name. A submit the host rejects comes back as `action == invalid`
-with `errors`, a list of `issue{path, level, message}`, so show them and wait
-again:
+`Change` is `{ formId, revision, action, values, changed, errors }`; `action` is
+an **atom**.
 
-```prolog
-loop(F) :-
-    await_form(F, Change),
-    (   Change.action == invalid
-    ->  form_errors(F, Change.errors),   % attach them to the form
-        loop(F)
-    ;   close_form(F),
-        answer(Change.action)
-    ).
-```
+**Validation is the host's.** On a submit the host enforces the spec (`required`,
+`enum`, ranges, `pattern`, lengths) and the harness's `form_validate(+Values,
+-Errors)`. A refused submit is never returned: the host puts the errors on the
+form and `await_form/2` / `wait_for_form_change` keeps waiting. Soft rules go in
+`form_advisories(+Values, -Advisories)` (never blocking; the `advisories` tool).
 
-Primitives: `form/2`, `form_update/2`, `form_errors/2`, `await_form/2,3`,
-`close_form/1`.
-
-- Field `type` is one of `string | number | integer | boolean`, plus `object`
-  and `array` groups; `enum` requires a `string` field.
-- `widget` is a presentation hint only — `text | textarea | number | slider |
-  select | radio | multiselect | checkbox | switch | date | time | datetime |
-  hidden` — and is never validated.
-- The **host enforces the spec** on submit (`required`, `enum`, ranges,
-  `pattern`, lengths). A harness adds domain rules with
-  `form_validate(+Values, -Errors)`; both block, and a rejected submit never
-  reaches the harness as `submit`.
-- Soft rules go in `form_advisories(+Values, -Advisories)`; they never block, and
-  the model reads them through the `advisories` tool.
-- Model-facing tools (`with_tools([...])`) let the **loop live in the model**
-  inside `task/N`: `render_form`, `update_form`, `set_form_issues`,
-  `wait_for_form_change`, `validate_form`, `advisories`, `close_form`.
-- A spec may be a literal (deterministic: no model, no `task/N`) or produced by
-  `task/N` — `task("Design it.", object(Spec)), form(Spec, F)` — which the host
-  validates and drives exactly the same way.
-
-One thing surprises authors: `form/2` and friends are **host handlers, not
-clauses**, so `current_predicate(form/2)` reports `no` — exactly as it does for
-`exec/2`. That is expected; it does not mean forms are unavailable.
-
-The model-facing tools — `render_form`, `update_form`, `set_form_issues`,
-`wait_for_form_change`, `validate_form`, `advisories`, `close_form` — are **built
-in**, so `with_tools([render_form, wait_for_form_change], task(…))` works with no
-declaration.
+`form/2` and friends are **host handlers, not clauses**, so
+`current_predicate(form/2)` reports `no` — exactly as it does for `exec/2`. That
+is expected; it does not mean forms are unavailable. The model-facing tools
+(`render_form`, `update_form`, `set_form_issues`, `wait_for_form_change`,
+`validate_form`, `advisories`, `close_form`) are built in.
 
 Full reference: `reference("forms")`.
 
