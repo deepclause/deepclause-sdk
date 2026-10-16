@@ -81,3 +81,39 @@ describe('forms capability', () => {
     expect(events.some((event) => event.type === 'error' && /unknown capability/.test(event.content ?? ''))).toBe(true);
   });
 });
+
+const HARD_RULES = `
+:- capability(forms).
+
+form_validate(Values, Errors) :-
+    findall(error(amount, "must be positive"),
+            ( get_dict(amount, Values, A), A =< 0 ),
+            Errors).
+
+agent_main :-
+    form(_{version: 1, title: "Claim",
+           fields: [_{name: amount, type: integer}],
+           actions: [_{name: submit, title: "Go"}]}, F),
+    await_form(F, Change),
+    get_dict(action, Change, Action),
+    answer(Action).
+`;
+
+describe('host-enforced hard validation', () => {
+  it('turns a rejected submit into `invalid` with the rules\' errors', async () => {
+    const { events } = await run(HARD_RULES, 'submit', { amount: -1 });
+    // The model never sees `submit`; it sees `invalid` and can re-render.
+    expect(events.some((event) => event.type === 'answer' && event.content === 'invalid')).toBe(true);
+    expect(events.some((event) => event.type === 'answer' && event.content === 'submit')).toBe(false);
+  });
+
+  it('passes a submit the rules accept', async () => {
+    const { events } = await run(HARD_RULES, 'submit', { amount: 5 });
+    expect(events.some((event) => event.type === 'answer' && event.content === 'submit')).toBe(true);
+  });
+
+  it('never validates a cancel', async () => {
+    const { events } = await run(HARD_RULES, 'cancel', { amount: -1 });
+    expect(events.some((event) => event.type === 'answer' && event.content === 'cancel')).toBe(true);
+  });
+});

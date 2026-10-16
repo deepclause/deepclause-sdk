@@ -11,21 +11,14 @@ how it gets built, in an order where every step is testable before the next one.
 | 1 spec + registry | done — `src/forms/{spec,registry}.ts`, 22 unit tests |
 | 2 event + `submitForm` | done — `form` `DMLEvent`, `sdk.submitForm`, `session.submitForm` |
 | 3 primitives | done — `form/2`, `form_update/2`, `form_errors/2`, `await_form/2,3`, `close_form/1`; runner handles both statuses at all three sites |
-| 4 capability + tools | done — `:- capability(forms)`, `require_capability/1`, and the `tool/2` wrappers loaded through `process_clause`. The `form_validate/2` hook and host-enforced hard validation are **not** wired yet (see below) |
+| 4 capability + tools | done — `:- capability(forms)`, `require_capability/1`, the `tool/2` wrappers loaded through `process_clause`, and host-enforced hard validation (`form_validate/2`; a rejected submit becomes `invalid` + `errors`) |
 | 5 model-driven e2e | done — a `tool/2` body drives render → wait → submit under a scripted model |
 | 6 REPL | **partial** — the field-by-field wizard runs **live** (`onForm` in `src/cli/repl.ts`); the pi-tui form widget is next |
 
 ## Not yet built
 
-- **Hard validation on submit** (`form_validate/2`): an action marked
-  `validates: hard` should run the harness's predicate and deliver
-  `action: 'invalid'` + `errors` instead of a `submit`. Right now the harness must
-  call `form_errors/2` itself; nothing is enforced by the host. This is the one
-  piece of the worked examples (Appendix A) that does not yet hold.
 - **The pi-tui form widget** — v0 is a wizard.
 - **Typed tool inputs** — the capability tools take the spec/patch as a JSON string.
-- **`form_advisories/2` as a tool** — the harness can expose it, but the
-  capability does not.
 - **Subagent-owned forms** (L2 forwarding), repeaters, `tabs`, cross-turn surfaces.
 
 Two things fixed along the way that the feature forced out:

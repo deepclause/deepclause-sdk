@@ -110,7 +110,8 @@
     % Forms capability (docs/DML_FORMS.md)
     post_form_result/2,
     repl_capabilities/2,
-    repl_has_capability/2
+    repl_has_capability/2,
+    form_validate_values/3
 ]).
 
 :- use_module(deepclause_strings).
@@ -847,6 +848,12 @@ capability_clause(forms,
           "Wait for the user to act on a form. Change is a dict with action, values, revision and changed.")
         :- await_form(FormId, Change))).
 capability_clause(forms,
+    (tool(validate_form(ValuesJson, Result),
+          "Hard-validate form values (a JSON object string) without submitting. Result is a list of issues.")
+        :- atom_json_dict(ValuesJson, Values, []),
+           get_session_id(SessionId),
+           form_validate_values(SessionId, Values, Result))).
+capability_clause(forms,
     (tool(close_form(FormId, Result), "Close a form.")
         :- close_form(FormId), Result = ok)).
 
@@ -855,6 +862,16 @@ repl_capabilities(SessionId, Names) :-
     findall(Name, session_capability(SessionId, Name), Names).
 repl_has_capability(SessionId, Name) :-
     session_capability(SessionId, Name).
+
+%% form_validate_values(+SessionId, +Values, -IssueDicts)
+%% Runs the harness's hard rules if it defines `form_validate/2`, and normalises
+%% whatever it returns (`error/2`, `warning/2`, or an issue dict) into issue
+%% dicts. With no such predicate, there are no hard errors.
+form_validate_values(SessionId, Values, IssueDicts) :-
+    (   catch((call(SessionId:form_validate(Values, Issues)), is_list(Issues)), _, fail)
+    ->  form_issue_dicts(Issues, IssueDicts)
+    ;   IssueDicts = []
+    ).
 
 %% process_directive(require_sandbox, +SessionId)
 %% The harness declares that it must run in an execution sandbox, and the load

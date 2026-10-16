@@ -239,6 +239,20 @@ function toFormIssues(raw: unknown): FormIssue[] {
   });
 }
 
+/**
+ * Does this action run the harness's hard rules? `submit` by default; an action
+ * may opt out with `validates: []` (or opt in with `all`/`hard`/a path list).
+ */
+function shouldValidate(spec: FormSpec | undefined, action: string): boolean {
+  if (['cancel', 'closed', 'timeout', 'unavailable', 'cancelled', 'invalid'].includes(action)) return false;
+  const declared = spec?.actions?.find((entry) => entry.name === action);
+  if (!declared) return action === 'submit';
+  const validates = declared.validates;
+  if (validates === undefined) return action === 'submit';
+  if (Array.isArray(validates)) return validates.length > 0;
+  return validates === 'all' || validates === 'hard';
+}
+
 export interface InternalRunOptions {
   args?: unknown[];
   params?: Record<string, unknown>;
@@ -2673,11 +2687,28 @@ export class DMLRunner {
         timeoutMs: timeoutMs > 0 ? timeoutMs : undefined,
         signal,
       });
+      // Host-enforced hard validation: the harness's `form_validate/2` runs on a
+      // submit, so a model cannot act on a submit that the rules reject.
+      const record = forms.get(formId);
+      if (record && shouldValidate(record.spec, change.action)) {
+        const errors = this.validateFormValues(change.values);
+        if (errors.length > 0) {
+          return `ok(${this.toPrologTerm({ ...change, action: 'invalid', errors })})`;
+        }
+      }
       return `ok(${this.toPrologTerm(change)})`;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return `error(${JSON.stringify(message)})`;
     }
+  }
+
+  /** Run the harness's `form_validate/2` and return the issue dicts it produced. */
+  private validateFormValues(values: JsonObject): FormIssue[] {
+    const result = this.query(
+      `deepclause_mi:form_validate_values('${this.sessionId}', ${this.toPrologTerm(values)}, Issues)`,
+    );
+    return toFormIssues(result?.Issues);
   }
 
   /** Post a form primitive result back to Prolog under the form slot. */
