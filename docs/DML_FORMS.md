@@ -56,7 +56,8 @@ wait_for_form_change(formId) → blocks
 ## 3. Where it lives: primitives first, tools as sugar
 
 The mechanism is a host-side **form registry**. It is reached two ways, and the
-primitive is the core — so it works with no model and no `task/N`:
+primitive is the core — so it works with no model and no `task/N`. None of it is
+active by default; §4 is how a harness opts in:
 
 ```
                     ┌────────────────────────────────────────────┐
@@ -99,7 +100,79 @@ agent_main :-
 `form/2` is a *display* primitive (like `output/1`); `await_form/2` is the
 request. A program may render a form and never await it.
 
-## 4. The representation
+## 4. Activation: opt-in capability libraries
+
+Nothing above is active by default. A harness opts in once, at the top:
+
+```prolog
+:- use_module(library(forms)).
+```
+
+`library(forms)` is not a SWI module. It is a **DeepClause capability**: a host
+feature a harness declares it needs. The directive is intercepted where
+`library(clpfd)` is processed (`process_directive/2` in `deepclause_mi.pl`) and
+does three things:
+
+1. **Records it transactionally** as `session_capability(SessionId, forms)`. It
+   participates in `repl_snapshot_save/restore`, `rollback`, and `reset`, so a
+   failed turn that enabled forms leaves nothing behind — the same discipline as
+   `session_user_tools`.
+2. **Loads the DML surface through the normal clause path.** The `tool/2`
+   wrappers (`render_form`, `wait_for_form_change`, `update_form`, `close_form`)
+   and any helpers go through `process_clause/2`, so they land in
+   `session_user_tools/2` / `session_user_tool_schema/3` exactly like authored
+   tools. `task/N` therefore offers them, `with_tools/2` scopes them, and
+   `listing(tools)` shows them — with no special case in the agent loop.
+3. **Signals the host to activate its half.** After a load/commit, the session
+   reads `repl_capabilities(SessionId, Caps)` and registers the host tools and
+   the form host (registry + adapters).
+
+The primitives are always *defined* but **gated**: every `mi_call(form(...))` /
+`mi_call(await_form(...))` clause begins with `require_capability(forms)`, which
+throws a precise error when the directive is missing:
+
+```
+error: the `forms` capability is not enabled:
+       add `:- use_module(library(forms)).` to the harness
+```
+
+so a call cannot half-work, and a missing directive does not read like a typo.
+
+**Deactivation is the inverse.** `reset`/`rollback` retract
+`session_capability/2` and the capability's tool facts; the host re-syncs and
+drops the registered tools and the registry. Capability-provided tools are marked
+(`session_capability_tool/3`) so `export_harness` does **not** inline them —
+otherwise an exported harness that also carries the directive would load them
+twice.
+
+### Why a directive, not a config flag
+
+- **The requirement travels with the code.** A harness that needs forms says so;
+  its behaviour does not depend on ambient session config.
+- **It is transactional.** A turn that adds the directive and then fails rolls it
+  back, unlike a flag set once.
+- **It is the security story.** Enabling a capability is an explicit act by the
+  author, so there is no "forms are on and nobody noticed".
+
+### Refusing a capability
+
+A host may decline one — a headless run with no UI, or a locked-down embedding.
+The session exposes `onCapability(name)`; returning false either makes
+`await_form` resolve `unavailable` or refuses the load, the host's choice.
+Rendering is inert data either way; the tools the agent calls *afterwards* still
+pass the normal tool policy.
+
+### Generalization
+
+`forms` is one capability. The mechanism is deliberately generic so `http`,
+`sqlite`, `charts`, or a host-specific `approvals` library plug in the same way:
+each declares a name, a DML surface (tool declarations + helpers), and a host
+surface, and defaults to off. `library(clpfd)` keeps its SWI meaning; only names
+the host knows are capabilities.
+
+---
+
+## 5. The representation
 
 Four rules:
 
@@ -110,7 +183,7 @@ Four rules:
 4. **JSON-native.** The same object is the TypeScript type, the wire format, and
    (via a JSON Schema) what the model is constrained to produce.
 
-### 4.1 Fields
+### 5.1 Fields
 
 ```ts
 interface FieldBase {
@@ -144,7 +217,7 @@ The `widget` vocabulary is renderer-facing and advisory: `text`, `textarea`,
 `date`, `time`, `datetime`, `hidden`, `tabs`, `fieldset`. A renderer that does not
 know one falls back to the default for its type.
 
-### 4.2 Paths
+### 5.2 Paths
 
 Fields form a tree for structure and values, but the **canonical address is the
 path**:
@@ -157,7 +230,7 @@ lines[0].sku
 Paths are what validation errors, patches, and `changed` refer to. `name` is the
 contract; `title`/`widget`/order/layout are presentation and may change freely.
 
-### 4.3 Layout
+### 5.3 Layout
 
 Layout is a **separate tree over field paths**:
 
@@ -222,7 +295,7 @@ structural and each renderer applies it:
 
 The spec stays width-agnostic; only the adapters know about cells and pixels.
 
-### 4.4 Values
+### 5.4 Values
 
 Values **mirror the tree** and are JSON:
 
@@ -238,7 +311,7 @@ Values **mirror the tree** and are JSON:
 - **Coercion is defensive.** `"2"` for an integer is coerced where unambiguous and
   recorded as an error where not; a string is never silently stored in a number.
 
-### 4.5 Actions and changes
+### 5.5 Actions and changes
 
 ```ts
 interface Action {
@@ -262,13 +335,13 @@ Full values, not a delta: forms are small, it is idempotent, and the agent never
 replays history. `changed` lets the agent react to "the user just edited the
 order lines."
 
-### 4.6 Patching
+### 5.6 Patching
 
 `update_form(formId, patch)` takes a **JSON Merge Patch** (RFC 7386): simpler than
 JSON Patch and sufficient for "fill a computed field / add options." Arrays
 replace wholesale. Every apply bumps `revision`.
 
-## 5. Validation
+## 6. Validation
 
 Two functions, deliberately separated, both returning **data** so the same errors
 drive UI messages and the tool result the agent sees:
@@ -281,7 +354,7 @@ drive UI messages and the tool result the agent sees:
 Cross-field rules (`end > start`) are **not** in the spec; that is logic, and the
 agent (or a tool) owns it — the same line DML already draws elsewhere.
 
-## 6. Protocol
+## 7. Protocol
 
 **Host → consumer** is the existing event stream; one new `DMLEvent`:
 
@@ -306,7 +379,7 @@ The generator is host→UI; `submitForm` is UI→host. In headless runs (`-g`,
 auto-`submit` with defaults), so a form never hangs a build — the same policy
 `input/2` uses for its cancel path.
 
-## 7. Registry and routing
+## 8. Registry and routing
 
 - `FormRegistry`: `Map<formId, { spec, values, revision, waiters, state }>`.
 - **Monotonic revisions.** `await_form(FormId, Change, Since?)` returns the first
@@ -327,7 +400,7 @@ auto-`submit` with defaults), so a form never hangs a build — the same policy
 Namespace form ids by owner (session/pid, as pids already are) and carry `source`
 on the event so the UI shows `⚙ delivery  [form]`.
 
-## 8. Rendering adapters
+## 9. Rendering adapters
 
 A capability the host implements, like `setImageSink`:
 
@@ -360,17 +433,20 @@ why `tabs` degrades in v1 rather than introducing a component.
 - **`--json`** carries the spec as data; a driver decides what to do.
 - **Plain / headless** prints a summary and resolves `unavailable`.
 
-## 9. Security and limits
+## 10. Security and limits
 
+- **Off by default.** None of the surface exists unless the harness declares
+  `:- use_module(library(forms)).` (§4). That opt-in is the primary gate; there is
+  no ambient "forms are on".
 - Specs are **inert data**; renderers sanitize. Rendering is not a capability, so
-  there is nothing to gate.
+  there is nothing further to gate once the capability is on.
 - **Submitting** leads the agent to call tools, and those already pass through the
-  tool policy. Optionally gate `render_form` itself behind policy.
+  tool policy. A host may also gate the `render_form` tools themselves.
 - Field values are untrusted input to the agent — treat like `user/1`.
 - Cap field count, options, nesting depth, payload size, and revision count; a
   looping model must not allocate unbounded UI state.
 
-## 10. Worked example
+## 11. Worked example
 
 ```json
 {
@@ -420,9 +496,10 @@ On a wide terminal the customer block is two columns and amount/reason sit side 
 side; on a narrow one everything stacks. Same events, same values, same
 validation.
 
-## 11. MVP and later
+## 12. MVP and later
 
-**MVP:** field types `text`/`textarea`/`number`/`boolean`/`select`/`multiselect`;
+**MVP:** the `:- use_module(library(forms)).` capability directive (opt-in,
+§4); field types `text`/`textarea`/`number`/`boolean`/`select`/`multiselect`;
 layout `row`/`column`/`grid`/`box`/`field`/`text`/`divider`; one active form per
 session; `form`/`form_update`/`await_form`/`close_form` primitives plus the
 `tool/2` wrappers; `form` events + `submitForm`; a basic TUI renderer; JSON and
@@ -436,7 +513,7 @@ reference renderer, cross-turn **surfaces**, and layout-widget overrides beyond
 **Explicitly out:** conditional layout, computed fields, cross-field validation,
 behavior in actions, styling beyond `columns`/`span`/`gap`/`align`.
 
-## 12. Open questions
+## 13. Open questions
 
 1. **Tools vs. primitives** — ship both (primitive core + wrappers), or tools first?
 2. **Blocking vs. persistent** — block within a turn (recommended v1), or let a
@@ -444,6 +521,9 @@ behavior in actions, styling beyond `columns`/`span`/`gap`/`align`.
 3. **Repeaters in v1** — the only construct that makes values genuinely nested, and
    the only place merge-patch's "arrays replace wholesale" rule bites.
 4. **Headless default** — `unavailable` or auto-`submit` with defaults?
+5. **Capability spelling** — `use_module(library(forms))` (idiomatic, matches
+   `library(clpfd)`) or a DeepClause-native `:- capability(forms).` that does not
+   pretend to be a SWI module?
 
 ---
 
