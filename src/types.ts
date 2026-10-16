@@ -221,6 +221,8 @@ export interface RunOptions {
   /** Initial conversation messages seeded into memory before DML execution.
     *  These appear as proper memory messages, not in the synthesized system prompt. */
     initialMessages?: MemoryMessage[];
+  /** Called when a form opens, so an interactive host can collect values. */
+  onForm?: (form: FormEventPayload) => void | Promise<void>;
 }
 
 /**

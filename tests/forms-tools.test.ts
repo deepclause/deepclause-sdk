@@ -62,6 +62,25 @@ function backend(): LLMBackend {
 }
 
 describe('form tools inside task/N', () => {
+  it('invokes the host interaction for a form opened by a tool', async () => {
+    sdk = await createDeepClause({ model: 'test-model', llmBackend: backend() });
+    const opened: string[] = [];
+    const events: DMLEvent[] = [];
+
+    for await (const event of sdk.runDML(DML, {
+      onForm: async (form) => {
+        opened.push(form.formId);
+        sdk!.submitForm(form.formId, { action: 'submit', values: { subject: 'hi' } });
+      },
+    })) {
+      events.push(event);
+    }
+
+    // The handler ran from the tool engine, not only the top-level step loop.
+    expect(opened).toHaveLength(1);
+    expect(events.some((event) => event.type === 'answer' && event.content === 'done')).toBe(true);
+  });
+
   it('renders, waits and resumes when the UI submits', async () => {
     sdk = await createDeepClause({ model: 'test-model', llmBackend: backend() });
     const events: DMLEvent[] = [];

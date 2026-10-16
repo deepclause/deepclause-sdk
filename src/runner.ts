@@ -293,6 +293,8 @@ interface RunnerExecutionContext {
   onModelCall?: () => boolean | Promise<boolean>;
   /** Form host state, so a tool body can call the form primitives. */
   forms?: FormRegistry;
+  /** Host interaction for an opened form (called from the tool engine too). */
+  onForm?: (form: FormEventPayload) => void | Promise<void>;
   /** Handles a DML process primitive reached inside a tool engine. */
   onProcessRequest?: (
     request: ProcessRequestPayload,
@@ -1215,6 +1217,7 @@ export class DMLRunner {
             onModelCall: options.onModelCall,
             onProcessRequest: options.onProcessRequest,
             forms: options.forms,
+            onForm: options.onForm,
           },
           withheld,
           emitToolCall,
@@ -2485,7 +2488,13 @@ export class DMLRunner {
             // host registry as the enclosing run (docs/DML_FORMS.md §4).
             const formPayload = (payload ?? {}) as Record<string, unknown>;
             const event = this.handleFormRequest(formPayload, runContext.forms);
-            if (event) onToolEvent?.(event);
+            if (event) {
+              onToolEvent?.(event);
+              // The host interaction must run here too: a form opened by a tool
+              // (`render_form`) is the common case, and without this nothing
+              // prompts and the run just blocks on the wait.
+              if (event.form?.op === 'open' && runContext.onForm) await runContext.onForm(event.form);
+            }
             break;
           }
 
