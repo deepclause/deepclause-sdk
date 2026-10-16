@@ -105,13 +105,14 @@ request. A program may render a form and never await it.
 Nothing above is active by default. A harness opts in once, at the top:
 
 ```prolog
-:- use_module(library(forms)).
+:- capability(forms).
 ```
 
-`library(forms)` is not a SWI module. It is a **DeepClause capability**: a host
-feature a harness declares it needs. The directive is intercepted where
-`library(clpfd)` is processed (`process_directive/2` in `deepclause_mi.pl`) and
-does three things:
+`capability/1` is a DeepClause directive: it names a **host feature** a harness
+declares it needs. It is deliberately *not* spelled `use_module(library(...))` —
+there is no SWI module to load, and pretending otherwise would fail under plain
+SWI. The directive is intercepted in `process_directive/2`
+(`deepclause_mi.pl`) and does three things:
 
 1. **Records it transactionally** as `session_capability(SessionId, forms)`. It
    participates in `repl_snapshot_save/restore`, `rollback`, and `reset`, so a
@@ -133,7 +134,7 @@ throws a precise error when the directive is missing:
 
 ```
 error: the `forms` capability is not enabled:
-       add `:- use_module(library(forms)).` to the harness
+       add `:- capability(forms).` to the harness
 ```
 
 so a call cannot half-work, and a missing directive does not read like a typo.
@@ -436,7 +437,7 @@ why `tabs` degrades in v1 rather than introducing a component.
 ## 10. Security and limits
 
 - **Off by default.** None of the surface exists unless the harness declares
-  `:- use_module(library(forms)).` (§4). That opt-in is the primary gate; there is
+  `:- capability(forms).` (§4). That opt-in is the primary gate; there is
   no ambient "forms are on".
 - Specs are **inert data**; renderers sanitize. Rendering is not a capability, so
   there is nothing further to gate once the capability is on.
@@ -498,7 +499,7 @@ validation.
 
 ## 12. MVP and later
 
-**MVP:** the `:- use_module(library(forms)).` capability directive (opt-in,
+**MVP:** the `:- capability(forms).` directive (opt-in,
 §4); field types `text`/`textarea`/`number`/`boolean`/`select`/`multiselect`;
 layout `row`/`column`/`grid`/`box`/`field`/`text`/`divider`; one active form per
 session; `form`/`form_update`/`await_form`/`close_form` primitives plus the
@@ -521,9 +522,172 @@ behavior in actions, styling beyond `columns`/`span`/`gap`/`align`.
 3. **Repeaters in v1** — the only construct that makes values genuinely nested, and
    the only place merge-patch's "arrays replace wholesale" rule bites.
 4. **Headless default** — `unavailable` or auto-`submit` with defaults?
-5. **Capability spelling** — `use_module(library(forms))` (idiomatic, matches
-   `library(clpfd)`) or a DeepClause-native `:- capability(forms).` that does not
-   pretend to be a SWI module?
+
+---
+
+## Appendix A. Worked examples: the model drives the loop
+
+In these two cases the **loop lives in the model**, inside `task/N`, not in a
+Prolog `review_loop/2`. The DML owns policy; the model owns flow.
+
+| | Provided by | |
+|---|---|---|
+| Loop: when to generate, validate, finish | the model, inside `task/N` | tool calls |
+| Form tools | the capability | `render_form`, `update_form`, `close_form`, `wait_for_form_change`, `validate_form`, `advisories` |
+| **Hard** rules | the harness | `form_validate(Values, Errors)` — Prolog |
+| **Soft** rules | the harness | `form_advisories(Values, Warnings)` — Prolog |
+| Domain facts | the harness | plain facts |
+
+Two properties make a model-driven loop safe:
+
+1. **Hard validation is host-enforced on submit.** `form_validate/2` runs when a
+   `validates: hard` action fires; if it returns errors the change is
+   `action: invalid` with `errors`, so the model never receives a `submit` it can
+   act on. "The model decides when to validate" cannot mean "the model may skip
+   validation".
+2. **`validate_form` / `advisories` are affordances, not the gate.** The model
+   calls them for live feedback (`wait_for_form_change` returns `changed`), but
+   the authoritative check is the host's.
+
+### A.1 Expense claim (mostly-fixed fields)
+
+```prolog
+:- capability(forms).
+
+vendor(acme). vendor(globex). vendor(initech).
+category(travel). category(meals). category(supplies). category(software).
+currency(eur). currency(usd). currency(gbp).
+claim_limit(travel, 2000). claim_limit(meals, 150).
+claim_limit(supplies, 500). claim_limit(software, 1000).
+today(D) :- get_time(T), format_time(string(D), '%Y-%m-%d', T).
+
+%% HARD — deterministic, host-enforced on submit.
+form_validate(Values, Errors) :-
+    findall(error(Path, Msg), claim_error(Values, Path, Msg), Errors).
+
+claim_error(V, vendor, "is required") :- \+ get_dict(vendor, V, _).
+claim_error(V, vendor, Msg) :-
+    get_dict(vendor, V, N), \+ vendor(N),
+    format(string(Msg), "unknown vendor: ~w", [N]).
+claim_error(V, category, "is required") :- \+ get_dict(category, V, _).
+claim_error(V, category, Msg) :-
+    get_dict(category, V, C), \+ category(C),
+    format(string(Msg), "unknown category: ~w", [C]).
+claim_error(V, currency, Msg) :-
+    get_dict(currency, V, C), \+ currency(C),
+    format(string(Msg), "unsupported currency: ~w", [C]).
+claim_error(V, amount, "is required") :- \+ get_dict(amount, V, _).
+claim_error(V, amount, "must be positive") :-
+    get_dict(amount, V, A), \+ (number(A), A > 0).
+claim_error(V, date, "is in the future") :-
+    get_dict(date, V, D), today(T), D @> T.
+claim_error(V, amount, Msg) :-
+    get_dict(category, V, Cat), get_dict(amount, V, A),
+    claim_limit(Cat, Limit), A > Limit,
+    format(string(Msg), "exceeds the ~w limit for ~w", [Limit, Cat]).
+claim_error(V, receipt, "is required over 50") :-
+    get_dict(amount, V, A), A > 50,
+    ( get_dict(receipt, V, R) -> R == "" ; true ).
+
+%% SOFT — advisory; exposed as the `advisories` tool.
+form_advisories(Values, Advisories) :-
+    findall(warning(Path, Msg), claim_advisory(Values, Path, Msg), Advisories).
+
+claim_advisory(V, notes, "the note is thin for an amount this size") :-
+    get_dict(notes, V, N), atom_length(N, L), L < 15,
+    get_dict(amount, V, A), A > 100.
+claim_advisory(V, amount, Msg) :-
+    get_dict(category, V, C), get_dict(amount, V, A), claim_limit(C, Limit),
+    A > Limit * 0.8, A =< Limit,
+    format(string(Msg), "within 20%% of the ~w limit for ~w", [Limit, C]).
+
+agent_main(Context) :-
+    system(
+        "You are a data-entry assistant collecting an expense claim.\n\
+         Loop:\n\
+         1. Design the form and call render_form (vendor, category, amount, \
+            currency, date; add a receipt/notes field when the context implies it).\n\
+         2. Call wait_for_form_change. It returns {action, values, errors, changed}.\n\
+         3. action=invalid: the host rejected a submit. Show errors with update_form, \
+            then wait again.\n\
+         4. action=submit: the hard rules passed. Optionally call advisories(values) \
+            and surface anything material before finishing.\n\
+         5. action=cancel: close_form and finish.\n\
+         Never invent values. End with set_result, then finish."),
+    with_tools([render_form, update_form, close_form, wait_for_form_change,
+                advisories, set_result, finish],
+        task("Collect an expense claim. Context: {Context}", string(Summary))),
+    answer(Summary).
+```
+
+### A.2 Customer onboarding (context-dependent fields)
+
+Same shape, but the fields depend on the situation: an individual needs name,
+email and country; a business also needs a legal name and, in the EU, a VAT id.
+The model decides what to render; the hard rules do not bend.
+
+```prolog
+:- capability(forms).
+
+country(de). country(fr). country(gb). country(us).
+eu(de). eu(fr).
+vat_prefix(de, "DE"). vat_prefix(fr, "FR"). vat_prefix(gb, "GB").
+
+%% HARD
+form_validate(Values, Errors) :-
+    findall(error(Path, Msg), onboard_error(Values, Path, Msg), Errors).
+
+onboard_error(V, type, "is required") :- \+ get_dict(type, V, _).
+onboard_error(V, name, "is required") :- \+ get_dict(name, V, _).
+onboard_error(V, email, "is required") :- \+ get_dict(email, V, _).
+onboard_error(V, email, "is not a valid email") :-
+    get_dict(email, V, E), \+ sub_atom(E, _, _, _, "@").
+onboard_error(V, country, "is required") :- \+ get_dict(country, V, _).
+onboard_error(V, country, Msg) :-
+    get_dict(country, V, C), \+ country(C),
+    format(string(Msg), "unsupported country: ~w", [C]).
+onboard_error(V, vat_id, "is required for an EU business") :-
+    get_dict(type, V, business), get_dict(country, V, C), eu(C),
+    ( get_dict(vat_id, V, X) -> X == "" ; true ).
+onboard_error(V, vat_id, Msg) :-
+    get_dict(type, V, business), get_dict(vat_id, V, Vat), Vat \== "",
+    get_dict(country, V, C), vat_prefix(C, P),
+    \+ sub_atom(Vat, 0, 2, _, P),
+    format(string(Msg), "a ~w VAT id begins with ~w", [C, P]).
+
+%% SOFT
+form_advisories(Values, Advisories) :-
+    findall(warning(Path, Msg), onboard_advisory(Values, Path, Msg), Advisories).
+
+onboard_advisory(V, email, "a free-mail address on a business account") :-
+    get_dict(type, V, business), get_dict(email, V, E),
+    ( sub_atom(E, _, _, _, "@gmail.com") ; sub_atom(E, _, _, _, "@outlook.com") ).
+onboard_advisory(V, name, "an unusually short legal name") :-
+    get_dict(type, V, business), get_dict(name, V, N), atom_length(N, L), L < 4.
+
+agent_main(Context) :-
+    system(
+        "You onboard a customer. What the form needs depends on the context: an \
+         individual needs name, email and country; a business also needs a legal \
+         name and, in the EU, a VAT id.\n\
+         Loop with render_form -> wait_for_form_change. The host enforces the hard \
+         rules on submit and returns action=invalid with errors; show them with \
+         update_form and wait again. On action=submit, call advisories(values) and \
+         surface anything material before finishing. Offer `country` as a select. \
+         Never invent values."),
+    with_tools([render_form, update_form, close_form, wait_for_form_change,
+                advisories, set_result, finish],
+        task("Onboard a customer. Context: {Context}", string(Summary))),
+    answer(Summary).
+```
+
+Both loops are the model's — `agent_main` contains a *prompt* and a *tool scope*,
+not a review loop. The rules are not the model's: `form_validate/2` and
+`form_advisories/2` are ordinary Prolog, unit-testable and deterministic, and the
+hard half is not skippable because the host runs it before a `submit` is
+delivered. Generated and fixed forms are the same mechanism: the model can add or
+rename fields, but a core name it reuses (`amount`, `vat_id`) is what the rules
+read, so a form cannot be shaped to escape them.
 
 ---
 
