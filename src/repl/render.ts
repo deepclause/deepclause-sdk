@@ -296,6 +296,10 @@ export interface ReplEventRenderer {
   getWidth(): number;
   setWidth(width: number): void;
   writeLine(text?: string): void;
+  /** The goal produced no solution (`false.` in text, a record in JSON). */
+  noSolution(): void;
+  /** Interactive goal terminator (`.` in text modes; nothing in JSON). */
+  goalTerminator(): void;
   writeErrorLine(text: string): void;
   listing(text: string): string;
   image(lines: string[]): void;
@@ -440,6 +444,25 @@ export class ReplRenderer implements ReplEventRenderer {
     this.sink(`${text}\n`);
     this.lastStreamFrame = null;
     this.atLineStart = true;
+  }
+
+  /**
+   * The goal produced no solution. Text modes print `false.`; JSON mode emits a
+   * `no_solution` record, so a machine consumer never sees a non-JSON line on
+   * stdout (`writeLine` writes raw text).
+   */
+  noSolution(): void {
+    if (this.mode === 'json') {
+      this.sink(`${JSON.stringify({ type: 'no_solution' })}\n`);
+      return;
+    }
+    this.writeLine('false.');
+  }
+
+  /** Interactive goal terminator (`.` in text modes; nothing in JSON). */
+  goalTerminator(): void {
+    if (this.mode === 'json') return;
+    this.writeLine('.');
   }
 
   /**

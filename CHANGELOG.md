@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`--json` output is now pure JSON.** `repl --json -g` wrote a raw `false.`
+  line when a goal produced no solution, corrupting the one-object-per-line
+  stream for any tooling that reads it. It now emits `{"type":"no_solution"}`.
+  A goal that committed with `answer/1` is no longer reported as a failure, and
+  the interactive goal path no longer leaks its `.` terminator in JSON mode.
+
 ## 0.2.2 - 2026-10-15
 
 ### Fixed

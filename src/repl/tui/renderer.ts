@@ -308,6 +308,14 @@ export class TuiRenderer {
     this.text.writeLine(text);
   }
 
+  noSolution(): void {
+    this.text.noSolution();
+  }
+
+  goalTerminator(): void {
+    this.text.goalTerminator();
+  }
+
   writeErrorLine(text: string): void {
     this.text.writeErrorLine(text);
   }

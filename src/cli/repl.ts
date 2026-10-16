@@ -348,6 +348,7 @@ export async function runGoalWithRenderer(
 ): Promise<number> {
   let hadError = false;
   let printedAny = false;
+  let answered = false;
   for await (const event of repl.query(goal, { signal: options.signal })) {
     if (event.type === 'solution') {
       options.renderer.solution(event.solution?.bindings ?? []);
@@ -356,6 +357,9 @@ export async function runGoalWithRenderer(
     } else if (event.type === 'error') {
       hadError = true;
       options.renderer.render(event);
+    } else if (event.type === 'answer') {
+      answered = true;
+      options.renderer.render(event);
     } else if (event.type === 'finished') {
       // Nothing to print for finished.
     } else {
@@ -363,7 +367,11 @@ export async function runGoalWithRenderer(
     }
   }
   if (!printedAny && !hadError) {
-    options.renderer.writeLine('false.');
+    // A goal that committed with `answer/1` succeeded; one that produced neither
+    // a solution nor an answer simply failed. (`goalTerminator`/`noSolution`
+    // keep `--json` stdout pure, where a raw `false.` would corrupt the stream.)
+    if (answered) options.renderer.goalTerminator();
+    else options.renderer.noSolution();
   }
   return hadError ? 1 : 0;
 }
@@ -1330,7 +1338,8 @@ export async function runInteractiveGoal(
   } finally {
     await iterator.return?.(undefined);
   }
-  renderer.writeLine(answered ? '.' : 'false.');
+  if (answered) renderer.goalTerminator();
+  else renderer.noSolution();
 }
 
 /**

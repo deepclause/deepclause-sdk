@@ -132,6 +132,34 @@ describe('runGoalWithRenderer', () => {
     const code = await runGoalWithRenderer(fakeRepl([{ type: 'error', content: 'boom' }]), 'bad', { renderer });
     expect(code).toBe(1);
   });
+
+  it('reports a goal with no solutions as `false.` (plain) and a record (json)', async () => {
+    const plain: string[] = [];
+    await runGoalWithRenderer(fakeRepl([{ type: 'finished' }]), 'fail', {
+      renderer: new ReplRenderer({ mode: 'plain', sink: (text) => plain.push(text) }),
+    });
+    expect(plain.join('')).toContain('false.');
+
+    const json: string[] = [];
+    await runGoalWithRenderer(fakeRepl([{ type: 'finished' }]), 'fail', {
+      renderer: new ReplRenderer({ mode: 'json', sink: (text) => json.push(text) }),
+    });
+    // stdout must stay one-JSON-object-per-line: a raw `false.` corrupts it.
+    expect(json).toHaveLength(1);
+    expect(JSON.parse(json[0])).toEqual({ type: 'no_solution' });
+  });
+
+  it('does not report an answered goal as a failed one', async () => {
+    const json: string[] = [];
+    await runGoalWithRenderer(
+      fakeRepl([{ type: 'answer', content: 'done' }, { type: 'finished' }]),
+      'q',
+      { renderer: new ReplRenderer({ mode: 'json', sink: (text) => json.push(text) }) },
+    );
+    for (const line of json) expect(() => JSON.parse(line)).not.toThrow();
+    expect(json.some((line) => line.includes('no_solution'))).toBe(false);
+    expect(json.some((line) => line.includes('"answer"'))).toBe(true);
+  });
 });
 
 describe('runInteractiveGoal pager', () => {
