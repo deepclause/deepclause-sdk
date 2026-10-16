@@ -18,6 +18,12 @@ import { SANDBOX_WORKSPACE_PATH, type ExecutionEnvironment } from './runtime/she
 export interface EnvironmentBlockOptions {
   workspacePath?: string;
   environment?: ExecutionEnvironment;
+  /**
+   * Name of the single capability host tool (default `bash`). A browser
+   * embedding registers `python` (Pyodide) instead, and the block must say so or
+   * the model calls a tool that does not exist.
+   */
+  capabilityTool?: string;
   /** Injectable clock, so tests do not depend on the wall calendar. */
   now?: Date;
 }
@@ -53,24 +59,25 @@ export function describeNow(now: Date = new Date()): string {
  * the host: that is the WASM filesystem's mount, which is always there.
  */
 export function describeEnvironment(options: EnvironmentBlockOptions = {}): string {
-  const { workspacePath, environment } = options;
+  const { workspacePath, environment, capabilityTool } = options;
   const sandboxed = environment?.sandboxed ?? false;
   const workspace = workspacePath ?? process.cwd();
   const label = environment?.backendLabel ?? 'unknown';
+  const tool = capabilityTool ?? 'bash';
   const lines = [
     'EXECUTION ENVIRONMENT',
-    `- Shell backend: ${label}${environment?.description ? ` (${environment.description})` : ''}.`,
+    `- Capability backend: ${label}${environment?.description ? ` (${environment.description})` : ''}.`,
   ];
 
   if (!sandboxed) {
     lines.push(
-      '- There is NO sandbox: `exec(bash(...))` and the shell tool run as your user '
+      `- There is NO sandbox: \`exec(${tool}(...))\` and the capability tool run as your user `
         + 'account. Writes outside the workspace are real files on this machine and '
         + 'persist, and a `rm` is a real `rm`.',
     );
   } else {
     lines.push(
-      `- \`exec(bash(...))\` is isolated by ${environment?.description}. Writes outside `
+      `- \`exec(${tool}(...))\` is isolated by ${environment?.description}. Writes outside `
         + 'the workspace stay inside that sandbox and are gone when it ends.',
     );
   }

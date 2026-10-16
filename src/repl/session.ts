@@ -148,6 +148,12 @@ export interface DMLSessionOptions {
    * check and the toolset cannot disagree.
    */
   executionBackend?: ExecutionBackendKind;
+  /**
+   * Name of the single capability host tool (default `bash`). A browser
+   * embedding registers `python` (Pyodide), and the environment block and agent
+   * prompt are told so.
+   */
+  capabilityTool?: string;
   /** Human-in-the-loop channel for DML `input/2` / `exec(ask_user(...))`. */
   askUser?: (prompt: string, options?: string[]) => Promise<{ answer: string } | { cancelled: true }>;
   /**
@@ -404,6 +410,7 @@ export class DMLSession {
     this.runner = new DMLRunner(swipl, {
       ...options.runnerOptions,
       environment: this.executionEnvironment,
+      capabilityTool: options.capabilityTool,
       compactMessages: options.compaction
         ? (messages, lastInputTokens, contextWindow) => this.compactLoopMessages(messages, lastInputTokens, contextWindow)
         : undefined,
@@ -1705,6 +1712,7 @@ export class DMLSession {
         : undefined,
       workspacePath: this.workspacePath,
       environment: this.executionEnvironment,
+      capabilityTool: this.openOptions.capabilityTool,
       currentModel: `${this.provider}:${this.model}`,
       modelCatalog: this.modelResolver?.catalog(),
       knownMessages: this.agentMessages,

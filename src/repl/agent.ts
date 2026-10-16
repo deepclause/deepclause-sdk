@@ -46,6 +46,8 @@ export interface HarnessAgentOptions {
   workspacePath?: string;
   /** Effective shell backend, reported to the agent in its environment block. */
   environment?: ExecutionEnvironment;
+  /** Name of the single capability host tool (default `bash`; the browser uses `python`). */
+  capabilityTool?: string;
   /** The session's active model (`provider:model`), shown to the agent. */
   currentModel?: string;
   /** Models available this session (via `with_model/2`). */
@@ -102,6 +104,8 @@ export async function buildAgentSystemPrompt(options: {
   modelCatalog?: ModelCatalogEntry[];
   /** Effective shell backend; see DMLSessionOptions.executionBackend. */
   environment?: ExecutionEnvironment;
+  /** Name of the single capability host tool (default `bash`; the browser uses `python`). */
+  capabilityTool?: string;
   /** Injectable clock, so tests do not depend on the wall calendar. */
   now?: Date;
 } = {}): Promise<string> {
@@ -138,6 +142,7 @@ export async function buildAgentSystemPrompt(options: {
   prompt += describeRuntimeContext({
     workspacePath: options.workspacePath,
     environment: options.environment,
+    capabilityTool: options.capabilityTool,
     now: options.now,
   });
   return prompt;
@@ -305,6 +310,7 @@ export class HarnessAgent {
       currentModel: this.options.currentModel,
       modelCatalog: this.options.modelCatalog,
       environment: this.options.environment,
+      capabilityTool: this.options.capabilityTool,
     });
 
     this.messages.push({ role: 'user', content: request });

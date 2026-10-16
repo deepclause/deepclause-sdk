@@ -205,6 +205,8 @@ export interface RunnerOptions {
   modelResolver?: ModelResolver;
   /** Effective shell backend, passed to nested task agents for their env block. */
   environment?: import('./system/runtime/shell-manager.js').ExecutionEnvironment;
+  /** Name of the single capability host tool (default `bash`; the browser uses `python`). */
+  capabilityTool?: string;
 }
 
 export interface ProcessRequestPayload {
@@ -1235,6 +1237,7 @@ export class DMLRunner {
       tools: availableTools,
       workspacePath: options.workspacePath,
       environment: this.options.environment,
+      capabilityTool: this.options.capabilityTool,
       resolveMedia: (refs) => this.readMediaRefs(options.workspacePath, refs),
       modelOptions: {
         model: scopedModel?.id ?? this.options.model,
@@ -2379,6 +2382,7 @@ export class DMLRunner {
                 // Withheld to break a call cycle; declared to the model so a
                 // call can be answered with the reason rather than "not found".
                 excludedTools: nestedExcludedTools,
+                capabilityTool: this.options.capabilityTool,
                 modelOptions: {
                   model: this.options.model,
                   provider: this.options.provider,

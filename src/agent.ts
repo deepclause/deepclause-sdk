@@ -80,6 +80,8 @@ export interface AgentLoopOptions {
    * and dates in the dark.
    */
   environment?: ExecutionEnvironment;
+  /** Name of the single capability host tool (default `bash`; the browser uses `python`). */
+  capabilityTool?: string;
   modelOptions: {
     model: string;
     provider: string;
@@ -1048,6 +1050,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     tools,
     workspacePath: options.workspacePath,
     environment: options.environment,
+    capabilityTool: options.capabilityTool,
   });
 
   // Extract system context from memory (user-defined system() calls)
@@ -1638,6 +1641,7 @@ async function buildSystemPrompt(options: {
   tools: Map<string, ToolDefinition>;
   workspacePath?: string;
   environment?: ExecutionEnvironment;
+  capabilityTool?: string;
 }): Promise<string> {
   const toolDescriptions: string[] = [];
   const normalizedOutputVars = options.outputVars;
@@ -1698,5 +1702,6 @@ async function buildSystemPrompt(options: {
     .replace('{ENVIRONMENT_SECTION}', describeEnvironment({
       workspacePath: options.workspacePath,
       environment: options.environment,
+      capabilityTool: options.capabilityTool,
     }) + describeCurrentTime());
 }
