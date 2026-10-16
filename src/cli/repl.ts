@@ -49,6 +49,7 @@ import { createPiImageBackend } from '../repl/imagegen.js';
 import { EnvModelResolver, PiModelResolver, type ModelResolver } from '../repl/model-resolver.js';
 import type { FormEventPayload, ImageBackend } from '../types.js';
 import type { JsonObject } from '../forms/spec.js';
+import { pickForm } from '../repl/form-widget.js';
 import { parseModelId, resolveModelSlotConfig, type Provider } from '../system/config/model-slots.js';
 import { loadReplConfig, resolveReplCompactionConfig, updateConfig } from './config.js';
 import {
@@ -381,6 +382,19 @@ export async function runGoalWithRenderer(
  * The REPL's form interaction (v0): a field-by-field wizard over the existing
  * input channel. The pi-tui form widget is the next step (docs/DML_FORMS.md §9).
  */
+async function presentFormWidget(repl: HarnessRepl, form: FormEventPayload): Promise<void> {
+  const spec = form.spec;
+  if (!spec) return;
+  const change = await pickForm({ spec, values: form.values, issues: form.issues });
+  repl.session.submitForm(form.formId, change
+    ? { action: change.action, values: change.values }
+    : { action: 'cancel', values: form.values ?? {} });
+}
+
+/**
+ * The TUI/non-TTY form interaction: a field-by-field wizard over the existing
+ * input channel. The plain-TTY path uses the widget instead.
+ */
 async function presentForm(repl: HarnessRepl, form: FormEventPayload): Promise<void> {
   const spec = form.spec;
   if (!spec) return;
@@ -712,7 +726,9 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
     judgeSelection,
     imageBackend,
     modelResolver,
-    onForm: (form) => presentForm(repl, form),
+    onForm: (form) => (options.plain && process.stdin.isTTY && process.stdout.isTTY
+      ? presentFormWidget(repl, form)
+      : presentForm(repl, form)),
     history: historyOptions,
     harness: harnessName,
     execution: options.execution,

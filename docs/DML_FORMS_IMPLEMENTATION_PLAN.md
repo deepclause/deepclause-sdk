@@ -13,12 +13,14 @@ how it gets built, in an order where every step is testable before the next one.
 | 3 primitives | done — `form/2`, `form_update/2`, `form_errors/2`, `await_form/2,3`, `close_form/1`; runner handles both statuses at all three sites |
 | 4 capability + tools | done — `:- capability(forms)`, `require_capability/1`, the `tool/2` wrappers loaded through `process_clause`, and host-enforced hard validation (`form_validate/2`; a rejected submit becomes `invalid` + `errors`) |
 | 5 model-driven e2e | done — a `tool/2` body drives render → wait → submit under a scripted model |
-| 6 REPL | **partial** — the field-by-field wizard runs **live** (`onForm` in `src/cli/repl.ts`); the pi-tui form widget is next |
+| 6 REPL | done — a field widget (`src/repl/form-widget.ts`: focus, edit, toggle, `^s` submit, esc cancel) on the plain-TTY path, the wizard elsewhere, and the renderer shows the form + issues |
+| 7 typed tool inputs | done — `tool(Head, Desc, [Type, …])`, so a tool takes an object/number/array |
 
 ## Not yet built
 
-- **The pi-tui form widget** — v0 is a wizard.
-- **Typed tool inputs** — the capability tools take the spec/patch as a JSON string.
+- **The widget in the TUI.** The TUI keeps the wizard: the widget takes over raw
+  stdin, which would fight the TUI's renderer. A pi-tui overlay (keys routed to a
+  `Component`) is the next step if the wizard is not enough there.
 - **Subagent-owned forms** (L2 forwarding), repeaters, `tabs`, cross-turn surfaces.
 
 Two things fixed along the way that the feature forced out:

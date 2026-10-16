@@ -123,6 +123,7 @@
 %% `proc_request_payload/2` sits between the process-primitive clauses of
 %% `process_engine_result/4`, which is intentional.
 :- discontiguous process_engine_result/4.
+:- discontiguous process_directive/2.
 
 %% Dynamic predicates for session state (engine management only, not memory!)
 :- dynamic session_engine/2.       % session_engine(SessionId, Engine) - legacy default engine handle
