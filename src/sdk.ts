@@ -6,11 +6,13 @@ import type {
   CreateOptions,
   DeepClauseSDK,
   DMLEvent,
+  FormSubmitPayload,
   MemoryMessage,
   RunOptions,
   ToolDefinition,
   ToolPolicy,
 } from './types.js';
+import { FormRegistry } from './forms/registry.js';
 import { DMLRunner } from './runner.js';
 import { loadProlog } from './prolog/loader.js';
 import { createLLMJudgeBackend } from './judge/llm.js';
@@ -131,6 +133,10 @@ export async function createDeepClause(options: CreateOptions): Promise<DeepClau
   let toolPolicy: ToolPolicy | null = null;
   let disposed = false;
 
+  // Form host state (docs/DML_FORMS.md). One registry per SDK instance; the
+  // active form tools are gated by the `forms` capability.
+  const forms = new FormRegistry();
+
   // Input handling
   let pendingInputResolve: ((input: string) => void) | null = null;
 
@@ -151,6 +157,7 @@ export async function createDeepClause(options: CreateOptions): Promise<DeepClau
         ...runOptions,
         tools,
         toolPolicy,
+        forms,
         gasLimit: runOptions?.gasLimit,
         onInputRequired: async (prompt: string) => {
           if (runOptions?.onUserInput) {
@@ -169,6 +176,13 @@ export async function createDeepClause(options: CreateOptions): Promise<DeepClau
         throw new Error('SDK has been disposed');
       }
       tools.set(name, tool);
+    },
+
+    submitForm(formId: string, change: FormSubmitPayload): boolean {
+      const record = forms.get(formId);
+      if (!record || record.state !== 'open') return false;
+      forms.submit(formId, change.action, change.values ?? {}, change.errors ?? []);
+      return true;
     },
 
     setToolPolicy(policy: ToolPolicy): void {

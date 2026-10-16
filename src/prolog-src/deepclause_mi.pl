@@ -106,7 +106,11 @@
     create_tool_engine/4,
     step_tool_engine/4,
     destroy_tool_engine/1,
-    post_tool_agent_result/5
+    post_tool_agent_result/5,
+    % Forms capability (docs/DML_FORMS.md)
+    post_form_result/2,
+    repl_capabilities/2,
+    repl_has_capability/2
 ]).
 
 :- use_module(deepclause_strings).
@@ -155,6 +159,8 @@
 :- dynamic session_proc_result/3.  % session_proc_result(SessionId, Key, Value) - process primitive results
 :- dynamic session_user_input/2.   % session_user_input(SessionId, Input) - for ask_user tool
 :- dynamic session_input_cancelled/1. % session_input_cancelled(SessionId) - input/2 should fail (non-interactive)
+:- dynamic session_form_result/2.  % session_form_result(SessionId, Result) - forms primitive results
+:- dynamic session_capability/2.   % session_capability(SessionId, Name) - enabled capabilities
 
 %% ============================================================
 %% DML Parsing
@@ -802,6 +808,54 @@ process_directive(repl_delete(Name/Arity), SessionId) :-
     Arity >= 0,
     catch(abolish(SessionId:Name/Arity), _, true).
 
+%% process_directive(capability(+Name), +SessionId)
+%% A harness opts into a host capability. Recorded transactionally in
+%% session_capability/2, so rollback/reset revert it. See docs/DML_FORMS.md §4.
+process_directive(capability(Name), SessionId) :-
+    !,
+    (   capability_library(Name)
+    ->  assertz(session_capability(SessionId, Name)),
+        enable_capability(SessionId, Name)
+    ;   format(atom(Message), 'unknown capability: ~w', [Name]),
+        throw(error(domain_error(capability, Name), Message))
+    ).
+
+%% capability_library(+Name)
+%% The host features a harness may declare. Add to this as capabilities grow.
+capability_library(forms).
+
+%% enable_capability(+SessionId, +Name)
+%% Loads the capability's DML surface through the normal clause path, so the
+%% `tool/2` wrappers land in session_user_tools/2 and `task/N` offers them.
+enable_capability(SessionId, Name) :-
+    forall(capability_clause(Name, Clause), process_clause(Clause, SessionId)).
+
+capability_clause(forms,
+    (tool(render_form(SpecJson, FormId),
+          "Open (or replace) a form. SpecJson is the form spec as a JSON object string. Returns the form id.")
+        :- atom_json_dict(SpecJson, Spec, []), form(Spec, FormId))).
+capability_clause(forms,
+    (tool(update_form(FormId, PatchJson, Result),
+          "Update form values. PatchJson is a JSON merge patch object string.")
+        :- atom_json_dict(PatchJson, Patch, []), form_update(FormId, Patch), Result = ok)).
+capability_clause(forms,
+    (tool(set_form_issues(FormId, IssuesJson, Result),
+          "Attach per-field errors/warnings. IssuesJson is a JSON array of {path, level, message}.")
+        :- atom_json_dict(IssuesJson, Issues, []), form_errors(FormId, Issues), Result = ok)).
+capability_clause(forms,
+    (tool(wait_for_form_change(FormId, Change),
+          "Wait for the user to act on a form. Change is a dict with action, values, revision and changed.")
+        :- await_form(FormId, Change))).
+capability_clause(forms,
+    (tool(close_form(FormId, Result), "Close a form.")
+        :- close_form(FormId), Result = ok)).
+
+%% repl_capabilities(+SessionId, -Names) / repl_has_capability(+SessionId, +Name)
+repl_capabilities(SessionId, Names) :-
+    findall(Name, session_capability(SessionId, Name), Names).
+repl_has_capability(SessionId, Name) :-
+    session_capability(SessionId, Name).
+
 %% process_directive(require_sandbox, +SessionId)
 %% The harness declares that it must run in an execution sandbox, and the load
 %% fails if it cannot. Checked against the **effective** backend rather than
@@ -1070,6 +1124,7 @@ clear_session(SessionId) :-
     retractall(repl_snapshot(SessionId, _)),
     retractall(session_user_tools(SessionId, _)),
     retractall(session_user_tool_schema(SessionId, _, _)),
+    retractall(session_capability(SessionId, _)),
     repl_abolish_user_predicates(SessionId).
 
 %% destroy_session(+SessionId)
@@ -3014,6 +3069,18 @@ process_engine_result(request_exec(Tool, Args), request_exec, '',
 process_engine_result(request_proc(Request), request_proc, '', Payload) :-
     proc_request_payload(Request, Payload).
 
+%% Forms (docs/DML_FORMS.md). The host owns the registry; these carry the
+%% operation and, for `wait_form`, the change to deliver.
+process_engine_result(request_form(Op, Spec), request_form, '', payload{op: Op, spec: Spec}) :- !.
+process_engine_result(request_form(update, FormId, Patch), request_form, '',
+    payload{op: update, formId: FormId, patch: Patch}) :- !.
+process_engine_result(request_form(errors, FormId, Issues), request_form, '',
+    payload{op: errors, formId: FormId, issues: Issues}) :- !.
+process_engine_result(request_form(close, FormId), request_form, '',
+    payload{op: close, formId: FormId}) :- !.
+process_engine_result(wait_form(FormId, Since, Timeout), wait_form, '',
+    payload{formId: FormId, since: Since, timeout: Timeout}) :- !.
+
 %% proc_request_payload(+Request, -Payload)
 proc_request_payload(self, payload{op: self}) :- !.
 proc_request_payload(spawn(Goal), payload{op: spawn, goal: Goal}) :- !.
@@ -3122,6 +3189,14 @@ post_proc_result(SessionId, Key, Value) :-
     retractall(session_proc_result(SessionId, Key, _)),
     assertz(session_proc_result(SessionId, Key, Value)),
     post_signal_to_engine(SessionId, proc_done).
+
+%% post_form_result(+SessionId, +Result)
+%% Reply to a forms primitive (`form/2`, `form_update/2`, `form_errors/2`,
+%% `await_form/2,3`, `close_form/1`). Result is `ok(...)` or `error(...)`.
+post_form_result(SessionId, Result) :-
+    retractall(session_form_result(SessionId, _)),
+    assertz(session_form_result(SessionId, Result)),
+    post_signal_to_engine(SessionId, form_done).
 
 %% post_sample_token_result(+SessionId, +Status, +TokenOrError)
 post_sample_token_result(SessionId, Status, TokenOrError) :-
@@ -3576,6 +3651,16 @@ process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory), reques
 %% are yielded to the host exactly as in the main engine.
 process_tool_engine_result(request_proc(Request), request_proc, '', Payload) :-
     proc_request_payload(Request, Payload).
+%% Form primitives reached inside a DML tool (docs/DML_FORMS.md).
+process_tool_engine_result(request_form(Op, Spec), request_form, '', payload{op: Op, spec: Spec}) :- !.
+process_tool_engine_result(request_form(update, FormId, Patch), request_form, '',
+    payload{op: update, formId: FormId, patch: Patch}) :- !.
+process_tool_engine_result(request_form(errors, FormId, Issues), request_form, '',
+    payload{op: errors, formId: FormId, issues: Issues}) :- !.
+process_tool_engine_result(request_form(close, FormId), request_form, '',
+    payload{op: close, formId: FormId}) :- !.
+process_tool_engine_result(wait_form(FormId, Since, Timeout), wait_form, '',
+    payload{formId: FormId, since: Since, timeout: Timeout}) :- !.
 process_tool_engine_result(output(Text), output, Text, none) :- !.
 process_tool_engine_result(log(Text), log, Text, none) :- !.
 process_tool_engine_result(Other, error, Msg, none) :-
@@ -4896,6 +4981,96 @@ mi_call(input(Prompt, Input), StateIn, StateIn) :-
         add_trace_with_result(SessionId, exit, input, [InterpPrompt], "", Depth)
     ).
 
+%% ============================================================
+%% Forms (docs/DML_FORMS.md) — gated by `:- capability(forms).`
+%% ============================================================
+
+%% require_capability(+Name)
+%% A capability a harness must declare. Fails with a precise message, so a
+%% missing directive never reads like a typo.
+require_capability(Name) :-
+    get_session_id(SessionId),
+    (   session_capability(SessionId, Name)
+    ->  true
+    ;   format(atom(Message),
+            'the `~w` capability is not enabled: add `:- capability(~w).` to the harness',
+            [Name, Name]),
+        throw(error(permission_error(use, capability, Name), Message))
+    ).
+
+%% mi_call(form(+Spec, -FormId), +StateIn, -StateOut)
+mi_call(form(Spec, FormId), StateIn, StateIn) :-
+    !,
+    require_capability(forms),
+    get_session_id(SessionId),
+    engine_yield(request_form(open, Spec)),
+    get_next_signal(SessionId, _),
+    session_form_result(SessionId, Result),
+    retract(session_form_result(SessionId, _)),
+    (   Result = ok(Dict)
+    ->  get_dict(formId, Dict, FormId)
+    ;   throw(error(form_open_failed(Result), form/2))
+    ).
+
+%% mi_call(form_update(+FormId, +Patch), +StateIn, -StateOut)
+mi_call(form_update(FormId, Patch), StateIn, StateIn) :-
+    !,
+    require_capability(forms),
+    get_session_id(SessionId),
+    engine_yield(request_form(update, FormId, Patch)),
+    get_next_signal(SessionId, _),
+    session_form_result(SessionId, _), retract(session_form_result(SessionId, _)).
+
+%% mi_call(form_errors(+FormId, +Issues), +StateIn, -StateOut)
+%% Issues are `error(Path, Message)` / `warning(Path, Message)` terms.
+mi_call(form_errors(FormId, Issues), StateIn, StateIn) :-
+    !,
+    require_capability(forms),
+    form_issue_dicts(Issues, Dicts),
+    get_session_id(SessionId),
+    engine_yield(request_form(errors, FormId, Dicts)),
+    get_next_signal(SessionId, _),
+    session_form_result(SessionId, _), retract(session_form_result(SessionId, _)).
+
+%% mi_call(close_form(+FormId), +StateIn, -StateOut)
+mi_call(close_form(FormId), StateIn, StateIn) :-
+    !,
+    require_capability(forms),
+    get_session_id(SessionId),
+    engine_yield(request_form(close, FormId)),
+    get_next_signal(SessionId, _),
+    session_form_result(SessionId, _), retract(session_form_result(SessionId, _)).
+
+%% mi_call(await_form(+FormId, -Change) / await_form(+FormId, +Since, -Change))
+%% The 2-arity form waits for the next change (the registry's cursor).
+mi_call(await_form(FormId, Change), StateIn, StateIn) :-
+    !,
+    mi_call(await_form(FormId, -1, Change), StateIn, StateIn).
+mi_call(await_form(FormId, Since, Change), StateIn, StateIn) :-
+    !,
+    require_capability(forms),
+    get_session_id(SessionId),
+    engine_yield(wait_form(FormId, Since, 0)),
+    get_next_signal(SessionId, _),
+    session_form_result(SessionId, Result),
+    retract(session_form_result(SessionId, _)),
+    (   Result = ok(Dict)
+    ->  Change = Dict
+    ;   throw(error(form_wait_failed(Result), await_form/3))
+    ).
+
+%% form_issue_dicts(+Issues, -Dicts)
+form_issue_dicts([], []).
+form_issue_dicts([Issue|Rest], [Dict|Dicts]) :-
+    issue_dict(Issue, Dict),
+    form_issue_dicts(Rest, Dicts).
+
+issue_dict(error(Path, Message), issue{path: Path, level: error, message: Message}) :- !.
+issue_dict(warning(Path, Message), issue{path: Path, level: warning, message: Message}) :- !.
+issue_dict(issue{path: Path, level: Level, message: Message}, issue{path: Path, level: Level, message: Message}) :- !.
+%% A dict already shaped like an issue (e.g. parsed from JSON) passes through.
+issue_dict(Issue, Issue) :- is_dict(Issue), !.
+
 %% mi_call(yield(Text), +StateIn, -StateOut)
 mi_call(yield(Text), StateIn, StateIn) :-
     get_params(StateIn, Params),
@@ -6024,6 +6199,13 @@ is_mi_special_predicate(wait(_)).
 is_mi_special_predicate(wait(_,_)).
 is_mi_special_predicate(param(_,_)).
 is_mi_special_predicate(param(_,_,_)).
+%% Forms (docs/DML_FORMS.md) — gated by `:- capability(forms).`
+is_mi_special_predicate(form(_,_)).
+is_mi_special_predicate(form_update(_,_)).
+is_mi_special_predicate(form_errors(_,_)).
+is_mi_special_predicate(await_form(_,_)).
+is_mi_special_predicate(await_form(_,_,_)).
+is_mi_special_predicate(close_form(_)).
 %% Prompt predicates (like task but with fresh memory)
 is_mi_special_predicate(prompt(_)).
 is_mi_special_predicate(prompt(_,_)).

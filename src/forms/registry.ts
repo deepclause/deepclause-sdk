@@ -71,6 +71,8 @@ export class FormRegistry {
   private readonly forms = new Map<string, FormRecord>();
   private readonly waiters = new Map<string, Waiter[]>();
   private readonly lastChange = new Map<string, FormChange>();
+  /** Per-form cursor: the last revision delivered to (or consumed by) a caller. */
+  private readonly delivered = new Map<string, number>();
   private counter = 0;
 
   constructor(private readonly options: FormRegistryOptions = {}) {}
@@ -91,6 +93,7 @@ export class FormRegistry {
       source: options.source ?? existing?.source,
     };
     this.forms.set(formId, record);
+    this.delivered.set(formId, revision);
     this.emit({ type: 'form', op: 'open', formId, revision, spec, values, issues: [], source: record.source });
     return { formId, revision, values };
   }
@@ -174,22 +177,27 @@ export class FormRegistry {
   }
 
   /**
-   * Wait for a UI change after `since`. Resolves immediately when a later change
-   * already exists (so a submit that raced the wait is not lost).
+   * Wait for a UI change. `since` defaults to the form's delivered cursor (set
+   * at open, advanced per delivery), so a caller need not track revisions and a
+   * submit that raced the wait is still delivered.
    */
-  wait(formId: string, since: number, options: WaitOptions = {}): Promise<FormChange> {
+  wait(formId: string, since?: number, options: WaitOptions = {}): Promise<FormChange> {
     const record = this.forms.get(formId);
     if (!record) {
       return Promise.resolve({ formId, revision: 0, action: 'unavailable', values: {} });
     }
+    const cursor = since !== undefined && since >= 0 ? since : this.delivered.get(formId) ?? 0;
     const existing = this.lastChange.get(formId);
-    if (existing && existing.revision > since) return Promise.resolve(existing);
+    if (existing && existing.revision > cursor) {
+      this.delivered.set(formId, existing.revision);
+      return Promise.resolve(existing);
+    }
     if (record.state !== 'open') {
       return Promise.resolve({ formId, revision: record.revision, action: 'closed', values: record.values });
     }
 
     return new Promise<FormChange>((resolve) => {
-      const waiter: Waiter = { since, resolve };
+      const waiter: Waiter = { since: cursor, resolve };
       if (options.timeoutMs !== undefined && options.timeoutMs > 0) {
         waiter.timer = setTimeout(() => {
           this.removeWaiter(formId, waiter);
@@ -228,6 +236,7 @@ export class FormRegistry {
   private wake(formId: string, change: FormChange): void {
     const list = this.waiters.get(formId);
     if (!list) return;
+    this.delivered.set(formId, change.revision);
     for (const waiter of list.splice(0)) this.settle(waiter, change);
   }
 

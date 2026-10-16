@@ -21,6 +21,8 @@ import { mountWorkspace } from './prolog/loader.js';
 import { runAgentLoop } from './agent.js';
 import { takePrologMessages } from './prolog/loader.js';
 import { validateToolArguments } from './repl/tool-arguments.js';
+import type { FormRegistry } from './forms/registry.js';
+import type { FormIssue, FormSpec, JsonObject } from './forms/spec.js';
 import { judgeAnswersToValues, judgeCacheKey, normalizeJudgeState, parseJudgeQuestions, validateJudgeAnswers, valuesToPrologList } from './judge/marshal.js';
 import type { JudgeAnswer, JudgeCapabilities, JudgeSelection, JudgeUsage, JsonValue, JudgeQuestion } from './judge/types.js';
 import {
@@ -222,6 +224,20 @@ export interface ProcessRequestResult {
   term: string;
 }
 
+/** Decode `issue{path, level, message}` dicts from Prolog into `FormIssue[]`. */
+function toFormIssues(raw: unknown): FormIssue[] {
+  const value = toJsValue(raw);
+  if (!Array.isArray(value)) return [];
+  return value.map((entry) => {
+    const obj = toJsValue(entry) as Record<string, unknown>;
+    return {
+      path: String(obj?.path ?? ''),
+      level: obj?.level === 'warning' ? 'warning' : 'error',
+      message: String(obj?.message ?? ''),
+    };
+  });
+}
+
 export interface InternalRunOptions {
   args?: unknown[];
   params?: Record<string, unknown>;
@@ -238,6 +254,8 @@ export interface InternalRunOptions {
   ) => Promise<ProcessRequestResult>;
   signal?: AbortSignal;
   initialMessages?: MemoryMessage[];
+  /** Form host state, when the `forms` capability is active (docs/DML_FORMS.md). */
+  forms?: FormRegistry;
   /** Per-run default judgment backend name override. */
   judgeBackend?: string;
   /**
@@ -252,6 +270,8 @@ interface RunnerExecutionContext {
   signal?: AbortSignal;
   toolPolicy?: ToolPolicy | null;
   onModelCall?: () => boolean | Promise<boolean>;
+  /** Form host state, so a tool body can call the form primitives. */
+  forms?: FormRegistry;
   /** Handles a DML process primitive reached inside a tool engine. */
   onProcessRequest?: (
     request: ProcessRequestPayload,
@@ -622,6 +642,24 @@ export class DMLRunner {
             const message = error instanceof Error ? error.message : String(error);
             this.postProcessResult(String(payload.op), `error(${JSON.stringify(message)})`);
           }
+          break;
+        }
+
+        case 'request_form': {
+          // A form operation. The host owns the registry; the result is posted
+          // back so Prolog/MI keeps the encoding (docs/DML_FORMS.md §7).
+          const payload = (step.payload ?? {}) as Record<string, unknown>;
+          const event = this.handleFormRequest(payload, options.forms);
+          if (event) yield event;
+          break;
+        }
+
+        case 'wait_form': {
+          const payload = (step.payload ?? {}) as Record<string, unknown>;
+          const formId = String(toJsValue(payload.formId) ?? '');
+          const since = Number(toJsValue(payload.since) ?? 0);
+          const timeoutMs = Number(toJsValue(payload.timeout) ?? 0);
+          this.postFormResult(await this.handleFormWait(formId, since, timeoutMs, options.forms, options.signal));
           break;
         }
 
@@ -1152,6 +1190,7 @@ export class DMLRunner {
             toolPolicy: options.toolPolicy,
             onModelCall: options.onModelCall,
             onProcessRequest: options.onProcessRequest,
+            forms: options.forms,
           },
           withheld,
           emitToolCall,
@@ -1240,8 +1279,12 @@ export class DMLRunner {
       llmBackend: this.options.llmBackend,
     });
 
-    // Yield streaming events as they arrive
-    if (this.options.streaming) {
+    // Drain host events as they arrive. This must run even when not streaming:
+    // a tool can block on a host request — a form wait, an `ask_user` — and that
+    // request must reach the consumer *before* the tool returns, or the run
+    // deadlocks. Non-streaming queues no stream/reasoning chunks, so yielding
+    // everything here is equivalent.
+    {
       while (true) {
         // Process any queued events
         while (streamQueue.length > 0) {
@@ -1261,9 +1304,14 @@ export class DMLRunner {
           while (streamQueue.length > 0) {
             yield streamQueue.shift()!;
           }
-          
-          // In streaming mode, output was already shown via onStream - don't repeat it
-          // The outputs array is kept for memory/history purposes only
+
+          // In streaming mode, output was already shown via onStream - don't
+          // repeat it. The outputs array is kept for memory/history purposes.
+          if (!this.options.streaming) {
+            for (const output of raceResult.result.outputs) {
+              yield { type: 'output', content: output };
+            }
+          }
 
           const finalizedMemory = [
             ...preparedMemory.filter((message) => message.role === 'system'),
@@ -1284,45 +1332,6 @@ export class DMLRunner {
         }
         // Otherwise continue loop to yield queued stream events
       }
-    } else {
-      // Non-streaming mode - wait for completion
-      const result = await resultPromise;
-
-      // Drain tool_call events from queue (they were queued during agent execution)
-      if (process.env.DEBUG_QUEUE) {
-        console.log('[RUNNER] Non-streaming: streamQueue length before drain:', streamQueue.length);
-        if (streamQueue.length > 0) {
-          console.log('[RUNNER] streamQueue contents:', streamQueue.map(e => `${e.type}:${e.content?.substring(0, 40)}`));
-        }
-      }
-      while (streamQueue.length > 0) {
-        yield streamQueue.shift()!;
-      }
-
-      if (process.env.DEBUG_QUEUE) {
-        console.log('[RUNNER] Non-streaming agent result.outputs:', result.outputs);
-      }
-
-      // Stream any output from the agent
-      for (const output of result.outputs) {
-        yield { type: 'output', content: output };
-      }
-
-      const finalizedMemory = [
-        ...preparedMemory.filter((message) => message.role === 'system'),
-        ...result.messages,
-      ];
-
-      while (streamQueue.length > 0) {
-        yield streamQueue.shift()!;
-      }
-
-      // Update memory with full agent conversation
-      this.currentMemory = finalizedMemory;
-
-      // Post result back to Prolog
-      stepSucceeded = result.success;
-      this.postAgentResult(result, finalizedMemory);
     }
     } finally {
       yield {
@@ -2447,6 +2456,24 @@ export class DMLRunner {
             break;
           }
           
+          case 'request_form': {
+            // A DML tool reached a form primitive. Resolve it through the same
+            // host registry as the enclosing run (docs/DML_FORMS.md §4).
+            const formPayload = (payload ?? {}) as Record<string, unknown>;
+            const event = this.handleFormRequest(formPayload, runContext.forms);
+            if (event) onToolEvent?.(event);
+            break;
+          }
+
+          case 'wait_form': {
+            const formPayload = (payload ?? {}) as Record<string, unknown>;
+            const formId = String(toJsValue(formPayload.formId) ?? '');
+            const since = Number(toJsValue(formPayload.since) ?? 0);
+            const timeoutMs = Number(toJsValue(formPayload.timeout) ?? 0);
+            this.postFormResult(await this.handleFormWait(formId, since, timeoutMs, runContext.forms, runContext.signal));
+            break;
+          }
+
           case 'error': {
             return { result: { error: content }, outputs };
           }
@@ -2571,6 +2598,84 @@ export class DMLRunner {
    * Post a process primitive result back to Prolog under a named slot.
    * `term` is a raw Prolog term string, so the caller controls encoding.
    */
+  /**
+   * Apply a form operation and return the `form` event to emit, if any.
+   * The registry owns state; the result is posted back to Prolog as a term so
+   * the MI keeps the encoding, like `request_proc` (docs/DML_FORMS.md §7).
+   */
+  private handleFormRequest(payload: Record<string, unknown>, forms: FormRegistry | undefined): DMLEvent | undefined {
+    if (!forms) {
+      this.postFormResult('error(no_form_host)');
+      return undefined;
+    }
+    const op = String(toJsValue(payload.op) ?? '');
+
+    if (op === 'open') {
+      const spec = toJsValue(payload.spec) as FormSpec;
+      const opened = forms.open(spec);
+      this.postFormResult(`ok(${this.toPrologTerm({ formId: opened.formId, revision: opened.revision })})`);
+      return {
+        type: 'form',
+        form: { op: 'open', formId: opened.formId, revision: opened.revision, spec, values: opened.values, issues: [] },
+      };
+    }
+
+    const formId = String(toJsValue(payload.formId) ?? '');
+    if (op === 'update') {
+      const patch = (toJsValue(payload.patch) ?? {}) as JsonObject;
+      forms.update(formId, patch);
+      this.postFormResult('ok');
+      const record = forms.get(formId);
+      return record
+        ? { type: 'form', form: { op: 'update', formId, revision: record.revision, patch, values: record.values, issues: record.issues } }
+        : undefined;
+    }
+    if (op === 'errors') {
+      const issues = toFormIssues(payload.issues);
+      forms.setIssues(formId, issues);
+      this.postFormResult('ok');
+      const record = forms.get(formId);
+      return record
+        ? { type: 'form', form: { op: 'update', formId, revision: record.revision, values: record.values, issues } }
+        : undefined;
+    }
+    if (op === 'close') {
+      forms.close(formId, 'submitted');
+      this.postFormResult('ok');
+      const record = forms.get(formId);
+      return { type: 'form', form: { op: 'close', formId, revision: record?.revision ?? 0, state: 'submitted' } };
+    }
+
+    this.postFormResult(`error(unknown_form_op(${op}))`);
+    return undefined;
+  }
+
+  /** Await a form change and return the result term to post to Prolog. */
+  private async handleFormWait(
+    formId: string,
+    since: number,
+    timeoutMs: number,
+    forms: FormRegistry | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<string> {
+    if (!forms) return 'error(no_form_host)';
+    try {
+      const change = await forms.wait(formId, since, {
+        timeoutMs: timeoutMs > 0 ? timeoutMs : undefined,
+        signal,
+      });
+      return `ok(${this.toPrologTerm(change)})`;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return `error(${JSON.stringify(message)})`;
+    }
+  }
+
+  /** Post a form primitive result back to Prolog under the form slot. */
+  private postFormResult(term: string): void {
+    this.query(`deepclause_mi:post_form_result('${this.sessionId}', ${term})`);
+  }
+
   private postProcessResult(key: string, term: string): void {
     const atom = /^[a-z][A-Za-z0-9_]*$/.test(key) ? key : `'${key.replace(/'/g, "''")}'`;
     this.query(`deepclause_mi:post_proc_result('${this.sessionId}', ${atom}, ${term})`);
