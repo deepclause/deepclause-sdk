@@ -100,6 +100,24 @@ agent_main :-
 `;
 
 describe('host-enforced hard validation', () => {
+  it('enforces the declared spec constraints without a form_validate/2', async () => {
+    const code = `
+:- capability(forms).
+agent_main :-
+    form(_{version: 1, title: "T",
+           fields: [_{name: subject, type: string, required: true}],
+           actions: [_{name: submit, title: "Go"}]}, F),
+    await_form(F, Change),
+    get_dict(action, Change, Action),
+    answer(Action).
+`;
+    const bad = await run(code, 'submit', {});
+    expect(bad.events.some((event) => event.type === 'answer' && event.content === 'invalid')).toBe(true);
+
+    const good = await run(code, 'submit', { subject: 'ok' });
+    expect(good.events.some((event) => event.type === 'answer' && event.content === 'submit')).toBe(true);
+  });
+
   it('turns a rejected submit into `invalid` with the rules\' errors', async () => {
     const { events } = await run(HARD_RULES, 'submit', { amount: -1 });
     // The model never sees `submit`; it sees `invalid` and can re-render.

@@ -24,6 +24,7 @@ import { takePrologMessages } from './prolog/loader.js';
 import { validateToolArguments } from './repl/tool-arguments.js';
 import type { FormRegistry } from './forms/registry.js';
 import type { FormIssue, FormSpec, JsonObject } from './forms/spec.js';
+import { validateValues } from './forms/spec.js';
 import { judgeAnswersToValues, judgeCacheKey, normalizeJudgeState, parseJudgeQuestions, validateJudgeAnswers, valuesToPrologList } from './judge/marshal.js';
 import type { JudgeAnswer, JudgeCapabilities, JudgeSelection, JudgeUsage, JsonValue, JudgeQuestion } from './judge/types.js';
 import {
@@ -2691,7 +2692,12 @@ export class DMLRunner {
       // submit, so a model cannot act on a submit that the rules reject.
       const record = forms.get(formId);
       if (record && shouldValidate(record.spec, change.action)) {
-        const errors = this.validateFormValues(change.values);
+        // Layer 1: the host enforces the spec's own constraints (required, enum,
+        // min/max, pattern). Layer 2: the harness's domain rules. Both block.
+        const errors = [
+          ...validateValues(record.spec, change.values),
+          ...this.validateFormValues(change.values),
+        ];
         if (errors.length > 0) {
           return `ok(${this.toPrologTerm({ ...change, action: 'invalid', errors })})`;
         }

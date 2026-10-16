@@ -1,0 +1,110 @@
+%% sdk-examples/forms.dml — opt-in forms (docs/DML_FORMS.md).
+%%
+%%   deepclause repl -l sdk-examples/forms.dml
+%%   /goal agent_main      # one round: render, wait, answer with what came back
+%%   /goal demo_loop       # the same form, re-rendered with errors until valid
+%%
+%% No model is needed for either. `agent_llm/0` is the model-driven variant.
+%%
+%% From a shell, without a model:
+%%   deepclause repl -l sdk-examples/forms.dml -g agent_main --answer 5     # accepted
+%%   deepclause repl -l sdk-examples/forms.dml -g agent_main --answer ""    # rejected
+%%
+%% On a TTY, add `--plain` to get the field widget (arrows, enter, ^s submit)
+%% instead of the field-by-field wizard.
+
+:- capability(forms).
+
+%% ---------------------------------------------------------------- the form
+
+claim_form(Spec) :-
+    Spec = _{ version: 1,
+        title: "New expense claim",
+        description: "Amounts are validated before anything is filed.",
+        fields: [
+            _{name: vendor, type: string,  title: "Vendor", required: true},
+            _{name: amount, type: integer, title: "Amount", required: true, minimum: 0},
+            _{name: notes,  type: string,  title: "Notes",  widget: textarea}
+        ],
+        actions: [
+            _{name: submit, title: "Submit claim", kind: primary},
+            _{name: cancel, title: "Cancel", kind: link}
+        ]
+    }.
+
+%% -------------------------------------------------- hard rules (host-enforced)
+
+%% Deterministic, blocking. The host runs these on a submit and hands back
+%% action=invalid with the errors, so a rejected submit is never acted on. The
+%% spec's own constraints (required, minimum) are checked too — these are the
+%% domain rules on top.
+form_validate(Values, Errors) :-
+    findall(error(Path, Message), claim_error(Values, Path, Message), Errors).
+
+claim_error(V, vendor, "is required") :- \+ get_dict(vendor, V, _).
+claim_error(V, vendor, "is required") :- get_dict(vendor, V, '').
+claim_error(V, amount, "must be a positive number") :-
+    get_dict(amount, V, A), \+ (number(A), A > 0).
+claim_error(V, notes, "is too long") :-
+    get_dict(notes, V, N), atom_length(N, L), L > 500.
+
+%% ------------------------------------------------ soft rules (advisory only)
+
+%% Never blocks. The model sees these through the `advisories` tool.
+form_advisories(Values, Advisories) :-
+    findall(warning(notes, "a thin note for an amount this size"),
+            ( get_dict(notes, V, N), atom_length(N, L), L < 15,
+              get_dict(amount, V, A), number(A), A > 100 ),
+            Advisories).
+
+%% ------------------------------------------------------- one round, no model
+
+agent_main :-
+    claim_form(Spec),
+    form(Spec, F),
+    await_form(F, Change),
+    get_dict(action, Change, Action),
+    get_dict(values, Change, Values),
+    close_form(F),
+    format(string(Msg), "~w: ~w", [Action, Values]),
+    answer(Msg).
+
+%% ---------------------------------------- re-render with errors until valid
+
+demo_loop :-
+    claim_form(Spec),
+    form(Spec, F),
+    claim_loop(F).
+
+claim_loop(F) :-
+    await_form(F, Change),
+    get_dict(action, Change, Action),
+    (   Action == cancel
+    ->  close_form(F), answer(cancelled)
+    ;   Action == invalid
+    ->  get_dict(errors, Change, Errors),
+        form_errors(F, Errors),          % show them on the form
+        claim_loop(F)                    % and wait for another submit
+    ;   get_dict(values, Change, Values),
+        close_form(F),
+        format(string(Msg), "~w: ~w", [Action, Values]),
+        answer(Msg)
+    ).
+
+%% ---------------------------------------------------- the model-driven way
+
+%% The loop lives in the model: it decides what to render, when to validate and
+%% when to finish. Needs a model (`deepclause login`, or a provider key).
+agent_llm :-
+    system(
+        "You collect a new expense claim.\n\
+         1. Design the form and call render_form (vendor, amount, notes).\n\
+         2. Call wait_for_form_change. It returns {action, values, errors}.\n\
+         3. action=invalid: show the errors with set_form_issues, then wait again.\n\
+         4. action=submit: call advisories(values) and surface anything material.\n\
+         5. action=cancel: close_form and finish.\n\
+         Never invent values."),
+    with_tools([render_form, update_form, set_form_issues, wait_for_form_change,
+                validate_form, advisories, close_form, set_result, finish],
+        task("Collect a new expense claim.", string(Summary))),
+    answer(Summary).
