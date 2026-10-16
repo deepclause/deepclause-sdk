@@ -68,6 +68,8 @@ export interface HarnessReplOptions {
   executionBackend?: ExecutionBackendKind;
   /** Name of the single capability host tool (default `bash`; the browser uses `python`). */
   capabilityTool?: string;
+  /** Factory for the L2 process worker (default: `worker_threads`; browser: a Web Worker). */
+  processWorkerFactory?: import('./worker-host.js').WorkerFactory;
   /** Human-in-the-loop channel for DML `input/2` / `exec(ask_user(...))`. */
   askUser?: (prompt: string, options?: string[]) => Promise<{ answer: string } | { cancelled: true }>;
   /** Called when a form opens (docs/DML_FORMS.md). */
@@ -254,6 +256,7 @@ export async function createHarnessRepl(options: HarnessReplOptions): Promise<Ha
     hostToolsCatalog: options.hostToolsCatalog,
     executionBackend: options.executionBackend,
     capabilityTool: options.capabilityTool,
+    processWorkerFactory: options.processWorkerFactory,
     askUser: options.askUser,
     history: options.history,
     harnessName: options.harness,

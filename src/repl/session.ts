@@ -154,6 +154,11 @@ export interface DMLSessionOptions {
    * prompt are told so.
    */
   capabilityTool?: string;
+  /**
+   * Factory for the L2 process worker. The default spawns a `worker_threads`
+   * Worker (Node); a browser embedding supplies a Web Worker.
+   */
+  processWorkerFactory?: import('./worker-host.js').WorkerFactory;
   /** Human-in-the-loop channel for DML `input/2` / `exec(ask_user(...))`. */
   askUser?: (prompt: string, options?: string[]) => Promise<{ answer: string } | { cancelled: true }>;
   /**
@@ -557,7 +562,10 @@ export class DMLSession {
       };
       if (mode === 'worker') {
         const { RemoteProcessHost } = await import('./worker-host.js');
-        const host = new RemoteProcessHost(this, { onEvent });
+        const host = new RemoteProcessHost(this, {
+          onEvent,
+          workerFactory: this.openOptions.processWorkerFactory,
+        });
         await host.start();
         this.processBackend = host;
         return host;

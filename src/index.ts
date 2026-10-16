@@ -91,6 +91,9 @@ export type {
   MemoryCompactionEvent,
 } from './repl/compaction.js';
 export type { HarnessExportOptions, HarnessExportResult } from './repl/export.js';
+// L2 process worker body, for hosts that run it outside `worker_threads`.
+export { startProcessWorker } from './repl/process-worker.js';
+export type { ProcessWorkerPort } from './repl/process-worker.js';
 export { createPiBackend, createPiAdapter, resolvePiPaths, selectPiModel } from './repl/backend.js';
 export { createReplToolset, buildToolCatalog } from './repl/toolset.js';
 export { pickFromList, filterItems, renderPick } from './repl/picker.js';
