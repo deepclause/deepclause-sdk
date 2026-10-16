@@ -170,3 +170,55 @@ describe_image(Path, Text) :-
 Images are files; `media(Path, Mime)` is the reference. The bytes are read from
 the workspace at call time, only PNG/JPEG/GIF/WebP are accepted, and they never
 enter clauses or memory. Judgments stay text-only.
+
+## 9. Forms: structured input from the user (opt-in)
+
+Use a form when the program needs **typed, validated** input rather than free
+text. Forms are off by default. The directive goes at the top of a **file** — the
+capability is processed at load, so it cannot be added through the edit tools:
+
+```prolog
+:- capability(forms).
+
+doc(collect_claim/0, "Collect an expense claim and file it. Example: /goal collect_claim.").
+
+collect_claim :-
+    Spec = _{ version: 1, title: "New expense claim",
+              fields: [ _{name: vendor, type: string,  title: "Vendor", required: true},
+                        _{name: amount, type: integer, title: "Amount", required: true, minimum: 0},
+                        _{name: notes,  type: string,  title: "Notes",  widget: textarea} ],
+              actions: [ _{name: submit, title: "Submit", kind: primary},
+                         _{name: cancel, title: "Cancel", kind: link} ] },
+    form(Spec, F),
+    claim_loop(F).
+
+%% The host refuses a submit the rules reject, so `invalid` is the only way in
+%% here — never act on values the rules did not accept.
+claim_loop(F) :-
+    await_form(F, Change),
+    (   Change.action == invalid
+    ->  form_errors(F, Change.errors),        % show them on the form
+        claim_loop(F)
+    ;   Change.action == cancel
+    ->  close_form(F), answer(cancelled)
+    ;   close_form(F),
+        get_dict(values, Change, Values),
+        format(string(Msg), "filed: ~w", [Values]),
+        answer(Msg)
+    ).
+
+%% Domain rules on top of the spec's own constraints; both block a submit.
+form_validate(Values, Errors) :-
+    findall(error(amount, "the amount looks implausible"),
+            ( get_dict(amount, Values, A), A > 100000 ),
+            Errors).
+```
+
+`Change.action` is an **atom** (`submit`, `cancel`, `invalid`) — compare with
+`==`, never against `"submit"`. `current_predicate(form/2)` reports `no` even
+when forms work (it is a handler, like `exec/2`); check
+`reference("capabilities")`. The loop above is deterministic — no model. To let
+the **model** choose the form, drive the same primitives from `task/N` with
+`with_tools([render_form, wait_for_form_change, set_form_issues, advisories,
+close_form, set_result, finish], task(…))`; either way the host validates. See
+`reference("forms")` and `sdk-examples/forms.dml`.

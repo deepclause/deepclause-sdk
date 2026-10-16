@@ -187,7 +187,56 @@ harness (`-l`, `/load`) is a user action; if that is what is wanted, say so rath
 than performing it as an edit.
 
 Other tools: `reference(topic)` reads the DeepClause docs (`language`,
-`authoring`, `patterns`, `examples`, `snippets`, `tools`).
+`authoring`, `forms`, `capabilities`, `patterns`, `examples`, `snippets`,
+`tools`).
+
+# Capabilities (opt-in host features)
+
+Some host features are **gated**: a harness must opt in with a directive at the
+top of the file.
+
+```prolog
+:- capability(forms).
+```
+
+The manifest you see each turn has a `- capabilities:` line (`forms (disabled)`),
+and `reference("capabilities")` lists what is available, what each offers, and how
+to enable it. Check there — **not** `current_predicate/1`.
+
+A gated primitive is an **interpreter handler, not a clause**. Exactly like
+`exec/2`, `current_predicate(form/2)` reports `no` in a session where forms work,
+so a probe concludes the opposite of the truth.
+
+The directive is **file-scoped**. It is processed when a **file** is loaded, so
+capabilities apply to a harness loaded from disk or run as a runner — not to a
+module assembled only through the edit tools above. There is no place for a
+directive in `begin_turn`/`define`; to use a capability, put the directive in a
+`.dml` file and load or run that (tell the user if that is what is wanted).
+
+**Forms** are the capability today: a harness renders a form, waits for the user
+to act, and acts on the answer.
+
+```prolog
+:- capability(forms).
+agent_main :-
+    form(_{version: 1, title: "Note",
+           fields: [_{name: subject, type: string, required: true},
+                    _{name: body, type: string, widget: textarea}],
+           actions: [_{name: submit, title: "Save"},
+                      _{name: cancel, title: "Cancel"}]}, F),
+    await_form(F, Change),                 % Change.action is an atom
+    (   Change.action == submit
+    ->  get_dict(values, Change, Values),  % dict keyed by field name
+        close_form(F), answer(json_text(Values))
+    ;   close_form(F), answer(cancelled)
+    ).
+```
+
+The **host enforces the spec** (`required`, `enum`, ranges, `pattern`) on submit;
+add domain rules with `form_validate(+Values, -Errors)`. A rejected submit comes
+back as `action == invalid` with `errors`, so re-show them with
+`form_errors/2` and wait again. Never fabricate values. Full reference:
+`reference("forms")`.
 
 # Concurrency and subagents
 
@@ -802,6 +851,7 @@ More patterns: `reference("patterns")`; shapes: `reference("examples")`.
   - [system/1, user/1](#memory-predicates)
   - [output/1, yield/1, log/1](#output-predicates)
   - [answer/1](#answer1)
+  - [Forms (structured human input)](#forms-structured-human-input--opt-in)
 - [Processes and concurrency](#processes-and-concurrency)
 - [Control Flow](#control-flow)
 - [String Interpolation](#string-interpolation)
@@ -1747,6 +1797,91 @@ asker(Question, Answer) :-
     ;   Answer = "(no answer available)"
     ).
 ```
+
+### Forms (structured human input) — opt-in
+
+A harness can ask the human a **structured question** and act on the answer.
+Forms are **off by default**: the file must declare the capability at the top.
+
+```prolog
+:- capability(forms).
+```
+
+Then, in DML:
+
+```prolog
+agent_main :-
+    Spec = _{ version: 1, id: "refund", title: "Refund request",
+              description: "Review the charge.",
+              fields: [ _{name: amount, type: number, title: "Amount", required: true},
+                        _{name: reason, type: string, widget: select, required: true,
+                          enum: ["duplicate_charge", "not_received", "other"]},
+                        _{name: notes,  type: string, widget: textarea, maxLength: 500} ],
+              actions: [ _{name: submit, title: "Issue refund", kind: primary},
+                         _{name: cancel, title: "Cancel", kind: link} ] },
+    form(Spec, F),                       % render; F is the form handle
+    await_form(F, Change),               % blocks until the user acts
+    (   Change.action == submit
+    ->  get_dict(values, Change, Values),
+        get_dict(amount, Values, Amount),
+        close_form(F),
+        format(string(Msg), "refunding ~w", [Amount]),
+        answer(Msg)
+    ;   close_form(F),
+        answer(cancelled)
+    ).
+```
+
+`Change` is a dict `{ formId, revision, action, values, changed, errors }`.
+`action` is an **atom** — `submit`, `cancel`, `invalid`, `closed`, `cancelled`,
+`timeout`, `unavailable`, or an action the spec declared; `values` is a dict
+keyed by field name. A submit the host rejects comes back as `action == invalid`
+with `errors`, a list of `issue{path, level, message}`, so show them and wait
+again:
+
+```prolog
+loop(F) :-
+    await_form(F, Change),
+    (   Change.action == invalid
+    ->  form_errors(F, Change.errors),   % attach them to the form
+        loop(F)
+    ;   close_form(F),
+        answer(Change.action)
+    ).
+```
+
+Primitives: `form/2`, `form_update/2`, `form_errors/2`, `await_form/2,3`,
+`close_form/1`.
+
+- Field `type` is one of `string | number | integer | boolean`, plus `object`
+  and `array` groups; `enum` requires a `string` field.
+- `widget` is a presentation hint only — `text | textarea | number | slider |
+  select | radio | multiselect | checkbox | switch | date | time | datetime |
+  hidden` — and is never validated.
+- The **host enforces the spec** on submit (`required`, `enum`, ranges,
+  `pattern`, lengths). A harness adds domain rules with
+  `form_validate(+Values, -Errors)`; both block, and a rejected submit never
+  reaches the harness as `submit`.
+- Soft rules go in `form_advisories(+Values, -Advisories)`; they never block, and
+  the model reads them through the `advisories` tool.
+- Model-facing tools (`with_tools([...])`) let the **loop live in the model**
+  inside `task/N`: `render_form`, `update_form`, `set_form_issues`,
+  `wait_for_form_change`, `validate_form`, `advisories`, `close_form`.
+- A spec may be a literal (deterministic: no model, no `task/N`) or produced by
+  `task/N` — `task("Design it.", object(Spec)), form(Spec, F)` — which the host
+  validates and drives exactly the same way.
+
+Two things trip authors up:
+
+- `form/2` and friends are **handlers, not clauses**: `current_predicate(form/2)`
+  reports `no` (as it does for `exec/2`). Do not use `current_predicate/1` to
+  test availability — read `reference("capabilities")` or the manifest's
+  `- capabilities:` line.
+- `:- capability(forms).` is **file-scoped**: it is processed at load, so it
+  applies to a harness loaded from a file (or run as a runner), not to a module
+  assembled only through REPL tools.
+
+Full reference: `reference("forms")`.
 
 ---
 

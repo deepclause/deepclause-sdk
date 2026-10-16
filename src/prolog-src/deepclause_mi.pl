@@ -111,6 +111,8 @@
     post_form_result/2,
     repl_capabilities/2,
     repl_has_capability/2,
+    repl_available_capabilities/1,
+    repl_capability_lines/2,
     form_validate_values/3,
     form_advisory_values/3,
     repl_normalize_message/2
@@ -922,6 +924,33 @@ repl_capabilities(SessionId, Names) :-
     findall(Name, session_capability(SessionId, Name), Names).
 repl_has_capability(SessionId, Name) :-
     session_capability(SessionId, Name).
+
+%% repl_available_capabilities(-Names)
+%% Every gated capability this runtime knows, enabled or not. A harness cannot
+%% discover a gated primitive with current_predicate/1 (handlers are not
+%% clauses), so the runtime has to say so.
+repl_available_capabilities(Names) :-
+    findall(Name, capability_library(Name), Names0),
+    sort(Names0, Names).
+
+%% repl_capability_lines(+SessionId, -Text)
+%% A one-line summary for the manifest: `forms (disabled)`. The agent sees this
+%% every turn, so the feature is discoverable before it is enabled.
+repl_capability_lines(SessionId, Text) :-
+    findall(Line,
+        (   capability_library(Name),
+            (   session_capability(SessionId, Name)
+            ->  Status = enabled
+            ;   Status = disabled
+            ),
+            format(atom(Line), '~w (~w)', [Name, Status])
+        ),
+        Lines0),
+    sort(Lines0, Lines),
+    (   Lines == []
+    ->  Text = none
+    ;   atomic_list_concat(Lines, ', ', Text)
+    ).
 
 %% form_validate_values(+SessionId, +Values, -IssueDicts)
 %% Runs the harness's hard rules if it defines `form_validate/2`, and normalises
@@ -2355,6 +2384,7 @@ repl_manifest(SessionId, Manifest) :-
     ->  findall(PI-DocText, SessionId:doc(PI, DocText), Docs0)
     ;   Docs0 = []
     ),
+    repl_capability_lines(SessionId, CapabilityLines),
     repl_history_summary(SessionId, HistorySummary),
     with_output_to(string(Manifest),
         (   (   Summary == ""
@@ -2364,6 +2394,7 @@ repl_manifest(SessionId, Manifest) :-
             format("- predicates: ~w~n", [Preds]),
             format("- tools: ~w~n", [Tools]),
             format("- directives: ~w~n", [Directives]),
+            format("- capabilities: ~w~n", [CapabilityLines]),
             (   Docs0 == []
             ->  format("- docs: (none; add doc(Name/Arity, Text) facts)~n")
             ;   forall(member(PI-DocText, Docs0), format("- doc(~w): ~w~n", [PI, DocText]))
@@ -5183,9 +5214,22 @@ mi_call(await_form(FormId, Since, Change), StateIn, StateIn) :-
     get_next_signal(SessionId, _),
     session_form_result(SessionId, Result),
     retract(session_form_result(SessionId, _)),
-    (   Result = ok(Dict)
-    ->  Change = Dict
+    (   Result = ok(Dict0)
+    ->  form_change_atom_action(Dict0, Change)
     ;   throw(error(form_wait_failed(Result), await_form/3))
+    ).
+
+%% form_change_atom_action(+Change0, -Change)
+%% The host builds the change from JSON, so `action` arrives as a *string*. DML
+%% compares it to an atom — `Change.action == submit` (docs/DML_FORMS.md §3) — and
+%% `"submit" == submit` is false, which silently skipped every action branch.
+%% Convert here: the atom is the structural tag, and the model-facing tools
+%% re-serialize the dict to JSON, where an atom is a string again.
+form_change_atom_action(Change0, Change) :-
+    (   get_dict(action, Change0, Action0), string(Action0)
+    ->  atom_string(Action, Action0),
+        put_dict(action, Change0, Action, Change)
+    ;   Change = Change0
     ).
 
 %% form_issue_dicts(+Issues, -Dicts)

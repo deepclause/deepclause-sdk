@@ -7,6 +7,7 @@ export type SystemPromptAssetName = 'task';
 export type WorkspaceDocAssetName =
   | 'dml-reference'
   | 'dml-authoring'
+  | 'dml-forms'
   | 'harness-examples'
   | 'harness-patterns'
   | 'prolog-snippets';
@@ -39,6 +40,8 @@ function getWorkspaceDocFileName(name: WorkspaceDocAssetName): string {
       return 'DML_REFERENCE.md';
     case 'dml-authoring':
       return 'DML_AUTHORING.md';
+    case 'dml-forms':
+      return 'DML_FORMS.md';
     case 'harness-examples':
       return 'HARNESS_EXAMPLES.md';
     case 'harness-patterns':

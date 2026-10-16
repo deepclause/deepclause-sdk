@@ -15,6 +15,7 @@
   - [system/1, user/1](#memory-predicates)
   - [output/1, yield/1, log/1](#output-predicates)
   - [answer/1](#answer1)
+  - [Forms (structured human input)](#forms-structured-human-input--opt-in)
 - [Processes and concurrency](#processes-and-concurrency)
 - [Control Flow](#control-flow)
 - [String Interpolation](#string-interpolation)
@@ -960,6 +961,91 @@ asker(Question, Answer) :-
     ;   Answer = "(no answer available)"
     ).
 ```
+
+### Forms (structured human input) — opt-in
+
+A harness can ask the human a **structured question** and act on the answer.
+Forms are **off by default**: the file must declare the capability at the top.
+
+```prolog
+:- capability(forms).
+```
+
+Then, in DML:
+
+```prolog
+agent_main :-
+    Spec = _{ version: 1, id: "refund", title: "Refund request",
+              description: "Review the charge.",
+              fields: [ _{name: amount, type: number, title: "Amount", required: true},
+                        _{name: reason, type: string, widget: select, required: true,
+                          enum: ["duplicate_charge", "not_received", "other"]},
+                        _{name: notes,  type: string, widget: textarea, maxLength: 500} ],
+              actions: [ _{name: submit, title: "Issue refund", kind: primary},
+                         _{name: cancel, title: "Cancel", kind: link} ] },
+    form(Spec, F),                       % render; F is the form handle
+    await_form(F, Change),               % blocks until the user acts
+    (   Change.action == submit
+    ->  get_dict(values, Change, Values),
+        get_dict(amount, Values, Amount),
+        close_form(F),
+        format(string(Msg), "refunding ~w", [Amount]),
+        answer(Msg)
+    ;   close_form(F),
+        answer(cancelled)
+    ).
+```
+
+`Change` is a dict `{ formId, revision, action, values, changed, errors }`.
+`action` is an **atom** — `submit`, `cancel`, `invalid`, `closed`, `cancelled`,
+`timeout`, `unavailable`, or an action the spec declared; `values` is a dict
+keyed by field name. A submit the host rejects comes back as `action == invalid`
+with `errors`, a list of `issue{path, level, message}`, so show them and wait
+again:
+
+```prolog
+loop(F) :-
+    await_form(F, Change),
+    (   Change.action == invalid
+    ->  form_errors(F, Change.errors),   % attach them to the form
+        loop(F)
+    ;   close_form(F),
+        answer(Change.action)
+    ).
+```
+
+Primitives: `form/2`, `form_update/2`, `form_errors/2`, `await_form/2,3`,
+`close_form/1`.
+
+- Field `type` is one of `string | number | integer | boolean`, plus `object`
+  and `array` groups; `enum` requires a `string` field.
+- `widget` is a presentation hint only — `text | textarea | number | slider |
+  select | radio | multiselect | checkbox | switch | date | time | datetime |
+  hidden` — and is never validated.
+- The **host enforces the spec** on submit (`required`, `enum`, ranges,
+  `pattern`, lengths). A harness adds domain rules with
+  `form_validate(+Values, -Errors)`; both block, and a rejected submit never
+  reaches the harness as `submit`.
+- Soft rules go in `form_advisories(+Values, -Advisories)`; they never block, and
+  the model reads them through the `advisories` tool.
+- Model-facing tools (`with_tools([...])`) let the **loop live in the model**
+  inside `task/N`: `render_form`, `update_form`, `set_form_issues`,
+  `wait_for_form_change`, `validate_form`, `advisories`, `close_form`.
+- A spec may be a literal (deterministic: no model, no `task/N`) or produced by
+  `task/N` — `task("Design it.", object(Spec)), form(Spec, F)` — which the host
+  validates and drives exactly the same way.
+
+Two things trip authors up:
+
+- `form/2` and friends are **handlers, not clauses**: `current_predicate(form/2)`
+  reports `no` (as it does for `exec/2`). Do not use `current_predicate/1` to
+  test availability — read `reference("capabilities")` or the manifest's
+  `- capabilities:` line.
+- `:- capability(forms).` is **file-scoped**: it is processed at load, so it
+  applies to a harness loaded from a file (or run as a runner), not to a module
+  assembled only through REPL tools.
+
+Full reference: `reference("forms")`.
 
 ---
 

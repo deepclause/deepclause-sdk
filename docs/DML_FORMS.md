@@ -5,11 +5,31 @@ answer, over several rounds, with the UI living outside the model. The agent
 declares a form, waits for a change, calls tools with the updated values, updates
 the form, and waits again.
 
-> **Status: design — not implemented.** This is the specification to build
-> against; the surface below does not exist yet. It generalizes two things that
-> do exist: `media` events (a program declares host-rendered content —
-> [`DML_MEDIA.md`](DML_MEDIA.md)) and `input/2` (a blocking host request that
-> suspends an engine and resumes it).
+> **Status: implemented and opt-in.** A harness must declare
+> `:- capability(forms).` (section 4); without it the primitives fail with an
+explaining error. This document is both the reference and the design record.
+>
+> **Built:** the directive and its transaction/snapshot handling; the primitives
+> `form/2`, `form_update/2`, `form_errors/2`, `await_form/2,3`, `close_form/1`;
+> the model tools `render_form`, `update_form`, `set_form_issues`,
+> `wait_for_form_change`, `validate_form`, `advisories`, `close_form`;
+> host-enforced hard validation (the spec's own constraints *and* the harness's
+> `form_validate/2`) with `action: invalid` + `errors`; soft `form_advisories/2`;
+> the `form` event and `submitForm`; a TUI panel and a plain-TTY widget;
+> `object`/`array` groups, `enum`, and the `row`/`column`/`grid`/`box` layout.
+>
+> **Not built:** in-place field navigation in the TUI panel (the plain-TTY widget
+> has it); forms owned by a subagent (an L2 worker cannot forward a form to the
+> foreground UI); repeaters (`array` of `object` renders but has no add/remove UI);
+> `tabs`; cross-turn surfaces.
+>
+> **Try it:** `reference("examples")` has a complete harness, and
+> `sdk-examples/forms.dml` runs with no model (`deepclause repl -l
+> sdk-examples/forms.dml` then `/goal agent_main`).
+
+Forms generalize two things that came first: `media` events (a program declares
+host-rendered content — [`DML_MEDIA.md`](DML_MEDIA.md)) and `input/2` (a blocking
+host request that suspends an engine and resumes it).
 
 ---
 
@@ -39,6 +59,22 @@ Form = { id, revision, spec, values, state }
   updates it, then waits for a change.
 - The **UI** renders it and pushes changes back.
 - A **change** is `{ formId, revision, action, values, changed }`.
+
+In DML the `action` is an **atom**, so a harness tests it with `==`:
+
+```prolog
+await_form(F, Change),
+(   Change.action == submit -> ...
+;   Change.action == cancel -> ...
+;   Change.action == invalid -> ...   % a submit the hard rules rejected
+).
+```
+
+One of `submit`, `cancel`, `invalid`, `closed`, `cancelled`, `timeout`,
+`unavailable`, or an action the spec declared. `action: invalid` additionally
+carries `errors`. (Under `:>`, a `task/N` output wrapped in a dict, the change
+reaches the model as JSON, where the same value is the string `"submit"` — the
+atom is a DML-side convenience, applied by `form_change_atom_action/2`.)
 
 The loop:
 
@@ -497,31 +533,40 @@ On a wide terminal the customer block is two columns and amount/reason sit side 
 side; on a narrow one everything stacks. Same events, same values, same
 validation.
 
-## 12. MVP and later
+## 12. What is built, and what is next
 
-**MVP:** the `:- capability(forms).` directive (opt-in,
-§4); field types `text`/`textarea`/`number`/`boolean`/`select`/`multiselect`;
-layout `row`/`column`/`grid`/`box`/`field`/`text`/`divider`; one active form per
-session; `form`/`form_update`/`await_form`/`close_form` primitives plus the
-`tool/2` wrappers; `form` events + `submitForm`; a basic TUI renderer; JSON and
-headless-`unavailable`; tests for registry revisions/waiters/cancel and a
-scripted UI driving a full render → wait → submit → update → wait loop.
+**Built** (the status note at the top is the full list): the
+`:- capability(forms).` directive (§4); field types `string`, `number`,
+`integer`, `boolean`, plus `object`/`array` groups; `enum`, `required`,
+`minLength`/`maxLength`, `minimum`/`maximum`, `pattern`; layout
+`row`/`column`/`grid`/`box`/`field`/`text`/`divider`; one active form per session;
+`form`/`form_update`/`form_errors`/`await_form`/`close_form` plus the `tool/2`
+wrappers; `form` events + `submitForm`; a TUI panel and a plain-TTY widget;
+headless `unavailable`; host-enforced hard validation and harness advisories.
 
-**Later:** `tabs`/`spacer`, repeaters, per-field validation feedback, a web
-reference renderer, cross-turn **surfaces**, and layout-widget overrides beyond
-`widget`/`label`.
+**Next:** in-place field navigation in the TUI panel; forms owned by a subagent
+(forwarding an L2 worker's form to the foreground UI); repeaters (add/remove UI
+for an `array` of `object`); `tabs`; a web reference renderer; cross-turn
+**surfaces**; layout-widget overrides beyond `widget`/`label`.
 
-**Explicitly out:** conditional layout, computed fields, cross-field validation,
+**Out of scope:** conditional layout, computed fields, cross-field validation,
 behavior in actions, styling beyond `columns`/`span`/`gap`/`align`.
 
-## 13. Open questions
+## 13. Decisions taken
 
-1. **Tools vs. primitives** — ship both (primitive core + wrappers), or tools first?
-2. **Blocking vs. persistent** — block within a turn (recommended v1), or let a
-   form outlive the turn and have a submit start a new one?
-3. **Repeaters in v1** — the only construct that makes values genuinely nested, and
-   the only place merge-patch's "arrays replace wholesale" rule bites.
-4. **Headless default** — `unavailable` or auto-`submit` with defaults?
+1. **Tools and primitives** — both. The primitive is the core (a form works with
+   no model at all); the tools are ordinary `tool/2` wrappers, so the
+   model-facing path is a special case rather than a second implementation.
+2. **Blocking, within a turn** — `await_form/2` blocks the engine and the turn.
+   A form does not outlive its turn; on abort, pending waits resolve
+   `{ action: cancelled }`.
+3. **Repeaters deferred** — values are genuinely nested only under an `array` of
+   `object`, which is also where merge-patch's "arrays replace wholesale" rule
+   bites. Declaring one is fine; there is no add/remove UI yet.
+4. **Headless** — a missing UI resolves `unavailable` rather than guessing a
+   submit. The CLI's `--answer` is the scripted equivalent.
+5. **Actions are atoms in DML** — `Change.action == submit`; the host converts at
+   the boundary (§2).
 
 ---
 

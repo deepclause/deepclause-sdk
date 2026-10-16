@@ -40,7 +40,9 @@
     "cli": "tsx src/cli/index.ts",
     "repl": "tsx src/cli/index.ts repl",
     "sync:agent-prompt": "node scripts/sync-agent-prompt.mjs",
-    "check:agent-prompt": "node scripts/sync-agent-prompt.mjs --check"
+    "check:agent-prompt": "node scripts/sync-agent-prompt.mjs --check",
+    "sync:docs": "node scripts/sync-forms-doc.mjs",
+    "check:docs": "node scripts/sync-forms-doc.mjs --check"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.35",
