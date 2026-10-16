@@ -178,8 +178,11 @@ rate limits.
 
 ## 5. In the REPL
 
-**Agent tools** (`src/repl/harness-tools.ts`): `spawn`, `ps`, `send`, `call`,
-`stop`, `swarm`, `wait`.
+**Agent tools** (`src/repl/harness-tools.ts`): `ps`, `send`, `stop`, `swarm`,
+`wait` — plus `execute`, through which the agent reaches the DML built-ins
+(`spawn/2`, `service_call/3`). `spawn` and `call` are deliberately not tools: DML
+already expresses both, and a tool that interpolates a raw string into a request
+is easy to get wrong.
 
 **Slash commands**:
 

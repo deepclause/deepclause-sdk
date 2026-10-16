@@ -112,7 +112,8 @@
     repl_capabilities/2,
     repl_has_capability/2,
     form_validate_values/3,
-    form_advisory_values/3
+    form_advisory_values/3,
+    repl_normalize_message/2
 ]).
 
 :- use_module(deepclause_strings).
@@ -930,6 +931,18 @@ form_validate_values(SessionId, Values, IssueDicts) :-
     (   catch((call(SessionId:form_validate(Values, Issues)), is_list(Issues)), _, fail)
     ->  form_issue_dicts(Issues, IssueDicts)
     ;   IssueDicts = []
+    ).
+
+%% repl_normalize_message(+Text, -TermText)
+%% The host `call`/`/call` entry takes the request as a term *as text*. Prose is
+%% not a term, and interpolating it into `request(From, Ref, Message)` produced a
+%% goal the service could not parse — so it never replied and the caller waited
+%% out the timeout. Anything that does not parse is quoted as a string; a valid
+%% term passes through unchanged.
+repl_normalize_message(Text, TermText) :-
+    (   catch((term_string(_Term, Text, []), true), _, fail)
+    ->  TermText = Text
+    ;   format(string(TermText), "~q", [Text])
     ).
 
 %% form_advisory_values(+SessionId, +Values, -IssueDicts)

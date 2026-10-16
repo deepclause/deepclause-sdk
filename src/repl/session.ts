@@ -703,9 +703,27 @@ export class DMLSession {
     this.processBackend?.send(to, messageTerm);
   }
 
-  /** Request/reply against a service process (library(service) protocol). */
-  async callProcess(to: Pid | string, messageTerm: string, timeoutMs = 300_000): Promise<string> {
-    return (await this.ensureProcessBackend()).callTerm(to, messageTerm, timeoutMs);
+  /**
+   * Request/reply against a service process (library(service) protocol).
+   *
+   * The message is normalized first: prose ("hello from the REPL") is not a
+   * Prolog term, and interpolating it into `request(From, Ref, …)` used to leave
+   * the caller waiting out the timeout while the service failed to parse the goal.
+   */
+  async callProcess(
+    to: Pid | string,
+    messageTerm: string,
+    timeoutMs = 30_000,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    return (await this.ensureProcessBackend()).callTerm(to, this.normalizeMessage(messageTerm), timeoutMs, signal);
+  }
+
+  /** Quote a `call` message that does not parse as a term, so it is a payload. */
+  private normalizeMessage(text: string): string {
+    if (!text.trim()) return 'true';
+    const result = this.prologQuery(`deepclause_mi:repl_normalize_message(${quoteString(text)}, Term)`);
+    return String(plainValue(result?.Term) ?? text);
   }
 
   /** Resolve a process primitive for this (non-process) foreground run. */

@@ -313,25 +313,45 @@ export class DmlProcessExecutor implements ProcessBackend {
    * Host-side request/reply used by `/call` and the `call` tool. Sends
    * `request(HostPid, Ref, Message)` and waits for `reply(Ref, Value)`.
    */
-  async callTerm(to: Pid | string, messageTerm: string, timeoutMs: number): Promise<string> {
+  async callTerm(to: Pid | string, messageTerm: string, timeoutMs: number, signal?: AbortSignal): Promise<string> {
     const ref = `hc${++this.replyCounter}`;
     const request = `request(${pidTermText(this.host.hostPid)},${ref},${messageTerm})`;
     return new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const onAbort = (): void => finish(() => reject(new Error('call aborted')));
+      const finish = (settle: () => void): void => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
         this.pendingReplies.delete(ref);
-        reject(new Error(`call timed out after ${timeoutMs} ms`));
+        signal?.removeEventListener('abort', onAbort);
+        settle();
+      };
+      if (signal?.aborted) {
+        reject(new Error('call aborted'));
+        return;
+      }
+      timer = setTimeout(() => {
+        finish(() => reject(new Error(`call timed out after ${timeoutMs} ms`)));
       }, timeoutMs);
-      this.pendingReplies.set(ref, (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      });
+      this.pendingReplies.set(ref, (value) => finish(() => resolve(value)));
+      signal?.addEventListener('abort', onAbort, { once: true });
+      let watched: Pid | undefined;
       try {
-        const target = this.resolveTarget(typeof to === 'string' ? to : pidTermText(to), this.host.hostPid);
-        this.host.send(target, request);
+        const resolved = this.resolveTarget(typeof to === 'string' ? to : pidTermText(to), this.host.hostPid);
+        this.host.send(resolved, request);
+        // Only a pid or registered name can be watched by `wait`; a bare label sends
+        // fine but has no record to watch, so the exit check is best-effort.
+        watched = typeof resolved === 'string' ? this.host.whereis(resolved) : resolved;
       } catch (error) {
-        clearTimeout(timer);
-        this.pendingReplies.delete(ref);
-        reject(error);
+        finish(() => reject(error));
+        return;
+      }
+      if (watched) {
+        void this.host.wait(watched).then((info) => {
+          finish(() => reject(new Error(`service ${pidTermText(watched)} exited (${info?.state ?? 'gone'}) before replying`)));
+        }).catch(() => {});
       }
     });
   }

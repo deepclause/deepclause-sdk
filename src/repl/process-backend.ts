@@ -25,8 +25,8 @@ export interface ProcessBackend {
   /** Synchronous snapshot (L2 serves it from a cache). */
   processes(): ProcessInfo[];
   register(name: string, pid: Pid): void;
-  /** Host-side request/reply used by `/call` and the `call` tool. */
-  callTerm(to: Pid | string, messageTerm: string, timeoutMs: number): Promise<string>;
+  /** Host-side request/reply used by `/call`. Cancellable, so Stop works. */
+  callTerm(to: Pid | string, messageTerm: string, timeoutMs: number, signal?: AbortSignal): Promise<string>;
   /** Resolve a process primitive for the non-process foreground run. */
   foregroundHandle(request: ProcessRequestPayload, signal?: AbortSignal): Promise<ProcessRequestResult>;
   shutdown(): Promise<void>;

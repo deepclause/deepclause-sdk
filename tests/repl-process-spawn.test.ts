@@ -118,14 +118,41 @@ describe('session-scoped subagents', () => {
     expect(service).toBeDefined();
   });
 
-  it('spawns and lists through the real harness tools', async () => {
+  it('lists processes, and does not expose spawn/call as agent tools', async () => {
     await define('narrate/0', 'narrate :- output("via tool").');
     const tools = createHarnessTools(repl.session);
-    const spawned = await tools.get('spawn')!.execute({ goal: 'narrate', name: 'narrator' });
-    expect(spawned).toMatchObject({ name: 'narrator' });
+    await repl.session.spawnProcess('narrate', { name: 'narrator' });
     const listed = (await tools.get('ps')!.execute({})) as { text: string };
     expect(listed.text).toContain('narrator');
     await tools.get('stop')!.execute({ target: 'narrator' });
+    // spawn and call are DML (`spawn/2`, `service_call/3`); an authoring turn uses
+    // `execute`, so they are not offered as tools.
+    expect(tools.has('spawn')).toBe(false);
+    expect(tools.has('call')).toBe(false);
+  });
+
+  it('quotes a prose call message instead of sending a malformed goal', async () => {
+    await define('echo/1', [
+      'echo(State) :-',
+      '    receive(request(From, Ref, Payload), 5000),',
+      '    send(From, reply(Ref, got(Payload))),',
+      '    echo(State).',
+    ].join('\n'));
+    await define('start_echo/0', 'start_echo :- serve(echo, echo(ok)).');
+    await repl.session.executeGoal('start_echo', 1);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    // Prose is not a Prolog term; it must arrive as a payload, not a syntax error.
+    const reply = await repl.session.callProcess('echo', 'hello from the REPL', 5000);
+    expect(reply).toContain('hello from the REPL');
+  });
+
+  it('fails a call when the service exits before replying', async () => {
+    await define('dying/0', 'dying :- receive(_, 5000), answer(bye).');
+    await repl.session.spawnProcess('dying', { name: 'dying' });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    await expect(repl.session.callProcess('dying', 'ping', 10_000)).rejects.toThrow(/exited|before replying/);
   });
 
   it('fans a worker over a list with swarm, preserving order', async () => {
