@@ -240,6 +240,11 @@ That is the whole contract, and it is three calls:
    an action the spec declared).
 3. `close_form(formId)` — when the loop is done.
 
+In a **chat turn** (`chat/1`) you can stop after step 1: a conversation does not
+end while a form it opened is still unanswered, so the turn waits for the person
+and hands you the submission before it finishes. Step 2 is for another round on a
+form you kept open (after `set_form_issues`/`update_form`).
+
 **A refused submit is the host's business, not yours.** The spec's own
 constraints (`required`, `enum`, ranges, `pattern`) and the harness's
 `form_validate(+Values, -Errors)` run when the user submits. If they reject it,
@@ -2015,6 +2020,11 @@ with_tools([render_form, wait_for_form_change, close_form, set_result, finish],
 The model's three calls: `render_form(Spec)` → a form id;
 `wait_for_form_change(FormId)` → `{action, values, changed, errors}` with
 `action` = `"submit"` | `"cancel"`; `close_form(FormId)`.
+
+In a **conversation** (`chat/1`) the third leg is optional: a chat turn does not
+end while a form it opened is still unanswered, so it waits for the person and
+hands back the submission. `wait_for_form_change` is then only needed for another
+round on a form you kept open.
 
 **Fixed: the harness drives it itself**, with no model, using the primitives
 `form/2`, `form_update/2`, `form_errors/2`, `await_form/2,3` and `close_form/1`:

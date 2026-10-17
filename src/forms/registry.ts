@@ -40,6 +40,8 @@ export interface FormRecord {
   values: JsonObject;
   issues: FormIssue[];
   revision: number;
+  /** Revision at which the form was opened; see `awaitingForms()`. */
+  openRevision: number;
   state: 'open' | 'submitted' | 'cancelled';
   changed?: string[];
   source?: { name?: string; pid?: string };
@@ -89,6 +91,7 @@ export class FormRegistry {
       values,
       issues: [],
       revision,
+      openRevision: revision,
       state: 'open',
       source: options.source ?? existing?.source,
     };
@@ -225,6 +228,18 @@ export class FormRegistry {
 
   get(formId: string): FormRecord | undefined {
     return this.forms.get(formId);
+  }
+
+  /**
+   * Forms that are open and have **not handed a change to anyone since they were
+   * opened** — i.e. a form the model put in front of the person and then stopped
+   * waiting for. A conversational turn uses this so it cannot end with a form the
+   * person is still filling in: the submission would have nowhere to go.
+   */
+  awaitingForms(): FormRecord[] {
+    return [...this.forms.values()].filter(
+      (record) => record.state === 'open' && (this.delivered.get(record.formId) ?? 0) <= record.openRevision,
+    );
   }
 
   list(): FormRecord[] {

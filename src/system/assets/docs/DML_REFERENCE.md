@@ -1065,6 +1065,11 @@ The model's three calls: `render_form(Spec)` → a form id;
 `wait_for_form_change(FormId)` → `{action, values, changed, errors}` with
 `action` = `"submit"` | `"cancel"`; `close_form(FormId)`.
 
+In a **conversation** (`chat/1`) the third leg is optional: a chat turn does not
+end while a form it opened is still unanswered, so it waits for the person and
+hands back the submission. `wait_for_form_change` is then only needed for another
+round on a form you kept open.
+
 **Fixed: the harness drives it itself**, with no model, using the primitives
 `form/2`, `form_update/2`, `form_errors/2`, `await_form/2,3` and `close_form/1`:
 

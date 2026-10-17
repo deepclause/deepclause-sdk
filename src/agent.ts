@@ -75,6 +75,12 @@ export interface AgentLoopOptions {
    * insists on an explicit `finish` and nudges the model when it does not.
    */
   conversational?: boolean;
+  /**
+   * A conversational turn has run out of tool calls. Return a message to keep the
+   * turn alive (the runner uses it to deliver a form the person is still filling
+   * in), or null to end the turn.
+   */
+  onIdleTurn?: () => Promise<string | null>;
   memory: MemoryMessage[];
   tools: Map<string, ToolDefinition>;
   /**
@@ -889,9 +895,15 @@ async function runInjectedAgentLoop(
 
     if (toolCalls.length === 0 && !state.finished) {
       if (options.conversational) {
-        // The reply is the answer: end the turn, and do not nudge.
-        state.finished = true;
-        state.success = true;
+        // The reply is the answer — unless the host is still holding something
+        // for this turn (a form the person has not submitted yet).
+        const injected = options.onIdleTurn ? await options.onIdleTurn() : null;
+        if (injected) {
+          messages.push({ role: 'user', content: injected });
+        } else {
+          state.finished = true;
+          state.success = true;
+        }
       } else {
         messages.push({
           role: 'user',
@@ -1399,10 +1411,18 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         }
 
         // A chat turn ends when the model stops calling tools: that reply is the
-        // answer, and the next message starts the next turn.
+        // answer, and the next message starts the next turn. Unless the host is
+        // still holding something for this turn — a form the person has not
+        // submitted yet — in which case its submission is injected and the loop
+        // continues, so the turn never ends with an unanswered form.
         if (options.conversational && !finished && toolCallsThisIteration.length === 0) {
-          finished = true;
-          success = true;
+          const injected = options.onIdleTurn ? await options.onIdleTurn() : null;
+          if (injected) {
+            messages.push({ role: 'user', content: injected });
+          } else {
+            finished = true;
+            success = true;
+          }
         }
 
         // If no tool calls were made, nudge the model to act.
@@ -1543,10 +1563,18 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         }
 
         // A chat turn ends when the model stops calling tools: that reply is the
-        // answer, and the next message starts the next turn.
+        // answer, and the next message starts the next turn. Unless the host is
+        // still holding something for this turn — a form the person has not
+        // submitted yet — in which case its submission is injected and the loop
+        // continues, so the turn never ends with an unanswered form.
         if (options.conversational && !finished && toolCallsThisIteration.length === 0) {
-          finished = true;
-          success = true;
+          const injected = options.onIdleTurn ? await options.onIdleTurn() : null;
+          if (injected) {
+            messages.push({ role: 'user', content: injected });
+          } else {
+            finished = true;
+            success = true;
+          }
         }
 
         // If no tool calls were made, nudge the model to act.

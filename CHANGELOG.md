@@ -47,6 +47,15 @@
   built — they would need re-entrancy and hide control flow; `next/1` + a
   `handle/1` clause covers the same ground. A handler can still be added at
   runtime with `assertz/1`, which works inside a harness.
+- **A chat turn waits for a form it opened.** A conversation ends a turn when the
+  model stops calling tools — which meant a model that rendered a form and then
+  replied (the easy mistake; `render_form` and `wait_for_form_change` are two
+  calls it has to know about) left the form open with nowhere for the submission
+  to go. Now, if a form a turn opened has not handed a change to anyone
+  (`FormRegistry.awaitingForms()`), the turn waits for the person and injects the
+  submission as the next input, then continues. So in a chat, `render_form` alone
+  is enough; `wait_for_form_change` is only for another round on a form kept open.
+  `task/N` is unchanged.
 - **A failed turn no longer ends a conversation.** A thrown model error used to
   abort the whole run; in a chat that dropped the person out of it. `chat/1` now
   reports the failure, leaves memory as it was, and the next message starts a

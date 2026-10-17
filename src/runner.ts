@@ -1278,6 +1278,26 @@ export class DMLRunner {
       taskDescription,
       outputVars,
       conversational,
+      // A chat turn does not end while a form it opened is still unanswered: the
+      // model may have rendered the form and then replied without waiting (it
+      // does not have to know the two-call protocol). Wait for the submission and
+      // hand it back as the next turn's input, so nothing is lost.
+      onIdleTurn: async () => {
+        if (!conversational || !options.forms) return null;
+        const awaiting = options.forms.awaitingForms();
+        if (awaiting.length === 0) return null;
+        const waits = await Promise.all(
+          awaiting.map((record) => options.forms!.wait(record.formId, -1, { signal: options.signal })),
+        );
+        return waits
+          .map((change) => {
+            const values = JSON.stringify(change.values ?? {});
+            return change.action === 'submit'
+              ? `The person submitted the form ${change.formId}: ${values}`
+              : `The person dismissed the form ${change.formId} (action: ${change.action}).`;
+          })
+          .join('\n');
+      },
       memory: effectiveMemory,
       tools: availableTools,
       workspacePath: options.workspacePath,

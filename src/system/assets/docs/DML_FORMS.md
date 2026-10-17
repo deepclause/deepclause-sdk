@@ -137,6 +137,13 @@ agent_main :-
     ).
 ```
 
+**In a conversation, the wait is implicit.** A `chat/1` turn does not end while a
+form it opened is still unanswered (`FormRegistry.awaitingForms()`): if the model
+renders a form and then replies without calling `wait_for_form_change`, the turn
+waits for the person and hands back the submission as the next input. So a chat
+model only has to call `render_form`; `wait_for_form_change` is for another round
+on a form kept open.
+
 `form/2` is a *display* primitive (like `output/1`); `await_form/2` is the
 request. A program may render a form and never await it.
 
