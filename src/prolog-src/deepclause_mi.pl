@@ -109,6 +109,7 @@
     post_tool_agent_result/5,
     % Forms (docs/DML_FORMS.md)
     post_form_result/2,
+    post_next_result/2,
     form_validate_values/3,
     form_advisory_values/3,
     repl_normalize_message/2
@@ -163,6 +164,7 @@
 :- dynamic session_input_cancelled/1. % session_input_cancelled(SessionId) - input/2 should fail (non-interactive)
 :- dynamic session_form_result/2.  % session_form_result(SessionId, Result) - forms primitive results
 :- dynamic session_builtin_tool/2. % session_builtin_tool(SessionId, ToolName) - runtime-installed tools
+:- dynamic session_next_result/2. % session_next_result(SessionId, Item) - conversation inbox item
 
 %% ============================================================
 %% DML Parsing
@@ -3225,6 +3227,8 @@ process_engine_result(request_proc(Request), request_proc, '', Payload) :-
 
 %% Forms (docs/DML_FORMS.md). The host owns the registry; these carry the
 %% operation and, for `wait_form`, the change to deliver.
+%% Conversation inbox: the host answers with the next item (see wait_next_item/3).
+process_engine_result(wait_next(Accept), wait_next, '', payload{accept: Accept}) :- !.
 process_engine_result(request_form(Op, Spec), request_form, '', payload{op: Op, spec: Spec}) :- !.
 process_engine_result(request_form(update, FormId, Patch), request_form, '',
     payload{op: update, formId: FormId, patch: Patch}) :- !.
@@ -3323,12 +3327,17 @@ destroy_engine(SessionId) :-
 post_agent_result(SessionId, Success, Variables, Messages) :-
     post_agent_result(SessionId, Success, Variables, Messages, none).
 
-%% post_agent_result(+SessionId, +Success, +Variables, +Messages, +FullMemory)
+post_agent_result(SessionId, Success, Variables, Messages, FullMemory) :-
+    post_agent_result(SessionId, Success, Variables, Messages, FullMemory, "").
+
+%% post_agent_result(+SessionId, +Success, +Variables, +Messages, +FullMemory, +Error)
 %% Messages is a list of message{role: Role, content: Content} dicts.
 %% FullMemory optionally replaces the entire state memory, including compacted system summaries.
-post_agent_result(SessionId, Success, Variables, Messages, FullMemory) :-
+%% Error is non-empty when the turn failed before producing a result (a model
+%% error), so a caller can say what went wrong instead of guessing.
+post_agent_result(SessionId, Success, Variables, Messages, FullMemory, Error) :-
     retractall(session_agent_result(SessionId, _)),
-    assertz(session_agent_result(SessionId, result{success: Success, variables: Variables, messages: Messages, full_memory: FullMemory})),
+    assertz(session_agent_result(SessionId, result{success: Success, variables: Variables, messages: Messages, full_memory: FullMemory, error: Error})),
     post_signal_to_engine(SessionId, agent_done).
 
 %% post_exec_result(+SessionId, +Status, +Result)
@@ -3347,6 +3356,14 @@ post_proc_result(SessionId, Key, Value) :-
 %% post_form_result(+SessionId, +Result)
 %% Reply to a forms primitive (`form/2`, `form_update/2`, `form_errors/2`,
 %% `await_form/2,3`, `close_form/1`). Result is `ok(...)` or `error(...)`.
+%% post_next_result(+SessionId, +Item)
+%% The host answers `wait_next` with `user("...")`, `message(Term)`, or `closed`
+%% when there is nobody left to talk to.
+post_next_result(SessionId, Item) :-
+    retractall(session_next_result(SessionId, _)),
+    assertz(session_next_result(SessionId, Item)),
+    post_signal_to_engine(SessionId, next_done).
+
 post_form_result(SessionId, Result) :-
     retractall(session_form_result(SessionId, _)),
     assertz(session_form_result(SessionId, Result)),
@@ -3824,6 +3841,7 @@ process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory), reques
 process_tool_engine_result(request_proc(Request), request_proc, '', Payload) :-
     proc_request_payload(Request, Payload).
 %% Form primitives reached inside a DML tool (docs/DML_FORMS.md).
+process_tool_engine_result(wait_next(Accept), wait_next, '', payload{accept: Accept}) :- !.
 process_tool_engine_result(request_form(Op, Spec), request_form, '', payload{op: Op, spec: Spec}) :- !.
 process_tool_engine_result(request_form(update, FormId, Patch), request_form, '',
     payload{op: update, formId: FormId, patch: Patch}) :- !.
@@ -4037,22 +4055,38 @@ mi_call(prompt_named(Desc, Vars, VarNames), StateIn, StateOut) :-
 
 %% mi_call(input(-Message), +StateIn, -StateOut)
 %% Wait for the person's next message. No prompt: the embedding UI is a chat
-%% interface and is already asking. FAILS when there is no message (a
-%% non-interactive run), which is what ends `loop :- input(A), chat(A).`
+%% interface and is already asking. This is `next/1` restricted to the person —
+%% a worker's message that arrives first stays queued for `next/1`. FAILS when
+%% there is nobody to talk to, which is what ends
+%% `loop :- input(A), chat(A).`
 mi_call(input(Message), StateIn, StateIn) :-
     !,
     get_session_id(SessionId),
     get_depth(StateIn, Depth),
-    engine_yield(wait_input("")),
-    get_next_signal(SessionId, _Signal),
-    (   session_input_cancelled(SessionId)
-    ->  retractall(session_input_cancelled(SessionId)),
-        fail
-    ;   session_pending_input(SessionId, Message)
-    ->  retract(session_pending_input(SessionId, Message)),
-        add_trace_with_result(SessionId, exit, input, [""], Message, Depth)
-    ;   fail            % nobody to talk to: the conversation is over
+    wait_next_item(SessionId, user, Item),
+    (   Item = user(Message)
+    ->  add_trace_with_result(SessionId, exit, input, [""], Message, Depth)
+    ;   fail
     ).
+
+%% mi_call(next(-Item), +StateIn, -StateOut)
+%% The next item from the conversation inbox: `user(Text)` from the person, or a
+%% message a worker sent to this session. Fails when nothing is left, so
+%% `loop :- next(Item), handle(Item), loop.` ends cleanly.
+mi_call(next(Item), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    wait_next_item(SessionId, any, Item),
+    Item \== closed.
+
+%% wait_next_item(+SessionId, +Accept, -Item)
+%% One host round trip: the runner owns the inbox (it is the only place that can
+%% see both the person and the mailbox), and answers with the next item.
+wait_next_item(SessionId, Accept, Item) :-
+    engine_yield(wait_next(Accept)),
+    get_next_signal(SessionId, _),
+    session_next_result(SessionId, Item),
+    retractall(session_next_result(SessionId, _)).
 
 %% mi_call(chat(+Message), +StateIn, -StateOut) / chat(+Message, -Reply)
 %%
@@ -4086,21 +4120,27 @@ mi_call(chat(Message, Reply), StateIn, StateOut) :-
     handle_agent_signals(SessionId, State0, StateAfterAgent),
     session_agent_result(SessionId, Result),
     retract(session_agent_result(SessionId, _)),
+    % A conversation must survive a failed turn: say so, leave the memory as it
+    % was (the failed turn is not part of the conversation), and let the person
+    % type again. Failing here would end `loop :- input(A), chat(A), loop.` and
+    % drop them out of the chat.
     (   get_dict(success, Result, true)
-    ->  true
+    ->  (   get_dict(full_memory, Result, FullMemory), is_list(FullMemory)
+        ->  set_memory(StateAfterAgent, FullMemory, StateOut)
+        ;   set_memory(StateAfterAgent, Memory0, StateOut)
+        ),
+        last_assistant_message(Result, Reply),
+        add_trace_with_result(SessionId, exit, chat, [InterpMessage], Reply, Depth)
     ;   (   get_dict(error, Result, ErrorMsg), ErrorMsg \= ""
-        ->  format(atom(WarnMsg), 'Warning: chat/1 failed: ~w', [ErrorMsg])
-        ;   format(atom(WarnMsg), 'Warning: chat/1 failed (success=false)', [])
+        ->  format(string(WarnMsg),
+                   'The model call failed (~w). Your message was not answered — try again.', [ErrorMsg])
+        ;   WarnMsg = 'The model call failed. Your message was not answered — try again.'
         ),
         engine_yield(output(WarnMsg)),
-        fail
-    ),
-    (   get_dict(full_memory, Result, FullMemory), is_list(FullMemory)
-    ->  set_memory(StateAfterAgent, FullMemory, StateOut)
-    ;   set_memory(StateAfterAgent, Memory0, StateOut)
-    ),
-    last_assistant_message(Result, Reply),
-    add_trace_with_result(SessionId, exit, chat, [InterpMessage], Reply, Depth).
+        Reply = "",
+        set_memory(StateAfterAgent, Memory0, StateOut),
+        add_trace_entry(SessionId, fail, chat, [InterpMessage], Depth)
+    ).
 
 %% last_assistant_message(+AgentResult, -Text)
 %% The reply is also streamed to the UI; this binds it for a harness that wants it.
@@ -6512,6 +6552,7 @@ is_mi_special_predicate(input(_,_)).
 is_mi_special_predicate(input(_)).
 is_mi_special_predicate(chat(_)).
 is_mi_special_predicate(chat(_,_)).
+is_mi_special_predicate(next(_)).
 is_mi_special_predicate(call(_)).
 is_mi_special_predicate(call(_,_)).
 is_mi_special_predicate(call(_,_,_)).

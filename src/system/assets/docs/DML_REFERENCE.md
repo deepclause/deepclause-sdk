@@ -984,6 +984,23 @@ loop :-
 `input/2` (with a prompt) is for a question inside a task; `input/1` is the turn
 boundary of a conversation.
 
+#### `next(-Item)`
+
+The next thing from the conversation **inbox**: `user(Text)` when the person
+speaks, or `message(Term)` when a worker (a subagent or service) sent this
+session a message. Fails when there is nothing left. This is how a conversation
+also reacts to events, without polling:
+
+```prolog
+loop(Me) :- next(Item), handle(Me, Item), loop(Me).
+
+handle(_, user(Text))       :- chat(Text).
+handle(_, message(mail(M))) :- system("New email."), chat("Summarise: {M}").
+```
+
+`input/1` is `next/1` restricted to the person — a worker's message that arrives
+first stays queued for `next/1`.
+
 #### `chat(+Message)` / `chat(+Message, -Reply)`
 
 One **conversational turn**: append `Message` as the user message, run the agent
@@ -1001,7 +1018,9 @@ loop :- input(A), chat(A), loop.
 ```
 
 Use it as the foreground goal (not inside `execute` or a subagent). A turn may
-open a form, so structured input fits inside a conversation. See
+open a form, so structured input fits inside a conversation. **A failed turn does
+not end the conversation**: `chat/1` reports the failure, leaves memory as it was,
+and the next message starts a fresh turn. See
 [`docs/DML_CONVERSATION.md`](../../../../docs/DML_CONVERSATION.md).
 
 ### Forms (structured human input)

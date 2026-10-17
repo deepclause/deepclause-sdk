@@ -288,6 +288,20 @@ export interface InternalRunOptions {
   onModelCall?: () => boolean | Promise<boolean>;
 }
 
+/**
+ * What the conversation inbox needs from its host. The top-level run and the tool
+ * engine both provide it; the tool engine has no input channel, so it is optional
+ * there (`next/1` inside a tool still reads worker messages).
+ */
+interface ChatSources {
+  onInputRequired?: (prompt: string) => Promise<string | undefined>;
+  onProcessRequest?: (
+    request: ProcessRequestPayload,
+    signal?: AbortSignal,
+  ) => Promise<ProcessRequestResult>;
+  signal?: AbortSignal;
+}
+
 interface RunnerExecutionContext {
   workspacePath?: string;
   signal?: AbortSignal;
@@ -409,6 +423,19 @@ export class DMLRunner {
   private sessionId: string = '';
   private currentMemory: MemoryMessage[] = [];
   private stepCounter = 0;
+  /**
+   * Conversation inbox (docs/DML_CONVERSATION.md §5).
+   *
+   * A conversation waits on two sources that a harness cannot see at once: the
+   * person (the host's input channel) and the session's mailbox (a worker's
+   * message). The runner merges them here, so `next/1` is one blocking read and
+   * `input/1` is the same read restricted to the person. Items are queued, never
+   * dropped: an event that arrives while the person is typing waits its turn.
+   */
+  private chatInbox: Array<{ kind: 'user' | 'message' | 'closed'; term: string }> = [];
+  /** One outstanding host input request at a time, reused across waits. */
+  private chatInputPending: Promise<void> | null = null;
+  private chatInboxWake: (() => void) | null = null;
   private judgeCache = new Map<string, JudgeAnswer[]>();
   /**
    * DML tools currently executing, innermost last.
@@ -694,6 +721,14 @@ export class DMLRunner {
           this.postFormResult(
             await this.handleFormWait(formId, since, timeoutMs, options.forms, options.signal),
           );
+          break;
+        }
+
+        case 'wait_next': {
+          const accept = String(toJsValue((step.payload as Record<string, unknown>)?.accept) ?? 'any');
+          if (this.armChatInput(options)) yield { type: 'input_required', prompt: '' };
+          const item = await this.waitForChatItem(accept, options);
+          this.postNextResult(item.term);
           break;
         }
 
@@ -1333,11 +1368,30 @@ export class DMLRunner {
 
         // Check if result is ready
         const raceResult = await Promise.race([
-          resultPromise.then(r => ({ type: 'done' as const, result: r })),
+          resultPromise.then(
+            r => ({ type: 'done' as const, result: r }),
+            (error: unknown) => ({ type: 'failed' as const, error }),
+          ),
           new Promise<{ type: 'stream' }>(resolve => {
             streamResolve = () => resolve({ type: 'stream' });
           }),
         ]);
+
+        if (raceResult.type === 'failed') {
+          const message = raceResult.error instanceof Error
+            ? raceResult.error.message
+            : String(raceResult.error);
+          if (!conversational) throw raceResult.error;
+          // A conversation must survive a failed turn: report it and keep the
+          // memory as it was, so the person can simply type again. Failing the
+          // turn here would end `loop :- input(A), chat(A), loop.`
+          this.postAgentResult(
+            { success: false, outputs: [], variables: {}, messages: [] },
+            preparedMemory.filter((entry) => entry.role === 'system'),
+            message,
+          );
+          return;
+        }
 
         if (raceResult.type === 'done') {
           // Drain remaining queue
@@ -2527,6 +2581,14 @@ export class DMLRunner {
             break;
           }
 
+          case 'wait_next': {
+            // A conversation turn inside a tool (rare, but the same contract).
+            const accept = String(toJsValue((payload as Record<string, unknown>)?.accept) ?? 'any');
+            const item = await this.waitForChatItem(accept, runContext);
+            this.postNextResult(item.term);
+            break;
+          }
+
           case 'error': {
             // A tool-engine error (a thrown body, or a tool that returned no
             // result). Report it as a failure so it is not mistaken for success.
@@ -2635,7 +2697,7 @@ export class DMLRunner {
     outputs: string[];
     variables: Record<string, unknown>;
     messages: MemoryMessage[];
-  }, fullMemory?: MemoryMessage[]): void {
+  }, fullMemory?: MemoryMessage[], error?: string): void {
     // Keys need to be quoted because they start with uppercase (Var1, Var2, etc.)
     const varsStr = Object.entries(result.variables)
       .map(([k, v]) => `'${k}': ${this.toPrologTerm(v)}`)
@@ -2646,7 +2708,7 @@ export class DMLRunner {
     const fullMemoryStr = this.serializeMemoryMessages(fullMemory ?? []);
 
     this.query(
-      `deepclause_mi:post_agent_result('${this.sessionId}', ${result.success}, vars{${varsStr}}, [${messagesStr}], [${fullMemoryStr}])`
+      `deepclause_mi:post_agent_result('${this.sessionId}', ${result.success}, vars{${varsStr}}, [${messagesStr}], [${fullMemoryStr}], ${this.toPrologTerm(error ?? '')})`
     );
   }
 
@@ -2757,6 +2819,102 @@ export class DMLRunner {
       `deepclause_mi:form_validate_values('${this.sessionId}', ${this.toPrologTerm(values)}, Issues)`,
     );
     return toFormIssues(result?.Issues);
+  }
+
+  // ---- Conversation inbox (docs/DML_CONVERSATION.md §5) ------------------
+
+  /** Start the host's input request, unless one is already outstanding. */
+  private armChatInput(options: ChatSources): boolean {
+    if (this.chatInputPending) return false;
+    if (!options.onInputRequired) return false;
+    this.chatInputPending = options
+      .onInputRequired('')
+      .then((text) => {
+        this.chatInputPending = null;
+        // No answer means nobody is there: close the inbox, which ends a
+        // conversation loop instead of spinning on empty turns.
+        this.pushChatItem(
+          text === undefined || text === null
+            ? { kind: 'closed', term: 'closed' }
+            : { kind: 'user', term: `user(${this.toPrologTerm(text)})` },
+        );
+      })
+      .catch(() => {
+        this.chatInputPending = null;
+        this.pushChatItem({ kind: 'closed', term: 'closed' });
+      });
+    return true;
+  }
+
+  private pushChatItem(item: { kind: 'user' | 'message' | 'closed'; term: string }): void {
+    this.chatInbox.push(item);
+    const wake = this.chatInboxWake;
+    this.chatInboxWake = null;
+    wake?.();
+  }
+
+  /**
+   * The next item the caller accepts; `user` skips (keeps) worker messages.
+   * A closed inbox is the last resort: a message that arrived is worth more than
+   * "nobody is typing", so it is handed out only when nothing else is queued.
+   */
+  private takeChatItem(accept: string): { kind: 'user' | 'message' | 'closed'; term: string } | undefined {
+    const open = this.chatInbox.findIndex(
+      (item) => item.kind !== 'closed' && (accept === 'any' || item.kind === 'user'),
+    );
+    if (open >= 0) return this.chatInbox.splice(open, 1)[0];
+    const closed = this.chatInbox.findIndex((item) => item.kind === 'closed');
+    return closed >= 0 ? this.chatInbox.splice(closed, 1)[0] : undefined;
+  }
+
+  /**
+   * Wait for the next inbox item: the person's message, or one a worker sent this
+   * session. The mailbox is polled with a short timeout rather than held open, so
+   * a run that ends mid-wait leaves no receiver behind.
+   */
+  private async waitForChatItem(
+    accept: string,
+    options: ChatSources,
+  ): Promise<{ kind: 'user' | 'message' | 'closed'; term: string }> {
+    for (;;) {
+      const ready = this.takeChatItem(accept);
+      if (ready && ready.kind !== 'closed') return ready;
+
+      if (ready?.kind === 'closed') {
+        // The person is gone, but a worker's message may still be in flight: give
+        // the mailbox one last chance so closing the input does not swallow it.
+        await this.pollChatMessage(options);
+        return this.takeChatItem(accept) ?? ready;
+      }
+
+      const wake = new Promise<void>((resolve) => {
+        this.chatInboxWake = resolve;
+      });
+      await Promise.race([wake, this.pollChatMessage(options)]);
+    }
+  }
+
+  /** One mailbox poll, so the inbox sees worker messages as they arrive. */
+  private async pollChatMessage(options: ChatSources): Promise<void> {
+    if (!options.onProcessRequest) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 200));
+      return;
+    }
+    try {
+      const result = await options.onProcessRequest({ op: 'receive', timeout: 200 }, options.signal);
+      if (result.term.startsWith('ok(')) {
+        // `ok(<term>)` — the message a worker sent to this session.
+        this.pushChatItem({ kind: 'message', term: `message(${result.term.slice(3, -1)})` });
+      }
+    } catch {
+      // No process host in this run: the person is the only source.
+      await new Promise<void>((resolve) => setTimeout(resolve, 200));
+    }
+  }
+
+  /** Post the conversation inbox item back to Prolog under its slot. */
+  private postNextResult(term: string): void {
+    this.query(`deepclause_mi:post_next_result('${this.sessionId}', ${term})`);
   }
 
   /** Post a form primitive result back to Prolog under the form slot. */

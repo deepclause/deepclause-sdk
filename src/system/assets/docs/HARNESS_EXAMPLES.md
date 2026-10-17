@@ -248,8 +248,19 @@ tool(add(A, B, Result), "Add two numbers.", [number, number]) :-
 ```
 
 `chat(Message, Reply)` binds the assistant's last message if the harness wants to
-post-process it. Memory carries the conversation, so each turn sees what was said.
-A turn may open a **form** (§9), which is how structured input fits inside a
-conversation. Acting on a *worker's* message mid-conversation is designed but not
-built yet — see [`docs/DML_CONVERSATION.md`](../../../../docs/DML_CONVERSATION.md)
-§5 for the proposed inbox/`next/1` mechanism.
+post-process it, and a failed turn is reported without ending the conversation.
+Memory carries the conversation, so each turn sees what was said. A turn may open
+a **form** (§9), which is how structured input fits inside a conversation.
+
+`next/1` reads the same inbox for **events**: replace `input(A), chat(A)` with a
+`next/1` dispatch, and a worker's message wakes the conversation:
+
+```prolog
+loop(Me) :- next(Item), handle(Me, Item), loop(Me).
+
+handle(_, user(Text))       :- chat(Text).                       % the person
+handle(_, message(mail(M))) :- system("New email."), chat("Summarise: {M}").
+```
+
+The `message(Term)` comes from `send(Me, mail(M))` in a spawned worker. See
+[`docs/DML_CONVERSATION.md`](../../../../docs/DML_CONVERSATION.md) §5.

@@ -326,8 +326,24 @@ loop :-
 - `chat/1` appends the message as the user turn and runs the loop with every
   `tool/N` you declare (plus the built-in form tools). The reply is streamed to
   the UI and kept in memory; `chat(Message, Reply)` also binds it.
+- **A failed turn does not end the conversation.** `chat/1` reports the failure,
+  keeps the memory as it was, and the next message starts a fresh turn — the
+  person is never dropped out of the chat.
 - **Memory is the conversation.** The next `chat/1` sees what was said; a
   `system/1` before the loop sets the persona and survives every turn.
+- **`next/1` adds events.** The same inbox also carries a worker's message, so a
+  conversation can react to something that happened while the person was quiet:
+
+  ```prolog
+  loop(Me) :- next(Item), handle(Me, Item), loop(Me).
+  handle(_, user(Text))       :- chat(Text).
+  handle(_, message(mail(M))) :- system("New email."), chat("Summarise: {M}").
+  ```
+
+  `input/1` is `next/1` restricted to the person; a worker's message that arrives
+  first stays queued. Use it when a subagent or service should be able to wake the
+  conversation (a mail check, a finished job) — one turn at a time, and the turn
+  appears in the transcript like any other.
 - Use it as the **foreground goal** (`/goal agent_main`, `-g agent_main`), not
   inside `execute` or a subagent: those would wait on a prompt nobody can answer.
 
@@ -1919,6 +1935,23 @@ loop :-
 `input/2` (with a prompt) is for a question inside a task; `input/1` is the turn
 boundary of a conversation.
 
+#### `next(-Item)`
+
+The next thing from the conversation **inbox**: `user(Text)` when the person
+speaks, or `message(Term)` when a worker (a subagent or service) sent this
+session a message. Fails when there is nothing left. This is how a conversation
+also reacts to events, without polling:
+
+```prolog
+loop(Me) :- next(Item), handle(Me, Item), loop(Me).
+
+handle(_, user(Text))       :- chat(Text).
+handle(_, message(mail(M))) :- system("New email."), chat("Summarise: {M}").
+```
+
+`input/1` is `next/1` restricted to the person — a worker's message that arrives
+first stays queued for `next/1`.
+
 #### `chat(+Message)` / `chat(+Message, -Reply)`
 
 One **conversational turn**: append `Message` as the user message, run the agent
@@ -1936,7 +1969,9 @@ loop :- input(A), chat(A), loop.
 ```
 
 Use it as the foreground goal (not inside `execute` or a subagent). A turn may
-open a form, so structured input fits inside a conversation. See
+open a form, so structured input fits inside a conversation. **A failed turn does
+not end the conversation**: `chat/1` reports the failure, leaves memory as it was,
+and the next message starts a fresh turn. See
 [`docs/DML_CONVERSATION.md`](../../../../docs/DML_CONVERSATION.md).
 
 ### Forms (structured human input)

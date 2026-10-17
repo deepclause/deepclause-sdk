@@ -37,9 +37,21 @@
   and `chat/2` also binds it. `agent.ts` gained a `conversational` mode over the
   existing loop; `CHAT_PROMPT.md` is its system prompt.
   [`docs/DML_CONVERSATION.md`](docs/DML_CONVERSATION.md) documents the contract and
-  §5 proposes — not built — the event inbox that lets a worker's message wake a
-  conversation (`next/1` over one inbox; `on/1` handlers rejected as a first
-  step).
+  **Events: `next/1`.** The runner merges the person's input channel and the
+  session's mailbox into **one inbox**, so a conversation can also react to a
+  worker's message: `next(Item)` returns `user(Text)` or `message(Term)` and fails
+  when the inbox is empty, and `input/1` is the same read restricted to the
+  person. A queued message beats a closed inbox (the mailbox is polled once more
+  before giving up), items are queued rather than dropped, and an event turn is a
+  normal turn in the transcript. Declarative `on/1` handlers are deliberately not
+  built — they would need re-entrancy and hide control flow; `next/1` + a
+  `handle/1` clause covers the same ground. A handler can still be added at
+  runtime with `assertz/1`, which works inside a harness.
+- **A failed turn no longer ends a conversation.** A thrown model error used to
+  abort the whole run; in a chat that dropped the person out of it. `chat/1` now
+  reports the failure, leaves memory as it was, and the next message starts a
+  fresh turn. `post_agent_result/6` carries the error so the message can say what
+  went wrong (it also fixes `task/N`'s long-dead `error` lookup).
 - **`reference("forms")`.** The bundled `DML_FORMS.md`, so the authoring agent can
   discover the feature at runtime. `HARNESS_EXAMPLES.md` gained a runnable forms
   example (§9) and a conversational one (§10), and the prompt teaches the

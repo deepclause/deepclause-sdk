@@ -4,15 +4,22 @@
  * See docs/DML_CONVERSATION.md.
  */
 import { afterEach, describe, expect, it } from 'vitest';
+import * as fs from 'fs/promises';
+import * as os from 'os';
+import * as path from 'path';
 
 import { createDeepClause } from '../src/index.js';
+import { createHarnessRepl, type HarnessRepl } from '../src/repl/index.js';
 import type { DeepClauseSDK, DMLEvent, LLMBackend, LLMBackendRequest, LLMBackendResponse } from '../src/index.js';
 
 let sdk: DeepClauseSDK | undefined;
+let repl: HarnessRepl | undefined;
 
 afterEach(async () => {
   await sdk?.dispose();
   sdk = undefined;
+  await repl?.dispose();
+  repl = undefined;
 });
 
 function reply(text: string): LLMBackendResponse {
@@ -155,5 +162,133 @@ tool(echo(Text, Result), "Echo the text back.", [string]) :-
 
     expect(requests).toHaveLength(0);
     expect(events.some((event) => event.type === 'error')).toBe(false);
+  });
+});
+
+describe('next/1: one inbox for the person and a worker', () => {
+  it('receives a message a worker sent to the session', async () => {
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'dc-chat-event-'));
+    const backend: LLMBackend = {
+      async complete() {
+        return reply('event handled');
+      },
+    };
+    // Nobody types: the inbox closes at once, and the closed-inbox poll still
+    // picks up the worker's message rather than swallowing it.
+    repl = await createHarnessRepl({
+      workspacePath: workspace,
+      model: 'test-model',
+      provider: 'openai',
+      llmBackend: backend,
+      onInput: async () => undefined,
+    });
+
+    await repl.session.beginTurn();
+    await repl.session.loadCode(`
+agent_main :-
+    self(Me),
+    spawn_opt(messenger(Me), _, [name(worker)]),
+    next(Item),
+    (   Item = message(ping)
+    ->  chat("A worker pinged."),
+        answer("handled event")
+    ;   format(string(S), "unexpected: ~w", [Item]),
+        answer(S)
+    ).
+
+messenger(To) :- send(To, ping).
+`);
+    await repl.session.endTurn();
+
+    const answers: string[] = [];
+    const errors: string[] = [];
+    for await (const event of repl.query('agent_main')) {
+      if (event.type === 'answer' && event.content) answers.push(event.content);
+      if (event.type === 'error') errors.push(event.content ?? '');
+    }
+
+    expect(errors).toEqual([]);
+    expect(answers.join('\n')).toContain('handled event');
+  });
+
+  it('keeps a worker message queued when input/1 is waiting', async () => {
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'dc-chat-queue-'));
+    const backend: LLMBackend = {
+      async complete() {
+        return reply('ok');
+      },
+    };
+    repl = await createHarnessRepl({
+      workspacePath: workspace,
+      model: 'test-model',
+      provider: 'openai',
+      llmBackend: backend,
+      // The person speaks once; the worker's message was already in flight.
+      onInput: (() => {
+        let asked = 0;
+        return async () => {
+          asked += 1;
+          return asked === 1 ? 'hello' : undefined;
+        };
+      })(),
+    });
+
+    await repl.session.beginTurn();
+    await repl.session.loadCode(`
+agent_main :-
+    self(Me),
+    spawn_opt(messenger(Me), _, [name(worker)]),
+    sleep(50),                     % let the worker deliver first
+    input(A),                      % takes the person's message, not the worker's
+    next(Item),                    % which is still queued
+    (   Item = message(ping)
+    ->  format(string(S), "~w then event", [A]), answer(S)
+    ;   format(string(S), "~w then ~w", [A, Item]), answer(S)
+    ).
+
+messenger(To) :- send(To, ping).
+`);
+    await repl.session.endTurn();
+
+    const answers: string[] = [];
+    for await (const event of repl.query('agent_main')) {
+      if (event.type === 'answer' && event.content) answers.push(event.content);
+    }
+    expect(answers.join('\n')).toContain('hello then event');
+  });
+});
+
+describe('a failed turn does not end the conversation', () => {
+  it('reports the failure, keeps the conversation, and answers the next message', async () => {
+    let calls = 0;
+    const backend: LLMBackend = {
+      async complete() {
+        calls += 1;
+        if (calls === 1) throw new Error('upstream 503');
+        return reply('second time lucky');
+      },
+    };
+    sdk = await createDeepClause({ model: 'test-model', llmBackend: backend });
+
+    const outputs: string[] = [];
+    const errors: string[] = [];
+    let inputs = 0;
+    for await (const event of sdk.runDML(LOOP, {
+      onUserInput: async () => {
+        inputs += 1;
+        return (inputs <= 2 ? `message ${inputs}` : undefined) as unknown as string;
+      },
+    })) {
+      if (event.type === 'output' && event.content) outputs.push(event.content);
+      if (event.type === 'error') errors.push(event.content ?? '');
+    }
+
+    // Two turns were attempted: the failed one, then the next message.
+    expect(calls).toBe(2);
+    // The person saw what happened...
+    expect(outputs.join('\n')).toContain('model call failed');
+    // ...and the conversation carried on.
+    expect(outputs.join('\n')).toContain('second time lucky');
+    expect(errors).toEqual([]);
   });
 });

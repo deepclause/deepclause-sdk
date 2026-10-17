@@ -3,9 +3,8 @@
 A **conversation** is a harness that talks with the person over many turns and
 acts between them. Two primitives, `input/1` and `chat/1`, are the whole loop.
 
-> **Status.** `input/1`, `chat/1` and `chat/2` are implemented.
-> **Events into a conversation (§5) are proposed, not built.** Everything else
-> here describes shipped behaviour.
+> **Status.** `input/1`, `chat/1`, `chat/2`, `next/1` and the event inbox (§5) are
+> implemented. `on/1` handlers are deliberately not built — see §5.
 
 ```prolog
 agent_main :-
@@ -53,6 +52,24 @@ Wait for the person's next message.
 
 `input/2` is unchanged: it has a prompt and is for a question inside a task.
 
+### `next(-Item)`
+
+The next thing from the conversation **inbox** (see §5): `user(Text)` when the
+person speaks, or `message(Term)` when a worker sent this session a message.
+Fails when there is nothing left, so a loop ends cleanly. `input/1` is `next/1`
+restricted to the person — a worker's message that arrives first stays queued for
+`next/1`.
+
+```prolog
+loop(Me) :-
+    next(Item),
+    handle(Me, Item),
+    loop(Me).
+
+handle(_, user(Text))       :- chat(Text).
+handle(_, message(mail(M))) :- system("New email."), chat("Summarise: {M}").
+```
+
 ### `chat(+Message)` / `chat(+Message, -Reply)`
 
 One conversational turn.
@@ -92,7 +109,7 @@ input *inside* a conversation; see [DML_FORMS.md](DML_FORMS.md).
   arrives at the end of the turn — correct, but it feels dead);
 - a transcript, so the conversation is visible above the input line.
 
-## 5. Events: acting on a worker's message mid-conversation *(proposed)*
+## 5. Events: acting on a worker's message mid-conversation
 
 ### The problem
 
@@ -101,38 +118,30 @@ worker does something slow — checks mail every five minutes, waits for a build
 long job finishes. The conversation should be able to **react**: act (tools) and
 say something in the chat, without the person having typed anything.
 
-Today that is half-built and awkward. A session **is** a process: it has a pid
-(`self(Me)`), a mailbox, and `receive/2` works in the foreground — a spawned
-worker can `send(Me, mail(M))` and the foreground receives it. But `input/1` and
-`receive/1` both block, and there is no way to wait on both. So a harness must
-poll, and a poll cannot be the conversation guard:
+A session **is** a process: it has a pid (`self(Me)`), a mailbox, and `receive/2`
+works in the foreground, so a spawned worker can `send(Me, mail(M))`. But
+`input/1` and `receive/1` both block, and there is no way to wait on both — so
+before `next/1`, a harness had to poll, and a poll cannot be the conversation
+guard:
 
 ```prolog
-loop :-                             % what you would have to write today
-    (   receive(Event, 200)
-    ->  handle(Event), loop
+loop :-                             % the old workaround: a tick eats the turn
+    (   receive(Event, 200) -> handle(Event), loop
     ;   input(A), chat(A), loop
     ).
 ```
 
-That is wrong in two ways: a 200 ms tick eats the turn, and a message that
-arrives while the person is typing waits behind the input.
+### One inbox
 
-### The shape of a fix
+Both sources are *inputs to the same loop*; they differ only in **who sent it**.
+So the runner merges them into one inbox per run:
 
-Both sources are *inputs to the same loop*. The human's next message and a
-worker's message differ only in **who sent it**. So:
+- the person → `user(Text)`, from the host's input channel;
+- a worker → `message(Term)`, from the session's mailbox;
+- `closed` when the input channel is gone (a non-interactive run, or the host
+  answering "no more input").
 
-**One inbox.** The session's mailbox is the conversation's inbox. The UI delivers
-the person's message into it (`user(Text)`); a worker `send`s (`message(Term)`).
-One predicate reads the next item, whichever kind it is:
-
-```prolog
-next(-Item).        % next(Item): user(Text) | message(Term) | system(Text)
-input(-Text).       % sugar: next(user(Text))      — implemented today
-```
-
-Then the conversation writes an explicit dispatch loop:
+`next/1` and `input/1` read it. The harness writes an explicit dispatch loop:
 
 ```prolog
 loop :-
@@ -142,15 +151,32 @@ loop :-
 
 handle(user(Text)) :- chat(Text).
 handle(message(mail(M))) :-
-    format(string(Note), "A new email arrived from ~w.", [M]),
-    system(Note),
+    system("A new email arrived."),
     chat("Handle the new email.").     % one normal turn; tools; replies in the chat
 ```
 
-`chat/1` here is the same one the person triggers — the event turn is a normal
-turn, visible in the transcript, with the same tools and the same validation.
-That is the property worth keeping: **an event does not get a second, privileged
-path into the agent.**
+`chat/1` is the same one the person triggers — an event turn is a normal turn,
+visible in the transcript, with the same tools and the same validation. That is
+the property worth keeping: **an event does not get a second, privileged path into
+the agent.**
+
+### Semantics (as built)
+
+- **Queued, never dropped.** An item that arrives while a turn is running waits in
+  the inbox; the loop reads it next.
+- **A message beats a closed inbox.** If the person's channel closes but a
+  worker's message is in flight, the inbox is polled once more before `next/1`
+  gives up, so closing the input does not swallow an event.
+- **One turn at a time.** No concurrent agent turns against one memory.
+- **Not a silent action.** An event turn appears in the transcript; the person
+  sees what the agent did and why.
+- **The mailbox is polled, not held open.** While the inbox is waiting, the runner
+  asks the session's mailbox for a message with a short timeout (200 ms) and
+  re-asks. That latency is invisible next to a five-minute mail check, and it
+  means a run that ends mid-wait leaves no receiver behind to swallow a later
+  message.
+- **Cancellation.** Aborting the turn ends the wait; the inbox survives, so the
+  next turn still sees what arrived.
 
 ### Why not `on(Pattern) :- Body`
 
@@ -171,11 +197,11 @@ still the wrong *first* step:
   (`execute` already nests frames), but it is the most delicate part of the
   engine, and the failure mode is a deadlock rather than an error.
 - **It buys nothing `next/1` cannot do.** `next/1` + a `handle/1` clause is three
-  extra lines and covers the same ground, including "two workers, different
-  events".
+  extra lines and covers the same ground, including two workers with different
+  events, or "handle this only while X".
 
-So: `next/1` first. If harnesses converge on the same `handle/1` shape, `on/1`
-can be added later as sugar over it, with the explicit loop as the contract.
+If harnesses converge on the same `handle/1` shape, `on/1` can be added later as
+sugar over it, with the explicit loop as the contract.
 
 ### A worker that wakes a conversation
 
@@ -186,11 +212,10 @@ loop(Me) :-
     spawn_opt(mail_watcher(Me), _, [name(mail)]),
     converse(Me).
 
-converse(Me) :-
-    next(Item), handle(Item), converse(Me).
+converse(Me) :- next(Item), handle(Me, Item), converse(Me).
 
-handle(user(Text)) :- chat(Text).
-handle(message(mail(M))) :- system("New email."), chat("Summarise the new email: {M}").
+handle(_, user(Text))       :- chat(Text).
+handle(_, message(mail(M))) :- system("New email."), chat("Summarise: {M}").
 
 mail_watcher(Me) :-
     sleep(300000),                    % five minutes
@@ -199,30 +224,41 @@ mail_watcher(Me) :-
     mail_watcher(Me).
 ```
 
-### Semantics to pin down
+### Adding a handler at runtime
 
-- **Ordering.** Events are queued, never dropped. An item that arrives mid-turn
-  waits for the turn to finish; the loop then reads it in order.
-- **One turn at a time.** No concurrent agent turns against one memory.
-- **Not a silent action.** An event-triggered turn is a turn: it appears in the
-  transcript, and the person sees what the agent did and why. A turn that would
-  say nothing is suspicious — prefer a one-line note.
-- **Backpressure.** The inbox is bounded; the oldest events are summarised
-  (`system`) rather than dropped, so the agent knows it missed some.
-- **Cancellation.** `/stop` (or the host's abort) ends a turn; queued events stay
-  queued for the next turn.
-- **Delivery is at-least-once.** A worker that retries on timeout may deliver the
-  same event twice; handlers should be idempotent, or the event should carry a
-  key.
+A handler is just a clause, and a harness can assert one (`assertz/1`,
+`asserta/1`) and remove it (`retract/1`, `retractall/1`) — those work inside DML
+and write to the session module. So "from now on, tell me when mail arrives" can
+be a request the *person* makes:
 
-### What is missing to build it
+```prolog
+handle(user("watch my mail")) :-
+    assertz((handle(message(mail(M))) :-
+                 format(string(Note), "New email: ~w", [M]),
+                 system(Note),
+                 chat("Handle the new email."))),
+    chat("Watching your mail from now on.").
 
-1. `seed` the session's mailbox from the UI: the input channel posts
-   `user(Text)` into the same mailbox instead of resolving `wait_input`.
-2. `next/1` in the MI (a `receive` that also unblocks on UI input).
-3. A way for a harness to *want* events: today a message to the foreground pid is
-   received only if the harness calls `receive`. With `next/1` it is the loop.
-4. An inbox cap and a "you missed N events" summary.
+handle(user("stop watching")) :-
+    retractall((handle(message(mail(_))) :- _)),
+    chat("Stopped watching.").
+```
 
-None of that changes the conversation contract in §2; `input/1` and `chat/1` stay
-exactly as they are, and `next/1` is additive.
+No new authoring tool is needed. Two caveats, both inherent to asserting at
+runtime rather than through the REPL's edit tools:
+
+- it bypasses the edit transaction (`begin_turn`/`end_turn`), so it is not rolled
+  back by `rollback` and is not in the turn's tracked set;
+- asserting a `tool/N` clause does **not** register the model-facing schema, so a
+  runtime-added *tool* is invisible to `task/N`. Adding a `handle/1` clause (or any
+  ordinary predicate) is fine, because the harness calls it itself.
+
+### What is still open
+
+- **Inbox bound.** The queue is unbounded today. A worker that floods it will grow
+  the process's memory; the plan is a cap with a "you missed N events" summary
+  (`system`) rather than silent drops.
+- **`system(Text)` items.** The inbox carries `user`/`message`/`closed`; a
+  runtime-authored `system(Text)` note is a natural fourth kind.
+- **Delivery is at-least-once.** A worker that retries may deliver the same event
+  twice; handlers should be idempotent, or the event should carry a key.
