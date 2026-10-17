@@ -52,6 +52,7 @@ interface Waiter {
   resolve: (change: FormChange) => void;
   timer?: ReturnType<typeof setTimeout>;
   onAbort?: () => void;
+  signal?: AbortSignal;
 }
 
 export interface OpenOptions {
@@ -204,20 +205,21 @@ export class FormRegistry {
       if (options.timeoutMs !== undefined && options.timeoutMs > 0) {
         waiter.timer = setTimeout(() => {
           this.removeWaiter(formId, waiter);
-          resolve({ formId, revision: record.revision, action: 'timeout', values: record.values });
+          this.settle(waiter, { formId, revision: record.revision, action: 'timeout', values: record.values });
         }, options.timeoutMs);
         waiter.timer.unref?.();
       }
       if (options.signal) {
         const onAbort = (): void => {
           this.removeWaiter(formId, waiter);
-          resolve({ formId, revision: record.revision, action: 'cancelled', values: record.values });
+          this.settle(waiter, { formId, revision: record.revision, action: 'cancelled', values: record.values });
         };
         if (options.signal.aborted) {
           onAbort();
           return;
         }
         waiter.onAbort = onAbort;
+        waiter.signal = options.signal;
         options.signal.addEventListener('abort', onAbort, { once: true });
       }
       const list = this.waiters.get(formId) ?? [];
@@ -256,8 +258,16 @@ export class FormRegistry {
   }
 
   private settle(waiter: Waiter, change: FormChange): void {
-    if (waiter.timer) clearTimeout(waiter.timer);
-    if (waiter.onAbort) waiter.onAbort();
+    if (waiter.timer) {
+      clearTimeout(waiter.timer);
+      waiter.timer = undefined;
+    }
+    // Detach the abort hook; a successful wake must not also cancel the waiter.
+    // (Calling `onAbort` here resolved every submitted form as `cancelled`.)
+    if (waiter.signal && waiter.onAbort) {
+      waiter.signal.removeEventListener('abort', waiter.onAbort);
+    }
+    waiter.onAbort = undefined;
     waiter.resolve(change);
   }
 

@@ -76,6 +76,46 @@ describe('forms in a chat turn', () => {
     expect(outputs.join('\n')).toContain('Thanks');
   });
 
+  it('delivers a submission that arrives after the idle wait is registered', async () => {
+    const requests: LLMBackendRequest[] = [];
+    const backend: LLMBackend = {
+      async complete(request) {
+        requests.push(request);
+        if (requests.length === 1) return call('render_form', { arg1: SPEC });
+        return {
+          text: requests.length === 2 ? 'Here is a form for you.' : 'Thanks — saved.',
+          toolCalls: [],
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        };
+      },
+    };
+    sdk = await createDeepClause({ model: 'test-model', llmBackend: backend });
+    const controller = new AbortController();
+
+    let submitted = false;
+    for await (const event of sdk.runDML(DML, {
+      signal: controller.signal,
+      onUserInput: async () => 'collect my name',
+      onForm: async (form) => {
+        if (form.op !== 'open' || submitted) return;
+        submitted = true;
+        // The person clicks *after* the turn went idle and registered its wait.
+        // Submitting synchronously (inside onForm) misses the waiter path.
+        setTimeout(() => {
+          sdk!.submitForm(form.formId, { action: 'submit', values: { subject: 'Ada' } });
+        }, 10);
+      },
+    })) {
+      // drain
+    }
+
+    expect(submitted).toBe(true);
+    expect(requests).toHaveLength(3);
+    const third = JSON.stringify(requests[2].messages);
+    expect(third).toContain('Ada');
+    expect(third).not.toContain('cancelled');
+  });
+
   it('does not wait twice when the model did call wait_for_form_change', async () => {
     const requests: LLMBackendRequest[] = [];
     const backend: LLMBackend = {
