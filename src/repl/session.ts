@@ -1945,6 +1945,63 @@ export class DMLSession {
   }
 
   /**
+   * The living module serialized as loadable DML (the editable harness source).
+   * `header: none` keeps it free of the export banner, so it round-trips through
+   * `replaceHarness` without accumulating comments.
+   */
+  async harnessSource(): Promise<string> {
+    const result = this.prologQuery(
+      `deepclause_mi:export_harness('${this.sessionId}', none, Text)`,
+    );
+    return String(plainValue(result?.Text) ?? '');
+  }
+
+  /**
+   * Replace the whole living module with `source` and commit it as a new
+   * version.
+   *
+   * `loadCode` only adds/replaces clauses, so a predicate deleted from the text
+   * would survive. This abolishes the user predicates (and their directives,
+   * tools and sources) and reloads the text, preserving conversation memory, so
+   * the editor's text is the source of truth. The result is an ordinary commit:
+   * a history version, the persisted harness, and the same contract warnings.
+   */
+  async replaceHarness(source: string): Promise<HarnessCommitResult> {
+    if (this.disposed) return { committed: false, error: 'Session has been disposed' };
+    if (this.isFrozen()) return { committed: false, error: 'harness is frozen; editing is disabled' };
+    // `repl_rollback` abolishes the predicates *before* loading, so a syntax error
+    // would otherwise leave the session empty. Keep the previous text and put it
+    // back if the new source does not load.
+    const previous = await this.harnessSource();
+    const before = this.predicateList();
+    const result = this.prologQuery(
+      `deepclause_mi:repl_rollback('${this.sessionId}', ${quoteString(source)}, Result)`,
+    );
+    const outcome = plainValue(result?.Result);
+    if (outcome !== 'ok') {
+      this.prologQuery(`deepclause_mi:repl_rollback('${this.sessionId}', ${quoteString(previous)}, _)`);
+      return { committed: false, error: String(outcome ?? 'replace failed') };
+    }
+
+    const after = this.predicateList();
+    const changed = this.simplePredicateDiff(before, after);
+    let version: number | undefined;
+    if (this.history) {
+      version = await this.recordHistoryChange('commit', this.turnCounter, before, { touched: after });
+    }
+    this.lastTurnCommitted = true;
+    this.lastCommitVersion = version;
+    await this.persistSessionHarness(this.history?.currentVersion ?? 0);
+
+    const warnings = [
+      ...(await this.probeNondeterminism(after)),
+      ...this.probeToolContracts(),
+      ...this.probeDocContracts(),
+    ];
+    return { committed: true, changed, warnings };
+  }
+
+  /**
    * Check every registered `tool/2` annotation: the nested agent inside `task/N`
    * calls the tool body, so it must reach real logic with the same name and
    * arity. Violations only surface when a nested agent calls the tool, which may
