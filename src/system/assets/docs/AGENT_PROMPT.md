@@ -298,6 +298,45 @@ a run with no UI resolves the wait (`cancel` / `unavailable`) rather than hangin
 So exercise the logic *around* a form with `execute`, or ask the user to run it —
 never treat a missing answer as a real one.
 
+# Conversational agents
+
+A **conversation** is a skill that talks with the person over many turns and acts
+between them. It is a traditional agent loop: the model gets the harness's tools,
+does what it needs, replies, and stops. There is **no `finish`, no `set_result`
+and no nudging** — the reply *is* the answer, and the next message starts the next
+turn.
+
+Two primitives are the whole loop:
+
+```prolog
+agent_main :-
+    system("You are a support assistant. Be brief."),
+    loop.
+
+loop :-
+    input(A),        % the person's next message; fails when there is none
+    chat(A),         % one turn: tools, then it replies and stops
+    loop.
+```
+
+- `input/1` waits for the next message and **has no prompt** — the embedding UI is
+  already a chat interface. It **fails** when there is nobody to talk to (a
+  non-interactive run), which is what ends the loop. Guard it (`-> ... ; true`)
+  when the rest of the harness should still run.
+- `chat/1` appends the message as the user turn and runs the loop with every
+  `tool/N` you declare (plus the built-in form tools). The reply is streamed to
+  the UI and kept in memory; `chat(Message, Reply)` also binds it.
+- **Memory is the conversation.** The next `chat/1` sees what was said; a
+  `system/1` before the loop sets the persona and survives every turn.
+- Use it as the **foreground goal** (`/goal agent_main`, `-g agent_main`), not
+  inside `execute` or a subagent: those would wait on a prompt nobody can answer.
+
+Do not reach for `task/N` for a conversation (it insists on a result and nags the
+model), and do not reach for `chat/1` when a single turn must return a value —
+that is `task/N`, with a **form** if the value comes from the person. A turn may
+open a form: the person fills it in and the turn continues. Full guide:
+[`docs/DML_CONVERSATION.md`](../../../../docs/DML_CONVERSATION.md).
+
 # Concurrency and subagents
 
 A **subagent** is a session-scoped DML process that keeps running after this
@@ -912,6 +951,7 @@ More patterns: `reference("patterns")`; shapes: `reference("examples")`.
   - [output/1, yield/1, log/1](#output-predicates)
   - [answer/1](#answer1)
   - [Forms (structured human input)](#forms-structured-human-input)
+  - [Conversation: `chat/1` and `input/1`](#conversation-chat1-and-input1)
 - [Processes and concurrency](#processes-and-concurrency)
 - [Control Flow](#control-flow)
 - [String Interpolation](#string-interpolation)
@@ -1857,6 +1897,47 @@ asker(Question, Answer) :-
     ;   Answer = "(no answer available)"
     ).
 ```
+
+### Conversation: `chat/1` and `input/1`
+
+A conversation is a harness that talks with the person over many turns and acts
+between them. Failures of `input/1` end the loop.
+
+#### `input(-Message)`
+
+Wait for the person's **next message**, with no prompt — the embedding UI is a
+chat interface and is already asking. Fails when there is nobody to talk to (a
+non-interactive run), which is how a conversation loop ends:
+
+```prolog
+loop :-
+    input(A),
+    chat(A),
+    loop.
+```
+
+`input/2` (with a prompt) is for a question inside a task; `input/1` is the turn
+boundary of a conversation.
+
+#### `chat(+Message)` / `chat(+Message, -Reply)`
+
+One **conversational turn**: append `Message` as the user message, run the agent
+loop with every `tool/N` the harness declares, and stop when the model stops
+calling tools. A traditional agent loop — no `finish`, no `set_result`, no
+nudging. The reply is streamed to the UI and kept in memory, so the next `chat/1`
+sees the conversation; `chat/2` also binds the last assistant message.
+
+```prolog
+agent_main :-
+    system("You are a support assistant. Be brief."),
+    loop.
+
+loop :- input(A), chat(A), loop.
+```
+
+Use it as the foreground goal (not inside `execute` or a subagent). A turn may
+open a form, so structured input fits inside a conversation. See
+[`docs/DML_CONVERSATION.md`](../../../../docs/DML_CONVERSATION.md).
 
 ### Forms (structured human input)
 

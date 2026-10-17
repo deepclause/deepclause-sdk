@@ -16,6 +16,7 @@
   - [output/1, yield/1, log/1](#output-predicates)
   - [answer/1](#answer1)
   - [Forms (structured human input)](#forms-structured-human-input)
+  - [Conversation: `chat/1` and `input/1`](#conversation-chat1-and-input1)
 - [Processes and concurrency](#processes-and-concurrency)
 - [Control Flow](#control-flow)
 - [String Interpolation](#string-interpolation)
@@ -961,6 +962,47 @@ asker(Question, Answer) :-
     ;   Answer = "(no answer available)"
     ).
 ```
+
+### Conversation: `chat/1` and `input/1`
+
+A conversation is a harness that talks with the person over many turns and acts
+between them. Failures of `input/1` end the loop.
+
+#### `input(-Message)`
+
+Wait for the person's **next message**, with no prompt — the embedding UI is a
+chat interface and is already asking. Fails when there is nobody to talk to (a
+non-interactive run), which is how a conversation loop ends:
+
+```prolog
+loop :-
+    input(A),
+    chat(A),
+    loop.
+```
+
+`input/2` (with a prompt) is for a question inside a task; `input/1` is the turn
+boundary of a conversation.
+
+#### `chat(+Message)` / `chat(+Message, -Reply)`
+
+One **conversational turn**: append `Message` as the user message, run the agent
+loop with every `tool/N` the harness declares, and stop when the model stops
+calling tools. A traditional agent loop — no `finish`, no `set_result`, no
+nudging. The reply is streamed to the UI and kept in memory, so the next `chat/1`
+sees the conversation; `chat/2` also binds the last assistant message.
+
+```prolog
+agent_main :-
+    system("You are a support assistant. Be brief."),
+    loop.
+
+loop :- input(A), chat(A), loop.
+```
+
+Use it as the foreground goal (not inside `execute` or a subagent). A turn may
+open a form, so structured input fits inside a conversation. See
+[`docs/DML_CONVERSATION.md`](../../../../docs/DML_CONVERSATION.md).
 
 ### Forms (structured human input)
 

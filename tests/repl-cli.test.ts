@@ -4,6 +4,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  buildCliOnInput,
   cancelsScriptedRetry,
   classifyReplInput,
   formatTurnInput,
@@ -212,5 +213,24 @@ describe('scripted form answers', () => {
     expect(cancelsScriptedRetry({ answer: '' } as never, { ...rejection, op: 'open', issues: [] })).toBe(false);
     // A model's `update_form` carries no issues and must not be cancelled.
     expect(cancelsScriptedRetry({ answer: '' } as never, { ...rejection, issues: [] })).toBe(false);
+  });
+});
+
+describe('scripted chat messages', () => {
+  // `input/1` has no prompt, so a chat loop would replay `--answer` forever:
+  // every turn would get the same message and the run would never end.
+  it('answers a promptless (chat) request once, then ends the conversation', async () => {
+    const onInput = buildCliOnInput({ answer: 'hi' } as never)!;
+    expect(await onInput('')).toBe('hi');
+    expect(await onInput('')).toBeUndefined();
+  });
+
+  it('still answers every prompted request with the canned reply', async () => {
+    const onInput = buildCliOnInput({ answer: 'hi' } as never)!;
+    // A form wizard asks per field with a label, and `input/2` has a prompt.
+    expect(await onInput('Name:')).toBe('hi');
+    expect(await onInput('Email:')).toBe('hi');
+    expect(await onInput('')).toBe('hi');
+    expect(await onInput('')).toBeUndefined();
   });
 });

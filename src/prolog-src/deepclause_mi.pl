@@ -3199,6 +3199,9 @@ process_engine_result(media(Payload), media, '', Payload) :- is_dict(Payload), !
 process_engine_result(log(Text), log, Text, none) :- !.
 process_engine_result(answer(Text), answer, Text, none) :- !.
 %% Current 8-arg format (with model spec from with_model/2)
+%% Conversation: the same loop with `mode: chat` (no finish, ends when the model stops).
+process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ReasoningEffort, RecipeContext, ModelSpec, Mode), request_agent_loop, '',
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: ReasoningEffort, recipeContext: RecipeContext, modelSpec: ModelSpec, mode: Mode}) :- !.
 process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ReasoningEffort, RecipeContext, ModelSpec), request_agent_loop, '',
     payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: ReasoningEffort, recipeContext: RecipeContext, modelSpec: ModelSpec}) :- !.
 %% Prompt-family 6-arg format (tool scope + model spec; no reasoning/recipe)
@@ -3806,6 +3809,8 @@ process_tool_engine_result(request_sample_token(Prompt, Allowed), request_sample
 process_tool_engine_result(request_llm(Messages), request_llm, '',
     payload{messages: Messages}) :- !.
 process_tool_engine_result(request_judgment(Payload), request_judgment, '', Payload) :- !.
+process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ReasoningEffort, RecipeContext, ModelSpec, Mode), request_agent_loop, '',
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: ReasoningEffort, recipeContext: RecipeContext, modelSpec: ModelSpec, mode: Mode}) :- !.
 process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ReasoningEffort, RecipeContext), request_agent_loop, '',
     payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: ReasoningEffort, recipeContext: RecipeContext}) :- !.
 %% Legacy 5-arg format (no reasoning/recipe)
@@ -4025,6 +4030,90 @@ mi_call(prompt_named(Desc, Vars, VarNames), StateIn, StateOut) :-
     !,
     consume_gas(StateIn, State1),
     mi_call_prompt_n(Desc, Vars, VarNames, State1, StateOut).
+
+%% ============================================================
+%% Conversation (docs/DML_CONVERSATION.md)
+%% ============================================================
+
+%% mi_call(input(-Message), +StateIn, -StateOut)
+%% Wait for the person's next message. No prompt: the embedding UI is a chat
+%% interface and is already asking. FAILS when there is no message (a
+%% non-interactive run), which is what ends `loop :- input(A), chat(A).`
+mi_call(input(Message), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    get_depth(StateIn, Depth),
+    engine_yield(wait_input("")),
+    get_next_signal(SessionId, _Signal),
+    (   session_input_cancelled(SessionId)
+    ->  retractall(session_input_cancelled(SessionId)),
+        fail
+    ;   session_pending_input(SessionId, Message)
+    ->  retract(session_pending_input(SessionId, Message)),
+        add_trace_with_result(SessionId, exit, input, [""], Message, Depth)
+    ;   fail            % nobody to talk to: the conversation is over
+    ).
+
+%% mi_call(chat(+Message), +StateIn, -StateOut) / chat(+Message, -Reply)
+%%
+%% One conversational turn: `Message` is the person's message, the agent loop runs
+%% with the harness's tools, and the turn ends when the model stops calling tools.
+%% No `finish`, no `set_result` and no nudging — the reply *is* the answer
+%% (agent.ts `conversational`). Memory carries the conversation forward, so
+%% `loop :- input(A), chat(A).` is a conversation in one run.
+mi_call(chat(Message), StateIn, StateOut) :-
+    !,
+    mi_call(chat(Message, _Reply), StateIn, StateOut).
+
+mi_call(chat(Message, Reply), StateIn, StateOut) :-
+    !,
+    consume_gas(StateIn, State0),
+    get_params(State0, Params),
+    interpolate_desc(Message, Params, InterpMessage),
+    get_session_id(SessionId),
+    get_depth(StateIn, Depth),
+    add_trace_entry(SessionId, llm_call, chat, [InterpMessage], Depth),
+    collect_user_tools(SessionId, UserTools),
+    % The message is NOT added to memory here: the loop appends it as the turn's
+    % user message, and returns the whole conversation as `full_memory`.
+    get_memory(State0, Memory0),
+    get_tool_scope(State0, ToolScope),
+    get_reasoning_effort(State0, ReasoningEffort),
+    get_recipe_context(State0, RecipeContext),
+    get_model_spec(State0, ModelSpec),
+    engine_yield(request_agent_loop(InterpMessage, [], UserTools, Memory0, ToolScope,
+                                   ReasoningEffort, RecipeContext, ModelSpec, chat)),
+    handle_agent_signals(SessionId, State0, StateAfterAgent),
+    session_agent_result(SessionId, Result),
+    retract(session_agent_result(SessionId, _)),
+    (   get_dict(success, Result, true)
+    ->  true
+    ;   (   get_dict(error, Result, ErrorMsg), ErrorMsg \= ""
+        ->  format(atom(WarnMsg), 'Warning: chat/1 failed: ~w', [ErrorMsg])
+        ;   format(atom(WarnMsg), 'Warning: chat/1 failed (success=false)', [])
+        ),
+        engine_yield(output(WarnMsg)),
+        fail
+    ),
+    (   get_dict(full_memory, Result, FullMemory), is_list(FullMemory)
+    ->  set_memory(StateAfterAgent, FullMemory, StateOut)
+    ;   set_memory(StateAfterAgent, Memory0, StateOut)
+    ),
+    last_assistant_message(Result, Reply),
+    add_trace_with_result(SessionId, exit, chat, [InterpMessage], Reply, Depth).
+
+%% last_assistant_message(+AgentResult, -Text)
+%% The reply is also streamed to the UI; this binds it for a harness that wants it.
+last_assistant_message(Result, Text) :-
+    (   get_dict(full_memory, Result, Messages), is_list(Messages)
+    ->  true
+    ;   Messages = []
+    ),
+    findall(Content, member(message{role: assistant, content: Content}, Messages), Texts),
+    (   last(Texts, Text)
+    ->  true
+    ;   Text = ""
+    ).
 
 %% mi_call_prompt_n(+Desc, +Vars, +VarNames, +StateIn, -StateOut)
 %% Simple LLM call with empty memory and NO tools (pure text completion with variable binding)
@@ -6419,6 +6508,10 @@ is_mi_special_predicate(get_memory(_)).
 is_mi_special_predicate(format(_,_)).
 is_mi_special_predicate(writeln(_)).
 is_mi_special_predicate(input(_,_)).
+%% Conversation (docs/DML_CONVERSATION.md)
+is_mi_special_predicate(input(_)).
+is_mi_special_predicate(chat(_)).
+is_mi_special_predicate(chat(_,_)).
 is_mi_special_predicate(call(_)).
 is_mi_special_predicate(call(_,_)).
 is_mi_special_predicate(call(_,_,_)).

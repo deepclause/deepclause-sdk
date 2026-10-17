@@ -459,7 +459,19 @@ export function buildCliOnInput(
   options: ReplCliOptions,
 ): ((prompt: string, choices?: string[]) => Promise<string | undefined>) | undefined {
   if (options.answer !== undefined) {
-    return async () => options.answer;
+    // A promptless request is `input/1` — the person's next chat message. A
+    // scripted run has exactly one conversation message; replaying it would make
+    // a chat loop turn forever, so after it there is nobody to talk to and the
+    // conversation ends. Prompted requests (a form field, a question) are not
+    // limited: the same canned reply answers each one.
+    let usedForMessage = false;
+    return async (prompt: string) => {
+      if (prompt === '') {
+        if (usedForMessage) return undefined;
+        usedForMessage = true;
+      }
+      return options.answer;
+    };
   }
   if (options.noAsk) {
     return async () => undefined;

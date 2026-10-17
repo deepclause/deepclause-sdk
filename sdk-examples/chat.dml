@@ -1,0 +1,29 @@
+%% sdk-examples/chat.dml — a conversational agent (docs/DML_CONVERSATION.md).
+%%
+%%   deepclause repl -l sdk-examples/chat.dml
+%%   /goal agent_main      # then just type; the conversation keeps going
+%%
+%% `agent_main` is the foreground goal: it waits for your message, runs one agent
+%% turn (with the tools below available), and waits again. `input/1` fails when
+%% there is nobody to talk to, which is what ends the loop.
+%%
+%% Unlike `task/N` there is no result to set and no `finish`: the model replies,
+%% the turn ends, and your next message starts the next turn.
+%%
+%% Needs a model (`deepclause login`). Not for `-g` with no TTY: `input/1` fails
+%% immediately there, and the conversation ends before it starts.
+
+agent_main :-
+    system(
+        "You are a concise assistant. You can add numbers with the add/3 tool.\n\
+         Answer briefly, and use the tool when the user asks for arithmetic."),
+    loop.
+
+loop :-
+    input(A),
+    chat(A),
+    loop.
+
+%% The conversation acts through tools; this is one the model can call.
+tool(add(A, B, Result), "Add two numbers and return the sum.", [number, number]) :-
+    Result is A + B.

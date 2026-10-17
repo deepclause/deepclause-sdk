@@ -27,11 +27,24 @@
 
 ### Added
 
+- **`chat/1` and `input/1`: conversational agents.** `input/1` waits for the
+  person's next message with **no prompt** (the embedding UI is already a chat
+  interface) and **fails** when there is nobody to talk to, which ends
+  `loop :- input(A), chat(A), loop.` `chat/1` runs one turn of a **traditional
+  agent loop** — the harness's `tool/N`s, but no `finish`, no `set_result` and no
+  nudging: the model calls tools, replies, and the turn ends when it stops calling
+  tools. The reply is streamed and kept in memory (memory *is* the conversation),
+  and `chat/2` also binds it. `agent.ts` gained a `conversational` mode over the
+  existing loop; `CHAT_PROMPT.md` is its system prompt.
+  [`docs/DML_CONVERSATION.md`](docs/DML_CONVERSATION.md) documents the contract and
+  §5 proposes — not built — the event inbox that lets a worker's message wake a
+  conversation (`next/1` over one inbox; `on/1` handlers rejected as a first
+  step).
 - **`reference("forms")`.** The bundled `DML_FORMS.md`, so the authoring agent can
   discover the feature at runtime. `HARNESS_EXAMPLES.md` gained a runnable forms
-  example, and a Forms section (`AGENT_PROMPT.md` / `DML_REFERENCE.md`) teaches the
-  three-call model loop first, with the DML primitives second. `docs/DML_FORMS.md`
-  §4 records why the gate was removed.
+  example (§9) and a conversational one (§10), and the prompt teaches the
+  three-call model loop first, with the DML primitives second.
+  `docs/DML_FORMS.md` §4 records why the gate was removed.
 
 ### Removed
 

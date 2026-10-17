@@ -7,7 +7,7 @@
  * - Uses result.response.messages for message history management
  */
 
-import { generateText, streamText, hasToolCall, tool as aiTool } from 'ai';
+import { generateText, streamText, hasToolCall, stepCountIs, tool as aiTool } from 'ai';
 import { z } from 'zod';
 import type {
   LLMBackend,
@@ -66,6 +66,15 @@ function cleanPrologMarkers(data: unknown): unknown {
 export interface AgentLoopOptions {
   taskDescription: string;
   outputVars: (string | TypedVar)[];
+  /**
+   * Conversational mode: a chat turn, not a task.
+   *
+   * A traditional agent loop — tools, but no `finish`/`set_result`, and the turn
+   * ends when the model stops calling tools. That is how a chat agent works: it
+   * replies, and the next message starts the next turn. Task mode, by contrast,
+   * insists on an explicit `finish` and nudges the model when it does not.
+   */
+  conversational?: boolean;
   memory: MemoryMessage[];
   tools: Map<string, ToolDefinition>;
   /**
@@ -682,7 +691,9 @@ async function runInjectedAgentLoop(
     success: false,
   };
   const requiredVarNames = normalizedOutputVars.map((variable) => variable.name);
-  const backendTools: LLMBackendTool[] = [{
+  // A chat turn has no `finish`/`set_result`: it ends when the model stops calling
+  // tools, like a traditional agent loop.
+  const backendTools: LLMBackendTool[] = options.conversational ? [] : [{
     name: 'finish',
     description: 'Complete the task. success=true requires every requested result variable to be set.',
     parameters: {
@@ -747,7 +758,7 @@ async function runInjectedAgentLoop(
   const messages: LLMBackendMessage[] = [
     { role: 'system', content: combinedSystemPrompt },
     ...historyMessages,
-    { role: 'user', content: `Subtask: ${options.taskDescription}` },
+    { role: 'user', content: options.conversational ? options.taskDescription : `Subtask: ${options.taskDescription}` },
   ];
   const maxIterations = Math.max(1, Number(process.env.DC_MAX_ITERATIONS) || 1000);
 
@@ -877,10 +888,16 @@ async function runInjectedAgentLoop(
     }
 
     if (toolCalls.length === 0 && !state.finished) {
-      messages.push({
-        role: 'user',
-        content: 'Continue the task. Use set_result for each requested output, then call finish.',
-      });
+      if (options.conversational) {
+        // The reply is the answer: end the turn, and do not nudge.
+        state.finished = true;
+        state.success = true;
+      } else {
+        messages.push({
+          role: 'user',
+          content: 'Continue the task. Use set_result for each requested output, then call finish.',
+        });
+      }
     }
   }
 
@@ -943,9 +960,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const aiTools: Record<string, any> = {};
 
-  // Add finish tool with Zod schema
+  // Add finish tool with Zod schema. A chat turn has no finish: the model replies
+  // and stops, and the next message starts the next turn.
   const requiredVarNames = normalizedOutputVars.map(v => v.name);
-  aiTools['finish'] = aiTool({
+  if (!options.conversational) aiTools['finish'] = aiTool({
     description: 'CRITICAL: You MUST call this tool to complete the task and return success/failure. Call with success=true if you have set all required results, or success=false if the task is impossible.',
     inputSchema: z.object({
       success: z.boolean().describe('Whether the task was completed successfully')
@@ -1051,6 +1069,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     workspacePath: options.workspacePath,
     environment: options.environment,
     capabilityTool: options.capabilityTool,
+    conversational: options.conversational,
   });
 
   // Extract system context from memory (user-defined system() calls)
@@ -1185,7 +1204,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           maxOutputTokens: modelOptions.maxOutputTokens,
           abortSignal: signal,
           providerOptions: modelOptions.providerOptions,
-          stopWhen: hasToolCall('finish'),
+          stopWhen: options.conversational ? stepCountIs(1) : hasToolCall('finish'),
           onStepFinish: (step) => {
             debugLog(`Step finished: finishReason=${step.finishReason} toolCalls=${step.toolCalls?.length ?? 0}`);
           },
@@ -1379,10 +1398,20 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           break;
         }
 
+        // A chat turn ends when the model stops calling tools: that reply is the
+        // answer, and the next message starts the next turn.
+        if (options.conversational && !finished && toolCallsThisIteration.length === 0) {
+          finished = true;
+          success = true;
+        }
+
         // If no tool calls were made, nudge the model to act.
         // This handles 'stop', 'other', and any unexpected finish reason.
-        const recoveryPrompt = buildRecoveryPrompt(normalizedOutputVars, repeatedStallCount, toolCallsThisIteration.length === 0);
-        const continuationPrompt = !finished && getLastMessageRole(messages) === 'assistant'
+        // A chat turn is never nudged: the model simply finished its reply.
+        const recoveryPrompt = options.conversational
+          ? null
+          : buildRecoveryPrompt(normalizedOutputVars, repeatedStallCount, toolCallsThisIteration.length === 0);
+        const continuationPrompt = !options.conversational && !finished && getLastMessageRole(messages) === 'assistant'
           ? buildAssistantContinuationPrompt(normalizedOutputVars)
           : null;
         const nextPrompt = recoveryPrompt ?? continuationPrompt;
@@ -1513,10 +1542,20 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           break;
         }
 
+        // A chat turn ends when the model stops calling tools: that reply is the
+        // answer, and the next message starts the next turn.
+        if (options.conversational && !finished && toolCallsThisIteration.length === 0) {
+          finished = true;
+          success = true;
+        }
+
         // If no tool calls were made, nudge the model to act.
         // This handles 'stop', 'other', and any unexpected finish reason.
-        const recoveryPrompt = buildRecoveryPrompt(normalizedOutputVars, repeatedStallCount, toolCallsThisIteration.length === 0);
-        const continuationPrompt = !finished && getLastMessageRole(messages) === 'assistant'
+        // A chat turn is never nudged: the model simply finished its reply.
+        const recoveryPrompt = options.conversational
+          ? null
+          : buildRecoveryPrompt(normalizedOutputVars, repeatedStallCount, toolCallsThisIteration.length === 0);
+        const continuationPrompt = !options.conversational && !finished && getLastMessageRole(messages) === 'assistant'
           ? buildAssistantContinuationPrompt(normalizedOutputVars)
           : null;
         const nextPrompt = recoveryPrompt ?? continuationPrompt;
@@ -1580,6 +1619,26 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   }
   
   // Add result to persistent messages
+  if (options.conversational) {
+    // A chat turn keeps the conversation, not a task summary: the person's
+    // message and what the agent actually said. No extra summarising model call.
+    return {
+      success: true,
+      outputs,
+      variables,
+      messages: [
+        ...conversationHistory
+          .filter((message) => message.role === 'user' || message.role === 'assistant')
+          .map((message) => ({
+            role: message.role as 'user' | 'assistant',
+            content: typeof message.content === 'string' ? message.content : JSON.stringify(message.content),
+          })),
+        { role: 'user' as const, content: taskDescription },
+        ...assistantTextResponses.map((text) => ({ role: 'assistant' as const, content: text })),
+      ],
+    };
+  }
+
   if (success && Object.keys(variables).length > 0) {
     const varSummary = Object.entries(variables)
       .map(([k, v]) => `${k}: ${v}`)
@@ -1642,20 +1701,23 @@ async function buildSystemPrompt(options: {
   workspacePath?: string;
   environment?: ExecutionEnvironment;
   capabilityTool?: string;
+  conversational?: boolean;
 }): Promise<string> {
   const toolDescriptions: string[] = [];
   const normalizedOutputVars = options.outputVars;
-  
-  // Add finish tool description
-  toolDescriptions.push('- finish(success: boolean): Signal task completion. Call finish(true) when done successfully, or finish(false) if the task cannot be completed.');
-  
-  // Add set_result tool if we have output variables
-  if (normalizedOutputVars.length > 0) {
-    const varList = normalizedOutputVars.map(v => {
-      const typeStr = v.type === 'array' && v.itemType ? `array<${v.itemType}>` : v.type;
-      return `"${v.name}" (${typeStr})`;
-    }).join(', ');
-    toolDescriptions.push(`- set_result(variable: string, value: any): Store a result value. Variable must be one of: ${varList}`);
+
+  if (!options.conversational) {
+    // Add finish tool description
+    toolDescriptions.push('- finish(success: boolean): Signal task completion. Call finish(true) when done successfully, or finish(false) if the task cannot be completed.');
+
+    // Add set_result tool if we have output variables
+    if (normalizedOutputVars.length > 0) {
+      const varList = normalizedOutputVars.map(v => {
+        const typeStr = v.type === 'array' && v.itemType ? `array<${v.itemType}>` : v.type;
+        return `"${v.name}" (${typeStr})`;
+      }).join(', ');
+      toolDescriptions.push(`- set_result(variable: string, value: any): Store a result value. Variable must be one of: ${varList}`);
+    }
   }
   
   // Add user-defined tools
@@ -1692,6 +1754,17 @@ async function buildSystemPrompt(options: {
     '- If you are stuck, either choose one different tool or call finish(false).',
     '- Once enough information exists, stop planning, set results if needed, and finish.',
   ].join('\n');
+
+  if (options.conversational) {
+    const chatTemplate = await readSystemPromptAsset('chat', { workspacePath: options.workspacePath });
+    return chatTemplate
+      .replace('{TOOL_DESCRIPTIONS}', toolDescriptions.join('\n'))
+      .replace('{ENVIRONMENT_SECTION}', describeEnvironment({
+        workspacePath: options.workspacePath,
+        environment: options.environment,
+        capabilityTool: options.capabilityTool,
+      }) + describeCurrentTime());
+  }
 
   const template = await readSystemPromptAsset('task', { workspacePath: options.workspacePath });
   return template

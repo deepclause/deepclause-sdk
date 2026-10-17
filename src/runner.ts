@@ -1034,6 +1034,9 @@ export class DMLRunner {
   ): AsyncGenerator<DMLEvent> {
     const rawPayload = payload as Record<string, unknown>;
     const taskDescription = String(toJsValue(rawPayload.taskDescription) ?? '');
+    // `chat` is a conversational turn: tools, no finish, ends when the model
+    // stops calling tools (see agent.ts `conversational`).
+    const conversational = String(toJsValue(rawPayload.mode) ?? '') === 'chat';
     const stepId = `step_${this.stepCounter++}`;
 
     yield { type: 'task_activity', taskState: 'started', taskDescription, taskId: stepId };
@@ -1239,6 +1242,7 @@ export class DMLRunner {
     const resultPromise = runAgentLoop({
       taskDescription,
       outputVars,
+      conversational,
       memory: effectiveMemory,
       tools: availableTools,
       workspacePath: options.workspacePath,
@@ -2317,6 +2321,7 @@ export class DMLRunner {
             const memory = this.extractMemoryFromPayload(payload as Record<string, unknown>);
             const preparedMemory = memory;
 
+            const nestedConversational = String(toJsValue((payload as Record<string, unknown>)?.mode) ?? '') === 'chat';
             // Extract reasoning effort and recipe context for nested loops
             const nestedReasoningEffort = String(toJsValue((payload as Record<string, unknown>)?.reasoningEffort) ?? 'none');
             const nestedRecipeContext = String(toJsValue((payload as Record<string, unknown>)?.recipeContext) ?? '');
@@ -2383,6 +2388,7 @@ export class DMLRunner {
               const result = await runAgentLoop({
                 taskDescription,
                 outputVars,
+                conversational: nestedConversational,
                 memory: nestedEffectiveMemory,
                 tools: availableTools,
                 // Withheld to break a call cycle; declared to the model so a

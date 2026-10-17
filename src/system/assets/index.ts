@@ -3,7 +3,7 @@ import { access, readFile } from 'fs/promises';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
-export type SystemPromptAssetName = 'task';
+export type SystemPromptAssetName = 'task' | 'chat';
 export type WorkspaceDocAssetName =
   | 'dml-reference'
   | 'dml-authoring'
@@ -26,6 +26,8 @@ function getSystemPromptFileName(name: SystemPromptAssetName): string {
   switch (name) {
     case 'task':
       return 'TASK_PROMPT.md';
+    case 'chat':
+      return 'CHAT_PROMPT.md';
   }
 }
 

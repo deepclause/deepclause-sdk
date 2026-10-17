@@ -223,3 +223,33 @@ branch. A field's `type` defaults to `string`, and the host owns validation.
 against `"submit"`. `current_predicate(form/2)` reports `no` even when forms work
 (it is a host handler, like `exec/2`). See `reference("forms")` and
 `sdk-examples/forms.dml`.
+
+## 10. A conversational agent
+
+A conversation talks with the person over many turns and acts between them. Two
+primitives: `input/1` (the next message, no prompt) and `chat/1` (one traditional
+agent turn — tools, no `finish`, no nudging; it ends when the model stops calling
+tools). Run it as the foreground goal, not inside `execute`.
+
+```prolog
+doc(agent_main/0, "Chat assistant that can add. Run with /goal agent_main.").
+
+agent_main :-
+    system("You are a concise assistant. Use add/3 when asked for arithmetic."),
+    loop.
+
+loop :-
+    input(A),        % the person's next message; fails when there is none
+    chat(A),         % one turn: tools, then it replies and stops
+    loop.
+
+tool(add(A, B, Result), "Add two numbers.", [number, number]) :-
+    Result is A + B.
+```
+
+`chat(Message, Reply)` binds the assistant's last message if the harness wants to
+post-process it. Memory carries the conversation, so each turn sees what was said.
+A turn may open a **form** (§9), which is how structured input fits inside a
+conversation. Acting on a *worker's* message mid-conversation is designed but not
+built yet — see [`docs/DML_CONVERSATION.md`](../../../../docs/DML_CONVERSATION.md)
+§5 for the proposed inbox/`next/1` mechanism.
