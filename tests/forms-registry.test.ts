@@ -127,6 +127,42 @@ describe('FormRegistry', () => {
   });
 });
 
+describe('awaitingForms', () => {
+  // A conversational turn must not end while a form it opened still owes the
+  // person an answer — or while it has asked them for one and nobody is waiting.
+  it('reports a freshly rendered form as awaiting', () => {
+    const registry = new FormRegistry();
+    const { formId } = registry.open(spec);
+    expect(registry.awaitingForms().map((record) => record.formId)).toEqual([formId]);
+  });
+
+  it('stops reporting it once a change has been delivered', async () => {
+    const registry = new FormRegistry();
+    const { formId } = registry.open(spec);
+    const wait = registry.wait(formId, -1, {});
+    registry.submit(formId, 'submit', { vendor: 'acme', amount: 5 });
+    await wait;
+    expect(registry.awaitingForms()).toEqual([]);
+  });
+
+  it('reports it again when the agent changes the form after a delivery', () => {
+    const registry = new FormRegistry();
+    const { formId } = registry.open(spec);
+    registry.submit(formId, 'submit', { vendor: '', amount: 0 });
+    registry.setIssues(formId, [{ path: 'vendor', level: 'error', message: 'is required' }]);
+    // The person is being asked to fix something nobody is waiting for.
+    expect(registry.awaitingForms().map((record) => record.formId)).toEqual([formId]);
+  });
+
+  it('does not report a closed form', async () => {
+    const registry = new FormRegistry();
+    const { formId } = registry.open(spec);
+    registry.close(formId, 'cancelled');
+    expect(registry.awaitingForms()).toEqual([]);
+    expect(registry.get(formId)?.state).toBe('cancelled');
+  });
+});
+
 describe('merge patch', () => {
   it('merges nested objects and deletes on null', () => {
     expect(mergePatch({ a: { b: 1, c: 2 } }, { a: { c: null, d: 3 } })).toEqual({ a: { b: 1, d: 3 } });

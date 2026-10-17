@@ -233,15 +233,22 @@ export class FormRegistry {
   }
 
   /**
-   * Forms that are open and have **not handed a change to anyone since they were
-   * opened** — i.e. a form the model put in front of the person and then stopped
-   * waiting for. A conversational turn uses this so it cannot end with a form the
-   * person is still filling in: the submission would have nowhere to go.
+   * Forms that are open and left with a **change nobody has read**.
+   *
+   * That is either a form the model put in front of the person and never waited
+   * on (no change delivered since it was opened), or one it changed *after* the
+   * last delivery — showing errors for a rejected value, patching a computed
+   * field — which asks the person for another action nobody is waiting for.
+   *
+   * A conversational turn uses this so it cannot end with a form the person is
+   * still filling in: the submission would have nowhere to go.
    */
   awaitingForms(): FormRecord[] {
-    return [...this.forms.values()].filter(
-      (record) => record.state === 'open' && (this.delivered.get(record.formId) ?? 0) <= record.openRevision,
-    );
+    return [...this.forms.values()].filter((record) => {
+      if (record.state !== 'open') return false;
+      const delivered = this.delivered.get(record.formId) ?? 0;
+      return delivered <= record.openRevision || record.revision > delivered;
+    });
   }
 
   list(): FormRecord[] {

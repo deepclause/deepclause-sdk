@@ -100,4 +100,30 @@ describe('form tools inside task/N', () => {
     const toolResults = events.filter((event) => event.type === 'tool_call').map((event) => event.toolResult);
     expect(JSON.stringify(toolResults)).toContain('submit');
   });
+
+  it('delivers a submission that arrives after the wait is registered (with a signal)', async () => {
+    // The synchronous submit above never reaches the waiter: `wait` sees the
+    // change already there. A person clicks *later*, so the waiter is live — and
+    // it used to resolve `cancelled` (it called its own abort hook) while carrying
+    // the submitted values.
+    sdk = await createDeepClause({ model: 'test-model', llmBackend: backend() });
+    const controller = new AbortController();
+    const events: DMLEvent[] = [];
+
+    for await (const event of sdk.runDML(DML, { signal: controller.signal })) {
+      events.push(event);
+      if (event.type === 'form' && event.form?.op === 'open') {
+        const formId = event.form.formId;
+        setTimeout(() => sdk!.submitForm(formId, { action: 'submit', values: { subject: 'hi' } }), 10);
+      }
+    }
+
+    expect(events.some((event) => event.type === 'answer' && event.content === 'done')).toBe(true);
+    const waitResult = events
+      .filter((event) => event.type === 'tool_call' && event.toolName === 'wait_for_form_change')
+      .map((event) => JSON.stringify(event.toolResult))
+      .join('\n');
+    expect(waitResult).toContain('"action":"submit"');
+    expect(waitResult).not.toContain('cancelled');
+  });
 });
