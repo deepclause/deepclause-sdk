@@ -150,7 +150,12 @@ Call `listing` at the start of a session and again after every change.
   shortened) or `bindings: "none"` (nothing returned) so a term you are not
   reading does not fill the transcript and your context. Both say what they left
   out, so an omitted binding never looks like a goal that bound nothing.
-- It runs on a scratch copy: it does not commit anything. Use it to test.
+- It runs the goal against a **scratch copy of the module**: nothing it defines
+  is committed, so it is the way to test. The copy is of the *module*, not of the
+  world — `spawn`/`serve` inside `execute` create real, session-scoped processes
+  that outlive the call (and run the module as it was then). Testing a service
+  therefore leaves it running: `ps` shows it, and you can talk to it from a later
+  turn, or `/stop` it.
 
 # Modify the module
 
@@ -382,6 +387,12 @@ A subagent is isolated and asynchronous:
   `answer/1` — never by an output argument. Write `send(Parent, result(...))` in
   the child and `receive` it in the parent (pass `self(Me)` into the child).
 - **It outlives the turn.** Do not busy-wait; report the id and use `ps` later.
+- **`ps` shows the name you talk to.** A `serve(Name, Goal)` process is labelled
+  `Name`, not the goal functor, so `ps`/`/ps` line up with `whereis(Name, P)` and
+  `service_call(Name, …)`. `process_info/2` keeps the goal, and its `usage`
+  counts *model* tokens: a service that only relays messages legitimately shows
+  zeros, so do not read zero usage as "not running" — `state` is the field for
+  that.
 
 Patterns:
 
@@ -1924,6 +1935,9 @@ asker(Question, Answer) :-
 A conversation is a harness that talks with the person over many turns and acts
 between them. Failures of `input/1` end the loop.
 
+`write/1`, `writeln/1` and `format/2` are captured as output events in the REPL
+(and in `execute`); outside it they write to the process stdout as usual.
+
 #### `input(-Message)`
 
 Wait for the person's **next message**, with no prompt — the embedding UI is a
@@ -2147,6 +2161,11 @@ counter_service(Count) :-
     ).
 ```
 
+
+The process is labelled with `Name` (not the goal functor), so `ps`, `whereis/2`
+and `service_call/3` all use the same handle. `process_info/2` reports both the
+label and the registered names, and its `usage` counts model tokens — a relay
+service shows zeros while running.
 ### `swarm(+Worker, +Items, -Results[, +Concurrency])` / `pmap(+Worker, +Items, -Values)`
 
 Run `call(Worker, Item, Value)` once per item, each in its own process, and

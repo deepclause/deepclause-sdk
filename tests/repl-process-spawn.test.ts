@@ -8,7 +8,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { createHarnessRepl, type HarnessRepl } from '../src/repl/index.js';
-import { createHarnessTools } from '../src/repl/harness-tools.js';
+import { createHarnessTools, formatProcessTable } from '../src/repl/harness-tools.js';
 import { pidTermText, type ProcessEvent } from '../src/repl/processes.js';
 
 let workspace: string;
@@ -286,5 +286,22 @@ describe('session-scoped subagents', () => {
     expect(result.output).toContain('killed(');
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(repl.session.processes().find((process) => process.name === 'linger')?.state).toBe('killed');
+  });
+});
+
+describe('serve labels the process with the service name', () => {
+  it('shows the name in ps, not the goal functor', async () => {
+    await define('echo_loop/1', 'echo_loop(S) :- receive(request(From, Ref, M), 5000), send(From, reply(Ref, M)), echo_loop([M|S]).');
+    await define('start_echo/0', 'start_echo :- serve(echo, echo_loop([])).');
+    await repl.session.executeGoal('start_echo', 1);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    const service = repl.session.processes().find((process) => process.name === 'echo');
+    // A spawn labels a process with its goal functor; a service is reached by its
+    // name, so showing only the label made a live service look like an anonymous loop.
+    expect(service).toBeDefined();
+    expect(service?.goal).toContain('echo_loop');
+    expect(repl.session.whereisProcess('echo')?.id).toBe(service?.pid.id);
+    expect(formatProcessTable(repl.session.processes(), repl.session.currentHarnessVersion())).toContain('echo  ');
   });
 });

@@ -82,6 +82,13 @@ describe('formatProcessTable', () => {
     expect(table).toContain('waiting');
     expect(table).toContain('3 tok');
   });
+
+  it('shows a registered alias when it differs from the label', () => {
+    // A process may be registered under a name that is not its label (`register/2`
+    // on someone else's pid). The label alone is not what anyone talks to.
+    const table = formatProcessTable([info({ name: 'worker_loop', registeredAs: ['keeper', 'worker_loop'] })]);
+    expect(table).toContain('worker_loop (as keeper)');
+  });
 });
 
 describe('subagent harness tools', () => {

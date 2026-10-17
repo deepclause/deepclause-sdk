@@ -4,6 +4,18 @@
 
 ### Changed
 
+- **`write/1` reaches the output channel.** It had no handler, so it fell through
+  to SWI's `current_output` and its text vanished in the REPL — only `format/2`
+  and `writeln/1` were captured. A debugging `write(step)` therefore looked
+  exactly like a goal that produced nothing, which cost a whole debugging session
+  (and nearly got `whereis/2` reported as broken).
+- **A `serve(Name, Goal)` process is labelled `Name`.** A spawn labels a process
+  with its goal functor, so `serve(test_service, test_service_loop)` appeared in
+  `ps` as `test_service_loop` — an anonymous loop nobody could talk to — while
+  `whereis(test_service, P)` resolved fine. `ps` and `/ps` now show the handle you
+  actually use; `process_info/2` keeps the goal and reports the registered names
+  (its `usage` counts model tokens, so zero usage is not evidence of idleness).
+
 - **A refused submit is now the host's business, not the caller's.** The host
   enforced the rules on submit but returned `action: invalid` with the errors, so
   every harness and every model-driven loop carried a reject-and-re-show branch

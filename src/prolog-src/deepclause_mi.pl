@@ -4865,12 +4865,24 @@ mi_call(now_ms(Milliseconds), StateIn, StateIn) :-
 %% mi_call(serve(+Name, +Goal), +StateIn, -StateOut)
 %% Spawn a session-scoped process and register it under Name. Sugar over
 %% spawn/2 + register/2; the goal decides the process's shape.
+%%
+%% The process is *labelled* with the service name. A spawn labels a process with
+%% its goal functor, so `serve(test_service, test_service_loop)` used to appear in
+%% `ps` as "test_service_loop" — the label of an anonymous loop — and a live
+%% service looked like something nobody could talk to. `process_info/2` keeps the
+%% goal, so nothing is lost.
 mi_call(serve(Name, Goal), StateIn, StateIn) :-
     !,
     get_session_id(SessionId),
     copy_term(Goal, GoalCopy),
     term_string(GoalCopy, GoalText),
-    engine_yield(request_proc(spawn(GoalText))),
+    (   atom(Name)
+    ->  Label = Name
+    ;   atom_string(Label, Name)                 % a string name -> atom
+    ),
+    % Spawn options are read as a dict (`parseSpawnOptions`), so `name:` not `name(...)`.
+    format(string(OptionsText), "{name: ~q}", [Label]),
+    engine_yield(request_proc(spawn(GoalText, OptionsText))),
     get_next_signal(SessionId, _),
     session_proc_result(SessionId, spawn, SpawnResult),
     retract(session_proc_result(SessionId, spawn, _)),
@@ -5407,6 +5419,22 @@ mi_call(format(Format, Args), StateIn, StateIn) :-
     ->  with_output_to(string(Text), format(Format, Args)),
         mi_call(output(Text), StateIn, StateIn)
     ;   format(Format, Args)
+    ).
+
+%% mi_call(write(Value), +StateIn, -StateOut)
+%% `write/1` had no handler, so it fell through to SWI's current_output and its
+%% text vanished in the REPL — only `format/2` and `writeln/1` were captured. A
+%% debugging `write(step)` then looks exactly like a goal that produced nothing,
+%% which is the worst possible signal.
+mi_call(write(Value), StateIn, StateIn) :-
+    get_session_id(SessionId),
+    (   session_repl_mode(SessionId, true)
+    ->  with_output_to(string(Text), write(Value)),
+        (   Text == ""
+        ->  true
+        ;   mi_call(output(Text), StateIn, StateIn)
+        )
+    ;   write(Value)
     ).
 
 %% mi_call(writeln(Value), +StateIn, -StateOut)
@@ -6547,6 +6575,7 @@ is_mi_special_predicate(require_judgment(_,_)).
 is_mi_special_predicate(get_memory(_)).
 is_mi_special_predicate(format(_,_)).
 is_mi_special_predicate(writeln(_)).
+is_mi_special_predicate(write(_)).
 is_mi_special_predicate(input(_,_)).
 %% Conversation (docs/DML_CONVERSATION.md)
 is_mi_special_predicate(input(_)).

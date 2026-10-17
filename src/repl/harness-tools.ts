@@ -133,7 +133,12 @@ export function formatProcessTable(processes: ProcessInfo[], currentVersion?: st
       // before the latest edit — the process is fine, its code is just older.
       const stale = currentVersion && p.harnessVersion && p.harnessVersion !== currentVersion;
       const code = p.harnessVersion ? ` · code ${p.harnessVersion.slice(0, 7)}${stale ? ' (old)' : ''}` : '';
-      return `${pidTermText(p.pid)}  ${p.name}  ${p.state}${error}  mailbox ${p.mailboxDepth}${usage}${code}${activity}`;
+      // `serve(Name, Goal)` labels a process by its goal functor but is reached by
+      // its registered name, so show both: reading only the label is how a live
+      // `test_service` looks like an anonymous `test_service_loop`.
+      const aliases = (p.registeredAs ?? []).filter((name) => name !== p.name);
+      const names = aliases.length > 0 ? ` (as ${aliases.join(', ')})` : '';
+      return `${pidTermText(p.pid)}  ${p.name}${names}  ${p.state}${error}  mailbox ${p.mailboxDepth}${usage}${code}${activity}`;
     })
     .join('\n');
 }

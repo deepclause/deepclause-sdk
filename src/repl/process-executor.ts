@@ -62,6 +62,7 @@ function infoTerm(info: ProcessInfo | undefined): string {
   return 'info{'
     + `pid:${pidTermText(info.pid)},`
     + `name:${prologAtom(info.name)},`
+    + `registered:[${(info.registeredAs ?? []).map((name) => prologAtom(name)).join(',')}],`
     + `state:${info.state},`
     + `priority:${info.priority},`
     + `mailbox:${info.mailboxDepth},`

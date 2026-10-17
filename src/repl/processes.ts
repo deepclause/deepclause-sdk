@@ -83,6 +83,8 @@ export interface ProcessInfo {
   startedAt: number;
   finishedAt?: number;
   restarts: number;
+  /** Names this process is registered under (`register/2`, `serve/2`). */
+  registeredAs?: string[];
   currentActivity?: string;
   parent?: Pid;
   codeVersion?: string;
@@ -672,6 +674,16 @@ export class LocalProcessHost {
     this.names.set(name, pid);
   }
 
+  /** Every registered name pointing at `pid` (a process may have several). */
+  namesFor(pid: Pid): string[] {
+    const key = pidKey(pid);
+    const names: string[] = [];
+    for (const [name, target] of this.names) {
+      if (pidKey(target) === key) names.push(name);
+    }
+    return names.sort();
+  }
+
   whereis(name: string): Pid | undefined {
     const pid = this.names.get(name) ?? this.pidByLabel(name);
     if (!pid) return undefined;
@@ -762,6 +774,10 @@ export class LocalProcessHost {
       startedAt: record.startedAt,
       finishedAt: record.finishedAt,
       restarts: record.restarts,
+      // A `serve(Name, Goal)` process is labelled by its goal functor but reached
+      // by its registered name; showing only the label makes a live service look
+      // like an anonymous loop (see `formatProcessTable`).
+      registeredAs: this.namesFor(record.pid),
       currentActivity: record.currentActivity,
       parent: record.options.parent,
       codeVersion: record.options.codeVersion,

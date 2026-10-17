@@ -968,6 +968,9 @@ asker(Question, Answer) :-
 A conversation is a harness that talks with the person over many turns and acts
 between them. Failures of `input/1` end the loop.
 
+`write/1`, `writeln/1` and `format/2` are captured as output events in the REPL
+(and in `execute`); outside it they write to the process stdout as usual.
+
 #### `input(-Message)`
 
 Wait for the person's **next message**, with no prompt — the embedding UI is a
@@ -1191,6 +1194,11 @@ counter_service(Count) :-
     ).
 ```
 
+
+The process is labelled with `Name` (not the goal functor), so `ps`, `whereis/2`
+and `service_call/3` all use the same handle. `process_info/2` reports both the
+label and the registered names, and its `usage` counts model tokens — a relay
+service shows zeros while running.
 ### `swarm(+Worker, +Items, -Results[, +Concurrency])` / `pmap(+Worker, +Items, -Values)`
 
 Run `call(Worker, Item, Value)` once per item, each in its own process, and
