@@ -411,9 +411,10 @@ dml> /ps --watch --logs
   debater   ›   finished
 ```
 
-The authoring agent uses the same machinery through its `spawn` / `ps` / `send`
-/ `call` / `stop` / `swarm` / `wait` tools, and DML programs use the built-ins
-directly (`spawn`, `send`/`receive`, `serve`/`service_call`, `swarm`/`pmap`). A
+The authoring agent uses the same machinery through its `ps` / `send` / `stop` /
+`swarm` / `wait` tools, and drives `spawn` and request/reply through `execute`
+with the DML built-ins (`spawn`, `send`/`receive`, `serve`/`service_call`,
+`swarm`/`pmap`). A
 subagent runs against a **private snapshot** of the module with **value
 semantics** — a result comes back by message, never by a shared variable — which
 is what makes it safe to run many at once.
@@ -670,6 +671,7 @@ concurrency), [`STATUS.md`](docs/STATUS.md) (current state),
 [`DML_MEDIA.md`](docs/DML_MEDIA.md),
 [`DML_MODEL_SWITCHING.md`](docs/DML_MODEL_SWITCHING.md),
 [`DML_REPL_WORKER_EXECUTION.md`](docs/DML_REPL_WORKER_EXECUTION.md) (plan),
+[`DML_FORMS.md`](docs/DML_FORMS.md) (structured human input),
 [`JUDGMENT_BACKENDS.md`](docs/JUDGMENT_BACKENDS.md).
 
 ## License

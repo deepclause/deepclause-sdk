@@ -170,3 +170,97 @@ describe_image(Path, Text) :-
 Images are files; `media(Path, Mime)` is the reference. The bytes are read from
 the workspace at call time, only PNG/JPEG/GIF/WebP are accepted, and they never
 enter clauses or memory. Judgments stay text-only.
+
+## 9. Forms: structured input from the user
+
+Use a form when the program needs **typed, validated** input rather than free
+text. Forms are always available — no directive, nothing to import.
+
+**Let the model design and drive the form** (the usual shape). Give `task/N` the
+form tools and describe what you need:
+
+```prolog
+doc(collect_claim/0, "Collect an expense claim and report it. Example: /goal collect_claim.").
+
+collect_claim(Summary) :-
+    system("You collect a new expense claim. Ask for the vendor, the amount and a note."),
+    with_tools([render_form, wait_for_form_change, close_form, set_result, finish],
+        task("Ask for the three fields, then report exactly what the user entered.",
+             string(Summary))).
+```
+
+The model's loop is three calls: `render_form(spec)` → a form id,
+`wait_for_form_change(formId)` → `{action, values}`, `close_form(formId)`.
+
+**Or drive it from DML**, with no model:
+
+```prolog
+doc(claim_form/1, "Collect an expense claim. claim_form(-Values) returns the entered values.").
+
+claim_form(Values) :-
+    form(_{ title: "New expense claim",
+           fields: [ _{name: vendor, type: string,  required: true},
+                     _{name: amount, type: integer, required: true, minimum: 0},
+                     _{name: notes,  widget: textarea} ] }, F),
+    await_form(F, Change),
+    close_form(F),
+    (   Change.action == submit               % an atom: submit, cancel
+    ->  Change.values = Values
+    ;   Values = _{}
+    ).
+
+%% Domain rules on top of the spec's own constraints; both block a submit, and a
+%% refused submit is never returned — the host shows the errors and waits again.
+form_validate(Values, Errors) :-
+    findall(error(amount, "the amount looks implausible"),
+            ( get_dict(amount, Values, A), A > 100000 ),
+            Errors).
+```
+
+Note what is *not* here: no `version`, no loop for rejected submits, no error
+branch. A field's `type` defaults to `string`, and the host owns validation.
+`Change.action` is an **atom** (`submit`, `cancel`) — compare with `==`, never
+against `"submit"`. `current_predicate(form/2)` reports `no` even when forms work
+(it is a host handler, like `exec/2`). See `reference("forms")` and
+`sdk-examples/forms.dml`.
+
+## 10. A conversational agent
+
+A conversation talks with the person over many turns and acts between them. Two
+primitives: `input/1` (the next message, no prompt) and `chat/1` (one traditional
+agent turn — tools, no `finish`, no nudging; it ends when the model stops calling
+tools). Run it as the foreground goal, not inside `execute`.
+
+```prolog
+doc(agent_main/0, "Chat assistant that can add. Run with /goal agent_main.").
+
+agent_main :-
+    system("You are a concise assistant. Use add/3 when asked for arithmetic."),
+    loop.
+
+loop :-
+    input(A),        % the person's next message; fails when there is none
+    chat(A),         % one turn: tools, then it replies and stops
+    loop.
+
+tool(add(A, B, Result), "Add two numbers.", [number, number]) :-
+    Result is A + B.
+```
+
+`chat(Message, Reply)` binds the assistant's last message if the harness wants to
+post-process it, and a failed turn is reported without ending the conversation.
+Memory carries the conversation, so each turn sees what was said. A turn may open
+a **form** (§9), which is how structured input fits inside a conversation.
+
+`next/1` reads the same inbox for **events**: replace `input(A), chat(A)` with a
+`next/1` dispatch, and a worker's message wakes the conversation:
+
+```prolog
+loop(Me) :- next(Item), handle(Me, Item), loop(Me).
+
+handle(_, user(Text))       :- chat(Text).                       % the person
+handle(_, message(mail(M))) :- system("New email."), chat("Summarise: {M}").
+```
+
+The `message(Term)` comes from `send(Me, mail(M))` in a spawned worker. See
+[`docs/DML_CONVERSATION.md`](../../../../docs/DML_CONVERSATION.md) §5.

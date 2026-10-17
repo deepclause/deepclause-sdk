@@ -36,6 +36,15 @@ CLI commands: `init`, `login`, `logout`, `set-backend`, `set-model`, `show-model
   `delete`/`execute`/`reference`/`models`/`write_file`/`show_image`/
   `generate_image`/`visualize`), and can run several
   committed turns in one request.
+- **Forms**: a harness asks the human a **structured question** and acts on the
+  answer. Always available — no directive, no `use_module`. `form/2` renders,
+  `await_form/2` blocks until the user acts (`submit`/`cancel`/`invalid`), the
+  **host** enforces the spec (`required`/`enum`/ranges) and the harness's
+  `form_validate/2` on submit, and `form_update/2`/`form_errors/2` re-render. The
+  model-facing tools (`render_form`, `wait_for_form_change`, …) are installed as
+  built-in `tool/N` wrappers, so the loop can live in `task/N`. They are host
+  handlers, not clauses — `current_predicate(form/2)` reports `no`, exactly as it
+  does for `exec/2`.
 - **Transactions**: each turn snapshots the module and commits
   replace-by-predicate; a failed turn leaves the harness unchanged.
 - **Auditability**: `.deepclause/repl/` holds `history.dml` (append-only
@@ -66,8 +75,9 @@ CLI commands: `init`, `login`, `logout`, `set-backend`, `set-model`, `show-model
   module snapshot, memory, and mailbox. Built-ins: `spawn`/`spawn_opt`, `send`/
   `receive`/`receive_match`, `serve`/`service_call`/`service_cast`, `swarm`/`pmap`,
   `wait`, `exit`, `register`/`whereis`, `process_info`. The REPL runs them with
-  the `spawn`/`ps`/`send`/`call`/`stop`/`swarm`/`wait` tools and the `/spawn`,
-  (`--logs` / `/stop`). Execution is `worker` (L2, the default: a `worker_threads`
+  the `ps`/`send`/`stop`/`swarm`/`wait` tools (and `execute` for `spawn` /
+  `service_call`) and the `/spawn`, `/ps`, `/send`, `/call`, `/stop` commands.
+  Execution is `worker` (L2, the default: a `worker_threads`
   thread with its own WASM, true parallelism and hard cancellation) or `inline`
   (L1, cooperative, in-process), selected by `--execution`; value semantics (copy
   on `spawn`/`send`) let the same DML run in both. See

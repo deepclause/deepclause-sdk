@@ -49,6 +49,34 @@ let swiplInstance: SWIPLModule | null = null;
 let initPromise: Promise<SWIPLModule> | null = null;
 let currentWorkspacePath: string | null = null;
 
+/**
+ * A host-supplied engine loader, for embeddings that are not Node (the browser).
+ *
+ * The default path below mounts a host directory with NODEFS and reads the
+ * Prolog sources from disk. A browser host instead loads the WebAssembly build,
+ * writes the bundled sources into the Emscripten filesystem, and maps the
+ * workspace to an in-memory (or OPFS-backed) directory. Everything above the
+ * loader — the runner, sessions, the meta-interpreter — is unchanged.
+ */
+export interface PrologHost {
+  load(): Promise<SWIPLModule>;
+  mountWorkspace(swipl: SWIPLModule, workspacePath: string): void;
+}
+
+let prologHost: PrologHost | null = null;
+
+/** Install a host loader. Passing `null` restores the default Node behaviour. */
+export function setPrologHost(host: PrologHost | null): void {
+  prologHost = host;
+  swiplInstance = null;
+  initPromise = null;
+}
+
+/** The installed host loader, if any. */
+export function getPrologHost(): PrologHost | null {
+  return prologHost;
+}
+
 // Get the directory of this module for resolving Prolog source files
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -106,7 +134,7 @@ function classifyPrologMessage(channel: 'stdout' | 'stderr', text: string): Prol
   return trimmed.length > 0 ? 'warning' : 'info';
 }
 
-function recordPrologMessage(channel: 'stdout' | 'stderr', text: string): void {
+export function recordPrologMessage(channel: 'stdout' | 'stderr', text: string): void {
   const line = text.replace(/\r?\n$/, '');
   if (line.trim().length === 0) return;
   if (pendingPrologMessages.length >= MAX_PENDING_MESSAGES) {
@@ -140,6 +168,15 @@ export function takePrologMessages(): PrologMessage[] {
  * Load and initialize SWI-Prolog WASM
  */
 export async function loadProlog(): Promise<SWIPLModule> {
+  // A host loader (browser) owns initialization end to end.
+  if (prologHost) {
+    if (swiplInstance) return swiplInstance;
+    if (initPromise) return initPromise;
+    initPromise = prologHost.load();
+    swiplInstance = await initPromise;
+    return swiplInstance;
+  }
+
   // Return existing instance if available
   if (swiplInstance) {
     return swiplInstance;
@@ -161,6 +198,10 @@ export async function loadProlog(): Promise<SWIPLModule> {
  * Uses NODEFS for direct host filesystem access
  */
 export function mountWorkspace(swipl: SWIPLModule, workspacePath: string): void {
+  if (prologHost) {
+    prologHost.mountWorkspace(swipl, workspacePath);
+    return;
+  }
   const absolutePath = resolve(workspacePath);
   
   // Ensure the host directory exists

@@ -234,7 +234,7 @@ module/skill model, how to inspect/execute/edit a module, the host tools
 (`bash` via `exec`), the `tool/2` annotation, file I/O, a condensed DML
 reference, common patterns, and the editing rules. The full reference and the
 pattern library are available at runtime through the `reference(topic)` tool
-(`language`, `authoring`, `patterns`, `examples`, `snippets`, `tools`).
+(`language`, `authoring`, `forms`, `patterns`, `examples`, `snippets`, `tools`).
 
 To override the prompt **without rebuilding the SDK**, create
 `.deepclause/system/AGENT_PROMPT.md` in the workspace; the runtime prefers it

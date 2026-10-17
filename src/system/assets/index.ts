@@ -3,10 +3,11 @@ import { access, readFile } from 'fs/promises';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
-export type SystemPromptAssetName = 'task';
+export type SystemPromptAssetName = 'task' | 'chat';
 export type WorkspaceDocAssetName =
   | 'dml-reference'
   | 'dml-authoring'
+  | 'dml-forms'
   | 'harness-examples'
   | 'harness-patterns'
   | 'prolog-snippets';
@@ -25,6 +26,8 @@ function getSystemPromptFileName(name: SystemPromptAssetName): string {
   switch (name) {
     case 'task':
       return 'TASK_PROMPT.md';
+    case 'chat':
+      return 'CHAT_PROMPT.md';
   }
 }
 
@@ -39,6 +42,8 @@ function getWorkspaceDocFileName(name: WorkspaceDocAssetName): string {
       return 'DML_REFERENCE.md';
     case 'dml-authoring':
       return 'DML_AUTHORING.md';
+    case 'dml-forms':
+      return 'DML_FORMS.md';
     case 'harness-examples':
       return 'HARNESS_EXAMPLES.md';
     case 'harness-patterns':

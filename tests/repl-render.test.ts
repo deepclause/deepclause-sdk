@@ -439,6 +439,20 @@ describe('ReplRenderer', () => {
     expect(parsed[0]).toMatchObject({ type: 'solution', solution: { bindings: [{ name: 'X', value: 'a' }] } });
     expect(parsed[1]).toEqual({ type: 'answer', content: 'done' });
   });
+
+  it('keeps json output parseable for a goal with no solution', () => {
+    const { lines, renderer } = capture('json');
+    renderer.noSolution();   // what runGoalWithRenderer emits for a failed goal
+    renderer.goalTerminator();
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0])).toEqual({ type: 'no_solution' });
+  });
+
+  it('prints `false.` for a goal with no solution in plain mode', () => {
+    const { lines, renderer } = capture('plain');
+    renderer.noSolution();
+    expect(lines.join('')).toContain('false.');
+  });
 });
 
 describe('block spacing', () => {

@@ -47,6 +47,8 @@ import type {
   LLMBackend,
   LLMBackendRequest,
   LLMBackendResponse,
+  FormEventPayload,
+  FormSubmitPayload,
   MemoryMessage,
   ToolDefinition,
   ToolPolicy,
@@ -78,6 +80,7 @@ import {
   type DiagramMode,
 } from '../visualize/index.js';
 import { generateLlmReply } from '../prolog/bridge.js';
+import { FormRegistry } from '../forms/registry.js';
 import type { Provider } from '../system/config/model-slots.js';
 import type { ModelResolver } from './model-resolver.js';
 import { formatModelCatalogEntry } from './model-resolver.js';
@@ -124,6 +127,11 @@ export interface DMLSessionOptions {
   onInputRequired?: (prompt: string) => Promise<string>;
   /** Unified human-in-the-loop channel for meta ask_user and harness input/2. */
   onInput?: (prompt: string, options?: string[]) => Promise<string | undefined>;
+  /**
+   * Called when a form opens, so an interactive host can collect values and
+   * call `submitForm` (docs/DML_FORMS.md §9). Awaited inside the turn.
+   */
+  onForm?: (form: FormEventPayload) => void | Promise<void>;
   initialHarnessMemory?: MemoryMessage[];
   /** Maximum nested frame depth (execute -> object task). Default 3. */
   maxDepth?: number;
@@ -140,6 +148,17 @@ export interface DMLSessionOptions {
    * check and the toolset cannot disagree.
    */
   executionBackend?: ExecutionBackendKind;
+  /**
+   * Name of the single capability host tool (default `bash`). A browser
+   * embedding registers `python` (Pyodide), and the environment block and agent
+   * prompt are told so.
+   */
+  capabilityTool?: string;
+  /**
+   * Factory for the L2 process worker. The default spawns a `worker_threads`
+   * Worker (Node); a browser embedding supplies a Web Worker.
+   */
+  processWorkerFactory?: import('./worker-host.js').WorkerFactory;
   /** Human-in-the-loop channel for DML `input/2` / `exec(ask_user(...))`. */
   askUser?: (prompt: string, options?: string[]) => Promise<{ answer: string } | { cancelled: true }>;
   /**
@@ -286,6 +305,8 @@ export class DMLSession {
   private tools: Map<string, ToolDefinition>;
   private toolPolicy: ToolPolicy | null;
   private inputHandler?: (prompt: string, options?: string[]) => Promise<string | undefined>;
+  /** Host-side interaction for an opened form (docs/DML_FORMS.md). */
+  private formHandler?: (form: FormEventPayload) => void | Promise<void>;
   private maxDepth: number;
   private maxModelCalls: number;
   private hostToolsCatalog?: string;
@@ -317,6 +338,7 @@ export class DMLSession {
   private modelCallBudget: number;
   private dmlReference?: string;
   private dmlAuthoring?: string;
+  private dmlForms?: string;
   private harnessExamples?: string;
   private harnessPatterns?: string;
   private prologSnippets?: string;
@@ -337,6 +359,8 @@ export class DMLSession {
   /** Session-scoped subagents (spec §2). */
   private processBackend?: ProcessBackend;
   private processBackendPromise?: Promise<ProcessBackend>;
+  /** Form host state (docs/DML_FORMS.md); active only when the harness opts in. */
+  private readonly forms = new FormRegistry();
   /**
    * The harness snapshot new processes should run. On the main session this is
    * unset (children snapshot the live module); a worker host sets it to the
@@ -366,6 +390,7 @@ export class DMLSession {
       ?? (options.askUser ? (prompt, choices) => options.askUser!(prompt, choices).then((r) => ('cancelled' in r ? undefined : r.answer)) : undefined)
       ?? options.onInputRequired
       ?? undefined;
+    this.formHandler = options.onForm;
     this.maxDepth = options.maxDepth ?? 3;
     this.maxModelCalls = options.maxModelCalls ?? 100;
     this.modelCallBudget = this.maxModelCalls;
@@ -391,6 +416,7 @@ export class DMLSession {
     this.runner = new DMLRunner(swipl, {
       ...options.runnerOptions,
       environment: this.executionEnvironment,
+      capabilityTool: options.capabilityTool,
       compactMessages: options.compaction
         ? (messages, lastInputTokens, contextWindow) => this.compactLoopMessages(messages, lastInputTokens, contextWindow)
         : undefined,
@@ -537,7 +563,10 @@ export class DMLSession {
       };
       if (mode === 'worker') {
         const { RemoteProcessHost } = await import('./worker-host.js');
-        const host = new RemoteProcessHost(this, { onEvent });
+        const host = new RemoteProcessHost(this, {
+          onEvent,
+          workerFactory: this.openOptions.processWorkerFactory,
+        });
         await host.start();
         this.processBackend = host;
         return host;
@@ -675,9 +704,27 @@ export class DMLSession {
     this.processBackend?.send(to, messageTerm);
   }
 
-  /** Request/reply against a service process (library(service) protocol). */
-  async callProcess(to: Pid | string, messageTerm: string, timeoutMs = 300_000): Promise<string> {
-    return (await this.ensureProcessBackend()).callTerm(to, messageTerm, timeoutMs);
+  /**
+   * Request/reply against a service process (library(service) protocol).
+   *
+   * The message is normalized first: prose ("hello from the REPL") is not a
+   * Prolog term, and interpolating it into `request(From, Ref, …)` used to leave
+   * the caller waiting out the timeout while the service failed to parse the goal.
+   */
+  async callProcess(
+    to: Pid | string,
+    messageTerm: string,
+    timeoutMs = 30_000,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    return (await this.ensureProcessBackend()).callTerm(to, this.normalizeMessage(messageTerm), timeoutMs, signal);
+  }
+
+  /** Quote a `call` message that does not parse as a term, so it is a payload. */
+  private normalizeMessage(text: string): string {
+    if (!text.trim()) return 'true';
+    const result = this.prologQuery(`deepclause_mi:repl_normalize_message(${quoteString(text)}, Term)`);
+    return String(plainValue(result?.Term) ?? text);
   }
 
   /** Resolve a process primitive for this (non-process) foreground run. */
@@ -1259,7 +1306,18 @@ export class DMLSession {
   }
 
   /** Load a bundled doc asset once (cached by field). */
-  private async loadDocAsset(name: 'harness-examples' | 'harness-patterns' | 'prolog-snippets'): Promise<string> {
+  private async loadDocAsset(
+    name: 'harness-examples' | 'harness-patterns' | 'prolog-snippets' | 'dml-forms',
+  ): Promise<string> {
+    if (name === 'dml-forms') {
+      if (this.dmlForms !== undefined) return this.dmlForms;
+      try {
+        this.dmlForms = await fs.readFile(getWorkspaceDocAssetPath('dml-forms'), 'utf8');
+      } catch {
+        this.dmlForms = '';
+      }
+      return this.dmlForms;
+    }
     const cached = name === 'harness-examples'
       ? this.harnessExamples
       : name === 'harness-patterns'
@@ -1692,6 +1750,7 @@ export class DMLSession {
         : undefined,
       workspacePath: this.workspacePath,
       environment: this.executionEnvironment,
+      capabilityTool: this.openOptions.capabilityTool,
       currentModel: `${this.provider}:${this.model}`,
       modelCatalog: this.modelResolver?.catalog(),
       knownMessages: this.agentMessages,
@@ -1886,6 +1945,63 @@ export class DMLSession {
   }
 
   /**
+   * The living module serialized as loadable DML (the editable harness source).
+   * `header: none` keeps it free of the export banner, so it round-trips through
+   * `replaceHarness` without accumulating comments.
+   */
+  async harnessSource(): Promise<string> {
+    const result = this.prologQuery(
+      `deepclause_mi:export_harness('${this.sessionId}', none, Text)`,
+    );
+    return String(plainValue(result?.Text) ?? '');
+  }
+
+  /**
+   * Replace the whole living module with `source` and commit it as a new
+   * version.
+   *
+   * `loadCode` only adds/replaces clauses, so a predicate deleted from the text
+   * would survive. This abolishes the user predicates (and their directives,
+   * tools and sources) and reloads the text, preserving conversation memory, so
+   * the editor's text is the source of truth. The result is an ordinary commit:
+   * a history version, the persisted harness, and the same contract warnings.
+   */
+  async replaceHarness(source: string): Promise<HarnessCommitResult> {
+    if (this.disposed) return { committed: false, error: 'Session has been disposed' };
+    if (this.isFrozen()) return { committed: false, error: 'harness is frozen; editing is disabled' };
+    // `repl_rollback` abolishes the predicates *before* loading, so a syntax error
+    // would otherwise leave the session empty. Keep the previous text and put it
+    // back if the new source does not load.
+    const previous = await this.harnessSource();
+    const before = this.predicateList();
+    const result = this.prologQuery(
+      `deepclause_mi:repl_rollback('${this.sessionId}', ${quoteString(source)}, Result)`,
+    );
+    const outcome = plainValue(result?.Result);
+    if (outcome !== 'ok') {
+      this.prologQuery(`deepclause_mi:repl_rollback('${this.sessionId}', ${quoteString(previous)}, _)`);
+      return { committed: false, error: String(outcome ?? 'replace failed') };
+    }
+
+    const after = this.predicateList();
+    const changed = this.simplePredicateDiff(before, after);
+    let version: number | undefined;
+    if (this.history) {
+      version = await this.recordHistoryChange('commit', this.turnCounter, before, { touched: after });
+    }
+    this.lastTurnCommitted = true;
+    this.lastCommitVersion = version;
+    await this.persistSessionHarness(this.history?.currentVersion ?? 0);
+
+    const warnings = [
+      ...(await this.probeNondeterminism(after)),
+      ...this.probeToolContracts(),
+      ...this.probeDocContracts(),
+    ];
+    return { committed: true, changed, warnings };
+  }
+
+  /**
    * Check every registered `tool/2` annotation: the nested agent inside `task/N`
    * calls the tool body, so it must reach real logic with the same name and
    * arity. Violations only surface when a nested agent calls the tool, which may
@@ -2072,10 +2188,13 @@ export class DMLSession {
         return this.loadDocAsset('harness-patterns');
       case 'snippets':
         return this.loadDocAsset('prolog-snippets');
+      case 'forms':
+      case 'dml-forms':
+        return this.loadDocAsset('dml-forms');
       case 'tools':
         return this.hostToolsCatalog ?? '(no host capability tools registered)';
       default:
-        return `unknown reference topic '${topic}'. Topics: language, authoring, examples, patterns, snippets, tools.`;
+        return `unknown reference topic '${topic}'. Topics: language, authoring, examples, patterns, snippets, forms, tools.`;
     }
   }
 
@@ -2136,6 +2255,7 @@ export class DMLSession {
       onInputRequired: inputHandler
         ? (prompt) => this.requireInput(prompt)
         : async () => undefined,
+      onForm: this.formHandler,
       signal: options.signal,
       onModelCall: () => this.reserveModelCall(),
       // A run that is not itself a process resolves primitives through the
@@ -2143,7 +2263,29 @@ export class DMLSession {
       onProcessRequest: options.process
         ? (request, signal) => options.process!.handle(request, signal)
         : (request, signal) => this.handleForeground(request, signal),
+      forms: this.forms,
     };
+  }
+
+  /** The session's form host (docs/DML_FORMS.md). */
+  formRegistry(): FormRegistry {
+    return this.forms;
+  }
+
+  /** Install the host-side interaction for opened forms. */
+  setFormHandler(handler?: (form: FormEventPayload) => void | Promise<void>): void {
+    this.formHandler = handler;
+  }
+
+  /**
+   * Send a form action from the UI (the REPL's half of the form protocol).
+   * Resolves an `await_form`/`wait_for_form_change` blocked in the session.
+   */
+  submitForm(formId: string, change: FormSubmitPayload): boolean {
+    const record = this.forms.get(formId);
+    if (!record || record.state !== 'open') return false;
+    this.forms.submit(formId, change.action, change.values ?? {}, change.errors ?? []);
+    return true;
   }
 
   // ---- TypeScript compaction (ported from pi) ----

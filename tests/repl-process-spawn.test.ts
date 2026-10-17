@@ -8,7 +8,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { createHarnessRepl, type HarnessRepl } from '../src/repl/index.js';
-import { createHarnessTools } from '../src/repl/harness-tools.js';
+import { createHarnessTools, formatProcessTable } from '../src/repl/harness-tools.js';
 import { pidTermText, type ProcessEvent } from '../src/repl/processes.js';
 
 let workspace: string;
@@ -118,14 +118,41 @@ describe('session-scoped subagents', () => {
     expect(service).toBeDefined();
   });
 
-  it('spawns and lists through the real harness tools', async () => {
+  it('lists processes, and does not expose spawn/call as agent tools', async () => {
     await define('narrate/0', 'narrate :- output("via tool").');
     const tools = createHarnessTools(repl.session);
-    const spawned = await tools.get('spawn')!.execute({ goal: 'narrate', name: 'narrator' });
-    expect(spawned).toMatchObject({ name: 'narrator' });
+    await repl.session.spawnProcess('narrate', { name: 'narrator' });
     const listed = (await tools.get('ps')!.execute({})) as { text: string };
     expect(listed.text).toContain('narrator');
     await tools.get('stop')!.execute({ target: 'narrator' });
+    // spawn and call are DML (`spawn/2`, `service_call/3`); an authoring turn uses
+    // `execute`, so they are not offered as tools.
+    expect(tools.has('spawn')).toBe(false);
+    expect(tools.has('call')).toBe(false);
+  });
+
+  it('quotes a prose call message instead of sending a malformed goal', async () => {
+    await define('echo/1', [
+      'echo(State) :-',
+      '    receive(request(From, Ref, Payload), 5000),',
+      '    send(From, reply(Ref, got(Payload))),',
+      '    echo(State).',
+    ].join('\n'));
+    await define('start_echo/0', 'start_echo :- serve(echo, echo(ok)).');
+    await repl.session.executeGoal('start_echo', 1);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    // Prose is not a Prolog term; it must arrive as a payload, not a syntax error.
+    const reply = await repl.session.callProcess('echo', 'hello from the REPL', 5000);
+    expect(reply).toContain('hello from the REPL');
+  });
+
+  it('fails a call when the service exits before replying', async () => {
+    await define('dying/0', 'dying :- receive(_, 5000), answer(bye).');
+    await repl.session.spawnProcess('dying', { name: 'dying' });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    await expect(repl.session.callProcess('dying', 'ping', 10_000)).rejects.toThrow(/exited|before replying/);
   });
 
   it('fans a worker over a list with swarm, preserving order', async () => {
@@ -259,5 +286,22 @@ describe('session-scoped subagents', () => {
     expect(result.output).toContain('killed(');
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(repl.session.processes().find((process) => process.name === 'linger')?.state).toBe('killed');
+  });
+});
+
+describe('serve labels the process with the service name', () => {
+  it('shows the name in ps, not the goal functor', async () => {
+    await define('echo_loop/1', 'echo_loop(S) :- receive(request(From, Ref, M), 5000), send(From, reply(Ref, M)), echo_loop([M|S]).');
+    await define('start_echo/0', 'start_echo :- serve(echo, echo_loop([])).');
+    await repl.session.executeGoal('start_echo', 1);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    const service = repl.session.processes().find((process) => process.name === 'echo');
+    // A spawn labels a process with its goal functor; a service is reached by its
+    // name, so showing only the label made a live service look like an anonymous loop.
+    expect(service).toBeDefined();
+    expect(service?.goal).toContain('echo_loop');
+    expect(repl.session.whereisProcess('echo')?.id).toBe(service?.pid.id);
+    expect(formatProcessTable(repl.session.processes(), repl.session.currentHarnessVersion())).toContain('echo  ');
   });
 });

@@ -1,10 +1,14 @@
 /**
  * Process worker (L2).
  *
- * Runs a session-scoped process host and its subagents in a dedicated
- * `worker_threads` thread with its own `swipl-wasm` instance. All side effects
- * (model, tools, human input) are proxied to the main thread, so a worker never
+ * Runs a session-scoped process host and its subagents in a dedicated worker
+ * with its own `swipl-wasm` instance. All side effects (model, tools, human
+ * input) are proxied to the session that owns the worker, so a worker never
  * holds credentials or policy (spec §2.3).
+ *
+ * The worker body is host-agnostic (`startProcessWorker`) so a browser embedding
+ * can run it in a Web Worker; the Node entrypoint at the bottom drives it from
+ * `worker_threads`.
  */
 
 import { parentPort, workerData } from 'node:worker_threads';
@@ -14,8 +18,11 @@ import { DMLSession } from './session.js';
 import type { ProcessEvent } from './processes.js';
 import type { MainToWorker, WorkerInitData } from './worker-protocol.js';
 
-if (!parentPort) throw new Error('process-worker must run inside a worker thread');
-const port = parentPort;
+/** The minimal message channel a worker needs. */
+export interface ProcessWorkerPort {
+  postMessage(message: unknown): void;
+  on(handler: (message: MainToWorker) => void): void;
+}
 
 interface PendingRpc {
   resolve: (value: unknown) => void;
@@ -24,25 +31,29 @@ interface PendingRpc {
   onReasoning?: (chunk: string) => void;
 }
 
-const pending = new Map<number, PendingRpc>();
-let requestCounter = 0;
+/**
+ * Run the L2 process worker. Resolves when the worker is ready; the session then
+ * lives until a `dispose` message arrives.
+ */
+export async function startProcessWorker(port: ProcessWorkerPort, init: WorkerInitData): Promise<void> {
+  const pending = new Map<number, PendingRpc>();
+  let requestCounter = 0;
 
-function rpc(
-  kind: 'model' | 'tool' | 'input',
-  payload: unknown,
-  onText?: (chunk: string) => void,
-  onReasoning?: (chunk: string) => void,
-): Promise<unknown> {
-  const requestId = ++requestCounter;
-  return new Promise((resolve, reject) => {
-    pending.set(requestId, { resolve, reject, onText, onReasoning });
-    port.postMessage({ type: 'need', requestId, kind, payload });
-  });
-}
+  const rpc = (
+    kind: 'model' | 'tool' | 'input',
+    payload: unknown,
+    onText?: (chunk: string) => void,
+    onReasoning?: (chunk: string) => void,
+  ): Promise<unknown> => {
+    const requestId = ++requestCounter;
+    return new Promise((resolve, reject) => {
+      pending.set(requestId, { resolve, reject, onText, onReasoning });
+      port.postMessage({ type: 'need', requestId, kind, payload });
+    });
+  };
 
-/** A backend that forwards every model call to the main thread. */
-function proxyBackend(): LLMBackend {
-  return {
+  /** A backend that forwards every model call to the owning session. */
+  const proxyBackend = (): LLMBackend => ({
     async complete(request: LLMBackendRequest): Promise<LLMBackendResponse> {
       const payload = {
         messages: request.messages,
@@ -53,24 +64,21 @@ function proxyBackend(): LLMBackend {
       };
       return rpc('model', payload, request.onText, request.onReasoning) as Promise<LLMBackendResponse>;
     },
+  });
+
+  /** Stub tools with the host's schemas whose `execute` forwards to the session. */
+  const proxyTools = (descriptors: WorkerInitData['tools']): Map<string, ToolDefinition> => {
+    const tools = new Map<string, ToolDefinition>();
+    for (const descriptor of descriptors) {
+      tools.set(descriptor.name, {
+        description: descriptor.description,
+        parameters: descriptor.parameters as unknown as ToolDefinition['parameters'],
+        execute: (args: Record<string, unknown>) => rpc('tool', { name: descriptor.name, args }),
+      });
+    }
+    return tools;
   };
-}
 
-/** Stub tools with the host's schemas whose `execute` forwards to the main thread. */
-function proxyTools(descriptors: WorkerInitData['tools']): Map<string, ToolDefinition> {
-  const tools = new Map<string, ToolDefinition>();
-  for (const descriptor of descriptors) {
-    tools.set(descriptor.name, {
-      description: descriptor.description,
-      parameters: descriptor.parameters as unknown as ToolDefinition['parameters'],
-      execute: (args: Record<string, unknown>) => rpc('tool', { name: descriptor.name, args }),
-    });
-  }
-  return tools;
-}
-
-async function main(): Promise<void> {
-  const init = workerData as WorkerInitData;
   const session = await DMLSession.open({
     sessionId: init.sessionId,
     workspacePath: init.workspacePath,
@@ -92,15 +100,15 @@ async function main(): Promise<void> {
   session.setProcessSnapshot(init.harnessText, init.harnessVersion);
   session.setProcessEventSink(createEventForwarder(port));
 
-  port.on('message', (message: MainToWorker) => {
-    void handle(session, message);
+  port.on((message: MainToWorker) => {
+    void handle(session, port, pending, message);
   });
 
   port.postMessage({ type: 'ready' });
 }
 
 /**
- * Adopt the harness snapshot the main pushed with a spawn/foreground request.
+ * Adopt the harness snapshot the session pushed with a spawn/foreground request.
  * Without this a long-lived worker would snapshot every later child from the
  * module it started with, so committed edits would never reach new processes.
  */
@@ -113,7 +121,12 @@ function adoptSnapshot(
   }
 }
 
-async function handle(session: DMLSession, message: MainToWorker): Promise<void> {
+async function handle(
+  session: DMLSession,
+  port: ProcessWorkerPort,
+  pending: Map<number, PendingRpc>,
+  message: MainToWorker,
+): Promise<void> {
   switch (message.type) {
     case 'spawn':
       try {
@@ -194,7 +207,10 @@ function messageOf(error: unknown): string {
  * A non-stream event flushes the pending buffers first, to keep rough order.
  */
 function createEventForwarder(target: { postMessage(message: unknown): void }): (event: ProcessEvent) => void {
-  const buffers = new Map<string, { event: ProcessEvent; text: string; done: boolean; timer: ReturnType<typeof setTimeout> | null }>();
+  const buffers = new Map<
+    string,
+    { event: ProcessEvent; text: string; done: boolean; timer: ReturnType<typeof setTimeout> | null }
+  >();
 
   const flush = (key: string): void => {
     const buffer = buffers.get(key);
@@ -235,4 +251,24 @@ function createEventForwarder(target: { postMessage(message: unknown): void }): 
   };
 }
 
-main().catch((error) => port.postMessage({ type: 'fatal', error: messageOf(error) }));
+// ---------------------------------------------------------------------------
+// Node entrypoint (a real `worker_threads` worker). In the browser this module
+// is imported for `startProcessWorker` only, and this block does not run.
+// ---------------------------------------------------------------------------
+
+const nodePort =
+  typeof parentPort !== 'undefined' &&
+  parentPort &&
+  typeof (parentPort as unknown as { postMessage?: unknown }).postMessage === 'function'
+    ? parentPort
+    : null;
+
+if (nodePort) {
+  const adapter: ProcessWorkerPort = {
+    postMessage: (message) => nodePort.postMessage(message),
+    on: (handler) => nodePort.on('message', (message) => handler(message as MainToWorker)),
+  };
+  startProcessWorker(adapter, workerData as WorkerInitData).catch((error) =>
+    adapter.postMessage({ type: 'fatal', error: messageOf(error) }),
+  );
+}

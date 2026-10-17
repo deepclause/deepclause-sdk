@@ -4,6 +4,7 @@
 
 import { z } from 'zod';
 import type { JudgeBackend, JudgeCapabilities } from './judge/types.js';
+import type { FormIssue, FormSpec, JsonObject } from './forms/spec.js';
 
 export type {
   JudgeAnswer,
@@ -220,6 +221,8 @@ export interface RunOptions {
   /** Initial conversation messages seeded into memory before DML execution.
     *  These appear as proper memory messages, not in the synthesized system prompt. */
     initialMessages?: MemoryMessage[];
+  /** Called when a form opens, so an interactive host can collect values. */
+  onForm?: (form: FormEventPayload) => void | Promise<void>;
 }
 
 /**
@@ -281,8 +284,30 @@ export interface FrameEventMeta {
   frameKind?: FrameKind;
 }
 
+/** What a consumer sees when a form is opened, updated or closed. */
+export interface FormEventPayload {
+  op: 'open' | 'update' | 'close';
+  formId: string;
+  revision: number;
+  spec?: FormSpec;
+  values?: JsonObject;
+  patch?: JsonObject;
+  issues?: FormIssue[];
+  state?: 'open' | 'submitted' | 'cancelled';
+  reason?: string;
+  source?: { name?: string; pid?: string };
+}
+
+/** What a consumer sends back when the user acts on a form. */
+export interface FormSubmitPayload {
+  action: string;
+  values?: JsonObject;
+  revision?: number;
+  errors?: FormIssue[];
+}
+
 export interface DMLEvent extends FrameEventMeta {
-  type: 'output' | 'log' | 'diagnostic' | 'answer' | 'input_required' | 'error' | 'finished' | 'stream' | 'reasoning' | 'tool_call' | 'model_call' | 'usage' | 'memory_compaction' | 'task_activity' | 'solution' | 'meta_result' | 'media';
+  type: 'output' | 'log' | 'diagnostic' | 'answer' | 'input_required' | 'error' | 'finished' | 'stream' | 'reasoning' | 'tool_call' | 'model_call' | 'usage' | 'memory_compaction' | 'task_activity' | 'solution' | 'meta_result' | 'media' | 'form';
   content?: string;
   /**
    * Severity of a `log` event. Prolog's own stderr arrives this way; `warning`
@@ -294,6 +319,8 @@ export interface DMLEvent extends FrameEventMeta {
   channel?: 'stdout' | 'stderr';
   /** Media produced by a step (path in the workspace, optional inline base64). */
   media?: { path?: string; mimeType: string; data?: string; kind?: string };
+  /** Form interaction (only for 'form' events). See docs/DML_FORMS.md. */
+  form?: FormEventPayload;
   /** Model-call lifecycle (only for 'model_call' events). */
   modelCallState?: 'started' | 'completed' | 'failed';
   /** Model id for a 'model_call' event, when known. */
@@ -420,6 +447,13 @@ export interface DeepClauseSDK {
    * @param tool - Tool definition
    */
   registerTool(name: string, tool: ToolDefinition): void;
+
+  /**
+   * Send a form action (the UI's half of `docs/DML_FORMS.md`). Resolves the
+   * `await_form`/`wait_for_form_change` that is waiting on the form.
+   * @returns whether a form was listening
+   */
+  submitForm(formId: string, change: FormSubmitPayload): boolean;
 
   /**
    * Set tool access policy

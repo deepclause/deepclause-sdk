@@ -106,7 +106,13 @@
     create_tool_engine/4,
     step_tool_engine/4,
     destroy_tool_engine/1,
-    post_tool_agent_result/5
+    post_tool_agent_result/5,
+    % Forms (docs/DML_FORMS.md)
+    post_form_result/2,
+    post_next_result/2,
+    form_validate_values/3,
+    form_advisory_values/3,
+    repl_normalize_message/2
 ]).
 
 :- use_module(deepclause_strings).
@@ -118,6 +124,7 @@
 %% `proc_request_payload/2` sits between the process-primitive clauses of
 %% `process_engine_result/4`, which is intentional.
 :- discontiguous process_engine_result/4.
+:- discontiguous process_directive/2.
 
 %% Dynamic predicates for session state (engine management only, not memory!)
 :- dynamic session_engine/2.       % session_engine(SessionId, Engine) - legacy default engine handle
@@ -155,6 +162,9 @@
 :- dynamic session_proc_result/3.  % session_proc_result(SessionId, Key, Value) - process primitive results
 :- dynamic session_user_input/2.   % session_user_input(SessionId, Input) - for ask_user tool
 :- dynamic session_input_cancelled/1. % session_input_cancelled(SessionId) - input/2 should fail (non-interactive)
+:- dynamic session_form_result/2.  % session_form_result(SessionId, Result) - forms primitive results
+:- dynamic session_builtin_tool/2. % session_builtin_tool(SessionId, ToolName) - runtime-installed tools
+:- dynamic session_next_result/2. % session_next_result(SessionId, Item) - conversation inbox item
 
 %% ============================================================
 %% DML Parsing
@@ -201,7 +211,7 @@ parse_dml_string(Code, SessionId) :-
 parse_clauses(Stream, SessionId) :-
     read_term(Stream, Term, [module(SessionId), variable_names(Bindings)]),
     (   Term == end_of_file
-    ->  true
+    ->  install_builtin_tools(SessionId)
     ;   preprocess_loaded_term(Term, Bindings, PreparedTerms),
         forall(member(PreparedTerm, PreparedTerms), process_clause(PreparedTerm, SessionId)),
         parse_clauses(Stream, SessionId)
@@ -573,6 +583,19 @@ process_clause((:- Directive), SessionId) :-
     !,
     process_directive(Directive, SessionId).
 
+%% Handle tool/3: description plus per-input types.
+%%   tool(Head, Description, [object, number]) :- Body.
+%% The leading args are inputs (typed from the list); the last arg is the output.
+process_clause((tool(ToolHead, Description, Types) :- Body), SessionId) :-
+    !,
+    (catch(expand_dict_dots(Body, ExpandedBody), _, fail) -> true ; ExpandedBody = Body),
+    extract_tool_schema(ToolHead, Description, Types, ToolName, Schema),
+    assertz(session_user_tools(SessionId, ToolName)),
+    assertz(session_user_tool_schema(SessionId, ToolName, Schema)),
+    format_tool_source(ToolHead, Description, Types, Body, SourceCode),
+    assertz(SessionId:tool_source(ToolName, SourceCode)),
+    assertz(SessionId:(tool(ToolHead) :- ExpandedBody)).
+
 %% Handle tool/2 with description: tool(Head, Description) :- Body
 process_clause((tool(ToolHead, Description) :- Body), SessionId) :-
     !,
@@ -693,9 +716,17 @@ expand_dict_expr(Expr, Expr).
 
 %% extract_tool_schema(+ToolHead, +Description, -ToolName, -Schema)
 extract_tool_schema(ToolHead, Description, ToolName, Schema) :-
+    extract_tool_schema(ToolHead, Description, [], ToolName, Schema).
+
+%% extract_tool_schema(+Head, +Description, +Types, -ToolName, -Schema)
+%% `Types` is an optional list giving the type of each input (the leading args,
+%% in order); a missing entry defaults to `string`. This is what lets a tool take
+%% an object, an array or a number rather than only a string.
+extract_tool_schema(ToolHead, Description, Types, ToolName, Schema) :-
     ToolHead =.. [ToolName|Args],
     length(Args, Arity),
-    extract_params(Args, 1, Arity, Inputs, Outputs),
+    tool_type_warning(ToolName, Arity, Types),
+    extract_params(Args, 1, Arity, Types, Inputs, Outputs),
     (Description == none -> Desc = "" ; Desc = Description),
     Schema = schema{
         name: ToolName,
@@ -704,18 +735,44 @@ extract_tool_schema(ToolHead, Description, ToolName, Schema) :-
         outputs: Outputs
     }.
 
-%% extract_params(+Args, +Index, +Arity, -Inputs, -Outputs)
-extract_params([], _, _, [], []) :- !.
-extract_params([_Arg|Rest], Index, Arity, Inputs, Outputs) :-
+%% extract_params(+Args, +Index, +Arity, +Types, -Inputs, -Outputs)
+%% The last argument is the output; the rest are inputs, typed from `Types`.
+extract_params([], _, _, _, [], []) :- !.
+extract_params([_Arg|Rest], Index, Arity, Types, Inputs, Outputs) :-
     format(atom(Name), 'arg~w', [Index]),
-    Type = string,
     NextIndex is Index + 1,
-    extract_params(Rest, NextIndex, Arity, RestInputs, RestOutputs),
-    Param = param{name: Name, type: Type},
+    extract_params(Rest, NextIndex, Arity, Types, RestInputs, RestOutputs),
     (   Index == Arity
+    ->  IsOutput = true, Type = string
+    ;   IsOutput = false, input_type(Index, Types, Type)
+    ),
+    Param = param{name: Name, type: Type},
+    (   IsOutput == true
     ->  Inputs = RestInputs, Outputs = [Param|RestOutputs]
     ;   Inputs = [Param|RestInputs], Outputs = RestOutputs
     ).
+
+%% input_type(+Index, +Types, -Type): the Index-th input's declared type.
+input_type(1, [T|_], T) :- !.
+input_type(N, [_|Rest], T) :- N > 1, N1 is N - 1, input_type(N1, Rest, T).
+input_type(_, [], string).
+
+%% tool_type_warning(+Name, +Arity, +Types)
+%% The last argument of a tool head is the output, so a type list should label
+%% the other (Arity - 1) inputs. When it does not, the author has almost
+%% certainly written a tool whose second input was taken for its output — the
+%% `tool(fs_write(Path, Content), …)` shape, which silently writes nothing.
+tool_type_warning(ToolName, Arity, Types) :-
+    is_list(Types),
+    Types \== [],
+    length(Types, Declared),
+    Inputs is Arity - 1,
+    Declared =\= Inputs,
+    !,
+    format(user_error,
+        'Warning: tool ~w/~w declares ~w input type(s) but has ~w input argument(s). The last argument of a tool head is the output; a tool with another input needs a result argument (e.g. fs_write(Path, Content, ok)).~n',
+        [ToolName, Arity, Declared, Inputs]).
+tool_type_warning(_, _, _).
 
 module_reference_string(Module, ModuleStr) :-
     atom(Module),
@@ -802,6 +859,113 @@ process_directive(repl_delete(Name/Arity), SessionId) :-
     Arity >= 0,
     catch(abolish(SessionId:Name/Arity), _, true).
 
+%% ============================================================
+%% Built-in tools (docs/DML_FORMS.md)
+%% ============================================================
+%%
+%% These `tool/2` wrappers are installed into every session, so a harness can
+%% hand the model the form tools without declaring anything. They are ordinary
+%% `tool/N` clauses: assert them through `process_clause/2` (never into a
+%% harness's own clause set) and `task/N` offers them, `with_tools/2` scopes
+%% them, and an export carries the source so a standalone run works.
+%%
+%% The gate that used to guard this — `:- capability(forms).` — was removed: it
+%% was file-scoped (processed at load), so it was invisible to a module built
+%% through the edit tools, and a harness could not discover it, because a gated
+%% primitive is a handler and `current_predicate/1` reports `no` for handlers.
+
+install_builtin_tools(SessionId) :-
+    % The marker keeps these out of the harness's own surface — `listing`, the
+    % manifest's predicates, the export, and the end_turn probes — while they
+    % stay in `session_user_tool_schema/3`, so `task/N` and `with_tools/2` offer
+    % them. They are built in, not authored.
+    forall(builtin_tool_name(Name),
+        (   session_builtin_tool(SessionId, Name)
+        ->  true
+        ;   assertz(session_builtin_tool(SessionId, Name))
+        )),
+    % Idempotent: `parse_clauses/2` runs on every load, and a duplicate schema
+    % would show the model the same tool twice.
+    (   session_user_tool_schema(SessionId, render_form, _)
+    ->  true
+    ;   forall(builtin_tool_clause(Clause), process_clause(Clause, SessionId))
+    ).
+
+builtin_tool_name(render_form).
+builtin_tool_name(update_form).
+builtin_tool_name(set_form_issues).
+builtin_tool_name(wait_for_form_change).
+builtin_tool_name(validate_form).
+builtin_tool_name(advisories).
+builtin_tool_name(close_form).
+
+builtin_tool_clause(
+    (tool(render_form(Spec, FormId),
+          "Open (or replace) a form. `Spec` is the form spec (version, title, fields, actions). Returns the form id.",
+          [object])
+        :- form(Spec, FormId))).
+builtin_tool_clause(
+    (tool(update_form(FormId, Patch, Result),
+          "Update form values with a JSON merge patch.",
+          [string, object])
+        :- form_update(FormId, Patch), Result = ok)).
+builtin_tool_clause(
+    (tool(set_form_issues(FormId, Issues, Result),
+          "Attach per-field errors/warnings. Issues is a list of {path, level, message}.",
+          [string, array])
+        :- form_errors(FormId, Issues), Result = ok)).
+builtin_tool_clause(
+    (tool(wait_for_form_change(FormId, Change),
+          "Wait for the user to act on a form. Change is a dict with action, values, revision and changed.",
+          [string])
+        :- await_form(FormId, Change))).
+builtin_tool_clause(
+    (tool(validate_form(Values, Result),
+          "Hard-validate values without submitting. Result is a list of issues.",
+          [object])
+        :- get_session_id(SessionId),
+           form_validate_values(SessionId, Values, Result))).
+builtin_tool_clause(
+    (tool(advisories(Values, Result),
+          "Advisory check of values (never blocks). Result is a list of issues.",
+          [object])
+        :- get_session_id(SessionId),
+           form_advisory_values(SessionId, Values, Result))).
+builtin_tool_clause(
+    (tool(close_form(FormId, Result), "Close a form.", [string])
+        :- close_form(FormId), Result = ok)).
+
+%% form_validate_values(+SessionId, +Values, -IssueDicts)
+%% Runs the harness's hard rules if it defines `form_validate/2`, and normalises
+%% whatever it returns (`error/2`, `warning/2`, or an issue dict) into issue
+%% dicts. With no such predicate, there are no hard errors.
+form_validate_values(SessionId, Values, IssueDicts) :-
+    (   catch((call(SessionId:form_validate(Values, Issues)), is_list(Issues)), _, fail)
+    ->  form_issue_dicts(Issues, IssueDicts)
+    ;   IssueDicts = []
+    ).
+
+%% repl_normalize_message(+Text, -TermText)
+%% The host `call`/`/call` entry takes the request as a term *as text*. Prose is
+%% not a term, and interpolating it into `request(From, Ref, Message)` produced a
+%% goal the service could not parse — so it never replied and the caller waited
+%% out the timeout. Anything that does not parse is quoted as a string; a valid
+%% term passes through unchanged.
+repl_normalize_message(Text, TermText) :-
+    (   catch((term_string(_Term, Text, []), true), _, fail)
+    ->  TermText = Text
+    ;   format(string(TermText), "~q", [Text])
+    ).
+
+%% form_advisory_values(+SessionId, +Values, -IssueDicts)
+%% The advisory twin of `form_validate_values/3`: reads the harness's
+%% `form_advisories/2` when it defines one. Never blocks anything.
+form_advisory_values(SessionId, Values, IssueDicts) :-
+    (   catch((call(SessionId:form_advisories(Values, Issues)), is_list(Issues)), _, fail)
+    ->  form_issue_dicts(Issues, IssueDicts)
+    ;   IssueDicts = []
+    ).
+
 %% process_directive(require_sandbox, +SessionId)
 %% The harness declares that it must run in an execution sandbox, and the load
 %% fails if it cannot. Checked against the **effective** backend rather than
@@ -839,6 +1003,10 @@ repl_benign_directive(discontiguous(_)).
 repl_benign_directive(discontiguous(_, _)).
 repl_benign_directive(multifile(_)).
 repl_benign_directive(multifile(_, _)).
+%% The capability gate was removed — every host feature is always available. An
+%% older file that still declares one loads unchanged; the directive is ignored
+%% rather than reported as a mystery "unhandled directive".
+repl_benign_directive(capability(_)).
 
 %% sandbox_kind_atom(+Raw, -Atom)
 %% A JS string or an atom in, an atom out.
@@ -1032,7 +1200,8 @@ create_session(SessionId, Params, HarnessMemory, MetaMemory) :-
     ),
     retractall(session_sandbox_backend(SessionId, _)),
     assertz(session_sandbox_backend(SessionId, SandboxKind)),
-    repl_inject_workspace_predicates(SessionId).
+    repl_inject_workspace_predicates(SessionId),
+    install_builtin_tools(SessionId).
 
 %% repl_abolish_user_predicates(+SessionId)
 %% Removes only the harness's own predicates; imported builtins are untouched.
@@ -1070,7 +1239,9 @@ clear_session(SessionId) :-
     retractall(repl_snapshot(SessionId, _)),
     retractall(session_user_tools(SessionId, _)),
     retractall(session_user_tool_schema(SessionId, _, _)),
-    repl_abolish_user_predicates(SessionId).
+    retractall(session_builtin_tool(SessionId, _)),
+    repl_abolish_user_predicates(SessionId),
+    install_builtin_tools(SessionId).
 
 %% destroy_session(+SessionId)
 %% Tears a REPL session down completely: clears the module/frames and removes
@@ -1345,6 +1516,13 @@ repl_user_predicate(_SessionId, Name, _Arity) :-
     history_predicate(Name),
     !,
     fail.
+%% Runtime-installed tools (the built-in form tools) are visible to `task/N` but
+%% are not part of the harness: they do not appear in `listing`, the manifest's
+%% predicates, the exported clauses, or the counts.
+repl_user_predicate(SessionId, Name, _Arity) :-
+    session_builtin_tool(SessionId, Name),
+    !,
+    fail.
 repl_user_predicate(SessionId, Name, Arity) :-
     % User DML clauses are asserted (interpreted) into the session module.
     % Exclude predicates imported via use_module (e.g. library(clpfd)) and
@@ -1357,6 +1535,7 @@ repl_user_predicate(SessionId, Name, Arity) :-
 
 internal_session_predicate(param).
 internal_session_predicate(param_decl).
+internal_session_predicate(tool).
 internal_session_predicate(tool_source).
 internal_session_predicate('__session__').
 internal_session_predicate(Name) :- workspace_predicate_name(Name).
@@ -1513,7 +1692,14 @@ export_directives(SessionId) :-
     ).
 
 export_tools(SessionId) :-
-    findall(Name, session_user_tool_schema(SessionId, Name, _), Names0),
+    % Built-in tools are re-installed on load (install_builtin_tools/1), so they
+    % are not written into the harness — an export carries the harness, not the
+    % runtime.
+    findall(Name,
+        (   session_user_tool_schema(SessionId, Name, _),
+            \+ session_builtin_tool(SessionId, Name)
+        ),
+        Names0),
     sort(Names0, Names),
     forall(member(Name, Names),
         (   SessionId:tool_source(Name, Source)
@@ -1555,7 +1741,11 @@ export_stats(SessionId, Clauses, Tools, Scripts) :-
         ),
         PredCounts),
     sum_list(PredCounts, Clauses),
-    findall(Name, session_user_tool_schema(SessionId, Name, _), ToolNames0),
+    findall(Name,
+        (   session_user_tool_schema(SessionId, Name, _),
+            \+ session_builtin_tool(SessionId, Name)
+        ),
+        ToolNames0),
     sort(ToolNames0, ToolNames),
     length(ToolNames, Tools),
     (   current_predicate(SessionId:script_file/2)
@@ -1572,7 +1762,22 @@ export_clause(Head, Body) :-
 %% format_tool_source(+Head, +Description, +Body, -SourceCode)
 %% Source text for a tool, used by `listing(tools)` and export. Reverses the
 %% load-time task/prompt rewrites so readers see `task/N`, not `task_named/3`.
-format_tool_source(Head, none, Body, SourceCode) :-
+%% Render a tool clause back to source for `listing`/`export`.
+format_tool_source(Head, Description, Body, SourceCode) :-
+    format_tool_source(Head, Description, none, Body, SourceCode).
+
+%% With an explicit input-type list: `tool(Head, Desc, [object]) :- Body.`
+format_tool_source(Head, Description, Types, Body, SourceCode) :-
+    Types \== none,
+    !,
+    copy_term(Head-Description-Types-Body, NH-ND-NT-NB),
+    numbervars(NH-ND-NT-NB, 0, _),
+    clean_clause_body(NB, CleanBody),
+    (   CleanBody == true
+    ->  format(string(SourceCode), "tool(~q, ~q, ~q).", [NH, ND, NT])
+    ;   format(string(SourceCode), "tool(~q, ~q, ~q) :-~n    ~q.", [NH, ND, NT, CleanBody])
+    ).
+format_tool_source(Head, none, _Types, Body, SourceCode) :-
     !,
     copy_term(Head-Body, NH-NB),
     numbervars(NH-NB, 0, _),
@@ -1581,7 +1786,7 @@ format_tool_source(Head, none, Body, SourceCode) :-
     ->  format(string(SourceCode), "tool(~q).", [NH])
     ;   format(string(SourceCode), "tool(~q) :-~n    ~q.", [NH, CleanBody])
     ).
-format_tool_source(Head, Description, Body, SourceCode) :-
+format_tool_source(Head, Description, _Types, Body, SourceCode) :-
     copy_term(Head-Description-Body, NH-ND-NB),
     numbervars(NH-ND-NB, 0, _),
     clean_clause_body(NB, CleanBody),
@@ -2488,6 +2693,9 @@ tool_contract_violation(SessionId, Warning) :-
     clause(SessionId:tool(Head), Body),
     compound(Head),
     Head =.. [Name|HeadArgs],
+    % Built-in tools call host handlers (`form/2`, …), which are not session
+    % predicates by design — they are not the author's to define.
+    \+ session_builtin_tool(SessionId, Name),
     length(HeadArgs, Arity),
     tool_body_goal(Body, Call),
     Call =.. [Callee|Args],
@@ -2993,6 +3201,9 @@ process_engine_result(media(Payload), media, '', Payload) :- is_dict(Payload), !
 process_engine_result(log(Text), log, Text, none) :- !.
 process_engine_result(answer(Text), answer, Text, none) :- !.
 %% Current 8-arg format (with model spec from with_model/2)
+%% Conversation: the same loop with `mode: chat` (no finish, ends when the model stops).
+process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ReasoningEffort, RecipeContext, ModelSpec, Mode), request_agent_loop, '',
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: ReasoningEffort, recipeContext: RecipeContext, modelSpec: ModelSpec, mode: Mode}) :- !.
 process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ReasoningEffort, RecipeContext, ModelSpec), request_agent_loop, '',
     payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: ReasoningEffort, recipeContext: RecipeContext, modelSpec: ModelSpec}) :- !.
 %% Prompt-family 6-arg format (tool scope + model spec; no reasoning/recipe)
@@ -3013,6 +3224,20 @@ process_engine_result(request_exec(Tool, Args), request_exec, '',
 %% owns identity, mailboxes, links, monitors, and naming.
 process_engine_result(request_proc(Request), request_proc, '', Payload) :-
     proc_request_payload(Request, Payload).
+
+%% Forms (docs/DML_FORMS.md). The host owns the registry; these carry the
+%% operation and, for `wait_form`, the change to deliver.
+%% Conversation inbox: the host answers with the next item (see wait_next_item/3).
+process_engine_result(wait_next(Accept), wait_next, '', payload{accept: Accept}) :- !.
+process_engine_result(request_form(Op, Spec), request_form, '', payload{op: Op, spec: Spec}) :- !.
+process_engine_result(request_form(update, FormId, Patch), request_form, '',
+    payload{op: update, formId: FormId, patch: Patch}) :- !.
+process_engine_result(request_form(errors, FormId, Issues), request_form, '',
+    payload{op: errors, formId: FormId, issues: Issues}) :- !.
+process_engine_result(request_form(close, FormId), request_form, '',
+    payload{op: close, formId: FormId}) :- !.
+process_engine_result(wait_form(FormId, Since, Timeout), wait_form, '',
+    payload{formId: FormId, since: Since, timeout: Timeout}) :- !.
 
 %% proc_request_payload(+Request, -Payload)
 proc_request_payload(self, payload{op: self}) :- !.
@@ -3102,12 +3327,17 @@ destroy_engine(SessionId) :-
 post_agent_result(SessionId, Success, Variables, Messages) :-
     post_agent_result(SessionId, Success, Variables, Messages, none).
 
-%% post_agent_result(+SessionId, +Success, +Variables, +Messages, +FullMemory)
+post_agent_result(SessionId, Success, Variables, Messages, FullMemory) :-
+    post_agent_result(SessionId, Success, Variables, Messages, FullMemory, "").
+
+%% post_agent_result(+SessionId, +Success, +Variables, +Messages, +FullMemory, +Error)
 %% Messages is a list of message{role: Role, content: Content} dicts.
 %% FullMemory optionally replaces the entire state memory, including compacted system summaries.
-post_agent_result(SessionId, Success, Variables, Messages, FullMemory) :-
+%% Error is non-empty when the turn failed before producing a result (a model
+%% error), so a caller can say what went wrong instead of guessing.
+post_agent_result(SessionId, Success, Variables, Messages, FullMemory, Error) :-
     retractall(session_agent_result(SessionId, _)),
-    assertz(session_agent_result(SessionId, result{success: Success, variables: Variables, messages: Messages, full_memory: FullMemory})),
+    assertz(session_agent_result(SessionId, result{success: Success, variables: Variables, messages: Messages, full_memory: FullMemory, error: Error})),
     post_signal_to_engine(SessionId, agent_done).
 
 %% post_exec_result(+SessionId, +Status, +Result)
@@ -3122,6 +3352,22 @@ post_proc_result(SessionId, Key, Value) :-
     retractall(session_proc_result(SessionId, Key, _)),
     assertz(session_proc_result(SessionId, Key, Value)),
     post_signal_to_engine(SessionId, proc_done).
+
+%% post_form_result(+SessionId, +Result)
+%% Reply to a forms primitive (`form/2`, `form_update/2`, `form_errors/2`,
+%% `await_form/2,3`, `close_form/1`). Result is `ok(...)` or `error(...)`.
+%% post_next_result(+SessionId, +Item)
+%% The host answers `wait_next` with `user("...")`, `message(Term)`, or `closed`
+%% when there is nobody left to talk to.
+post_next_result(SessionId, Item) :-
+    retractall(session_next_result(SessionId, _)),
+    assertz(session_next_result(SessionId, Item)),
+    post_signal_to_engine(SessionId, next_done).
+
+post_form_result(SessionId, Result) :-
+    retractall(session_form_result(SessionId, _)),
+    assertz(session_form_result(SessionId, Result)),
+    post_signal_to_engine(SessionId, form_done).
 
 %% post_sample_token_result(+SessionId, +Status, +TokenOrError)
 post_sample_token_result(SessionId, Status, TokenOrError) :-
@@ -3511,9 +3757,22 @@ create_tool_engine(SessionId, ToolName, Args, ToolEngineId) :-
         Goal = (
             nb_setval(current_session_id, SessionId),
             catch(
-                (mi_call(Body, InitialState, _FinalState),
-                 extract_tool_result_simple(TotalArity, InputArity, HeadArgs, ToolResult),
-                 engine_yield(tool_finished(ToolResult))),
+                (   mi_call(Body, InitialState, _FinalState),
+                    % A tool that declares an output but leaves it unbound has no
+                    % result. `extract_tool_result_simple/4` maps that to `true`, which
+                    % is how a `tool(fs_write(Path, Content), …)` (content taken for the
+                    % output) reported success while writing nothing.
+                    (   TotalArity > InputArity,
+                        last(HeadArgs, LastArg),
+                        var(LastArg)
+                    ->  format(atom(NoResult),
+                            'tool ~w returned no result: the last argument of the tool head is its output. To pass another input, give the predicate a result argument (e.g. fs_write(Path, Content, ok)) and declare its types with tool/3.',
+                            [ToolNameAtom]),
+                        engine_yield(tool_no_result(NoResult))
+                    ;   extract_tool_result_simple(TotalArity, InputArity, HeadArgs, ToolResult),
+                        engine_yield(tool_finished(ToolResult))
+                    )
+                ),
                 Error,
                 (handle_tool_engine_error(Error, ErrResult),
                  engine_yield(tool_finished(ErrResult)))
@@ -3557,6 +3816,9 @@ step_tool_engine(ToolEngineId, Status, Content, Payload) :-
 
 %% process_tool_engine_result(+Result, -Status, -Content, -Payload)
 process_tool_engine_result(tool_finished(ToolResult), finished, '', payload{result: ToolResult}) :- !.
+%% A tool whose output argument was never bound: surface it as an error, not a
+%% silent success (see create_tool_engine/4).
+process_tool_engine_result(tool_no_result(Message), error, Message, none) :- !.
 process_tool_engine_result(request_exec(Tool, Args), request_exec, '',
     payload{toolName: Tool, args: Args}) :- !.
 process_tool_engine_result(request_sample_token(Prompt, Allowed), request_sample_token, '',
@@ -3564,6 +3826,8 @@ process_tool_engine_result(request_sample_token(Prompt, Allowed), request_sample
 process_tool_engine_result(request_llm(Messages), request_llm, '',
     payload{messages: Messages}) :- !.
 process_tool_engine_result(request_judgment(Payload), request_judgment, '', Payload) :- !.
+process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ReasoningEffort, RecipeContext, ModelSpec, Mode), request_agent_loop, '',
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: ReasoningEffort, recipeContext: RecipeContext, modelSpec: ModelSpec, mode: Mode}) :- !.
 process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ReasoningEffort, RecipeContext), request_agent_loop, '',
     payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: ReasoningEffort, recipeContext: RecipeContext}) :- !.
 %% Legacy 5-arg format (no reasoning/recipe)
@@ -3576,6 +3840,17 @@ process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory), reques
 %% are yielded to the host exactly as in the main engine.
 process_tool_engine_result(request_proc(Request), request_proc, '', Payload) :-
     proc_request_payload(Request, Payload).
+%% Form primitives reached inside a DML tool (docs/DML_FORMS.md).
+process_tool_engine_result(wait_next(Accept), wait_next, '', payload{accept: Accept}) :- !.
+process_tool_engine_result(request_form(Op, Spec), request_form, '', payload{op: Op, spec: Spec}) :- !.
+process_tool_engine_result(request_form(update, FormId, Patch), request_form, '',
+    payload{op: update, formId: FormId, patch: Patch}) :- !.
+process_tool_engine_result(request_form(errors, FormId, Issues), request_form, '',
+    payload{op: errors, formId: FormId, issues: Issues}) :- !.
+process_tool_engine_result(request_form(close, FormId), request_form, '',
+    payload{op: close, formId: FormId}) :- !.
+process_tool_engine_result(wait_form(FormId, Since, Timeout), wait_form, '',
+    payload{formId: FormId, since: Since, timeout: Timeout}) :- !.
 process_tool_engine_result(output(Text), output, Text, none) :- !.
 process_tool_engine_result(log(Text), log, Text, none) :- !.
 process_tool_engine_result(Other, error, Msg, none) :-
@@ -3773,6 +4048,112 @@ mi_call(prompt_named(Desc, Vars, VarNames), StateIn, StateOut) :-
     !,
     consume_gas(StateIn, State1),
     mi_call_prompt_n(Desc, Vars, VarNames, State1, StateOut).
+
+%% ============================================================
+%% Conversation (docs/DML_CONVERSATION.md)
+%% ============================================================
+
+%% mi_call(input(-Message), +StateIn, -StateOut)
+%% Wait for the person's next message. No prompt: the embedding UI is a chat
+%% interface and is already asking. This is `next/1` restricted to the person —
+%% a worker's message that arrives first stays queued for `next/1`. FAILS when
+%% there is nobody to talk to, which is what ends
+%% `loop :- input(A), chat(A).`
+mi_call(input(Message), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    get_depth(StateIn, Depth),
+    wait_next_item(SessionId, user, Item),
+    (   Item = user(Message)
+    ->  add_trace_with_result(SessionId, exit, input, [""], Message, Depth)
+    ;   fail
+    ).
+
+%% mi_call(next(-Item), +StateIn, -StateOut)
+%% The next item from the conversation inbox: `user(Text)` from the person, or a
+%% message a worker sent to this session. Fails when nothing is left, so
+%% `loop :- next(Item), handle(Item), loop.` ends cleanly.
+mi_call(next(Item), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    wait_next_item(SessionId, any, Item),
+    Item \== closed.
+
+%% wait_next_item(+SessionId, +Accept, -Item)
+%% One host round trip: the runner owns the inbox (it is the only place that can
+%% see both the person and the mailbox), and answers with the next item.
+wait_next_item(SessionId, Accept, Item) :-
+    engine_yield(wait_next(Accept)),
+    get_next_signal(SessionId, _),
+    session_next_result(SessionId, Item),
+    retractall(session_next_result(SessionId, _)).
+
+%% mi_call(chat(+Message), +StateIn, -StateOut) / chat(+Message, -Reply)
+%%
+%% One conversational turn: `Message` is the person's message, the agent loop runs
+%% with the harness's tools, and the turn ends when the model stops calling tools.
+%% No `finish`, no `set_result` and no nudging — the reply *is* the answer
+%% (agent.ts `conversational`). Memory carries the conversation forward, so
+%% `loop :- input(A), chat(A).` is a conversation in one run.
+mi_call(chat(Message), StateIn, StateOut) :-
+    !,
+    mi_call(chat(Message, _Reply), StateIn, StateOut).
+
+mi_call(chat(Message, Reply), StateIn, StateOut) :-
+    !,
+    consume_gas(StateIn, State0),
+    get_params(State0, Params),
+    interpolate_desc(Message, Params, InterpMessage),
+    get_session_id(SessionId),
+    get_depth(StateIn, Depth),
+    add_trace_entry(SessionId, llm_call, chat, [InterpMessage], Depth),
+    collect_user_tools(SessionId, UserTools),
+    % The message is NOT added to memory here: the loop appends it as the turn's
+    % user message, and returns the whole conversation as `full_memory`.
+    get_memory(State0, Memory0),
+    get_tool_scope(State0, ToolScope),
+    get_reasoning_effort(State0, ReasoningEffort),
+    get_recipe_context(State0, RecipeContext),
+    get_model_spec(State0, ModelSpec),
+    engine_yield(request_agent_loop(InterpMessage, [], UserTools, Memory0, ToolScope,
+                                   ReasoningEffort, RecipeContext, ModelSpec, chat)),
+    handle_agent_signals(SessionId, State0, StateAfterAgent),
+    session_agent_result(SessionId, Result),
+    retract(session_agent_result(SessionId, _)),
+    % A conversation must survive a failed turn: say so, leave the memory as it
+    % was (the failed turn is not part of the conversation), and let the person
+    % type again. Failing here would end `loop :- input(A), chat(A), loop.` and
+    % drop them out of the chat.
+    (   get_dict(success, Result, true)
+    ->  (   get_dict(full_memory, Result, FullMemory), is_list(FullMemory)
+        ->  set_memory(StateAfterAgent, FullMemory, StateOut)
+        ;   set_memory(StateAfterAgent, Memory0, StateOut)
+        ),
+        last_assistant_message(Result, Reply),
+        add_trace_with_result(SessionId, exit, chat, [InterpMessage], Reply, Depth)
+    ;   (   get_dict(error, Result, ErrorMsg), ErrorMsg \= ""
+        ->  format(string(WarnMsg),
+                   'The model call failed (~w). Your message was not answered — try again.', [ErrorMsg])
+        ;   WarnMsg = 'The model call failed. Your message was not answered — try again.'
+        ),
+        engine_yield(output(WarnMsg)),
+        Reply = "",
+        set_memory(StateAfterAgent, Memory0, StateOut),
+        add_trace_entry(SessionId, fail, chat, [InterpMessage], Depth)
+    ).
+
+%% last_assistant_message(+AgentResult, -Text)
+%% The reply is also streamed to the UI; this binds it for a harness that wants it.
+last_assistant_message(Result, Text) :-
+    (   get_dict(full_memory, Result, Messages), is_list(Messages)
+    ->  true
+    ;   Messages = []
+    ),
+    findall(Content, member(message{role: assistant, content: Content}, Messages), Texts),
+    (   last(Texts, Text)
+    ->  true
+    ;   Text = ""
+    ).
 
 %% mi_call_prompt_n(+Desc, +Vars, +VarNames, +StateIn, -StateOut)
 %% Simple LLM call with empty memory and NO tools (pure text completion with variable binding)
@@ -4484,12 +4865,24 @@ mi_call(now_ms(Milliseconds), StateIn, StateIn) :-
 %% mi_call(serve(+Name, +Goal), +StateIn, -StateOut)
 %% Spawn a session-scoped process and register it under Name. Sugar over
 %% spawn/2 + register/2; the goal decides the process's shape.
+%%
+%% The process is *labelled* with the service name. A spawn labels a process with
+%% its goal functor, so `serve(test_service, test_service_loop)` used to appear in
+%% `ps` as "test_service_loop" — the label of an anonymous loop — and a live
+%% service looked like something nobody could talk to. `process_info/2` keeps the
+%% goal, so nothing is lost.
 mi_call(serve(Name, Goal), StateIn, StateIn) :-
     !,
     get_session_id(SessionId),
     copy_term(Goal, GoalCopy),
     term_string(GoalCopy, GoalText),
-    engine_yield(request_proc(spawn(GoalText))),
+    (   atom(Name)
+    ->  Label = Name
+    ;   atom_string(Label, Name)                 % a string name -> atom
+    ),
+    % Spawn options are read as a dict (`parseSpawnOptions`), so `name:` not `name(...)`.
+    format(string(OptionsText), "{name: ~q}", [Label]),
+    engine_yield(request_proc(spawn(GoalText, OptionsText))),
     get_next_signal(SessionId, _),
     session_proc_result(SessionId, spawn, SpawnResult),
     retract(session_proc_result(SessionId, spawn, _)),
@@ -4896,6 +5289,111 @@ mi_call(input(Prompt, Input), StateIn, StateIn) :-
         add_trace_with_result(SessionId, exit, input, [InterpPrompt], "", Depth)
     ).
 
+%% ============================================================
+%% Forms (docs/DML_FORMS.md)
+%% ============================================================
+
+%% mi_call(form(+Spec, -FormId), +StateIn, -StateOut)
+mi_call(form(Spec, FormId), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    engine_yield(request_form(open, Spec)),
+    get_next_signal(SessionId, _),
+    session_form_result(SessionId, Result),
+    retract(session_form_result(SessionId, _)),
+    (   Result = ok(Dict)
+    ->  get_dict(formId, Dict, FormId)
+    ;   throw(error(form_open_failed(Result), form/2))
+    ).
+
+%% mi_call(form_update(+FormId, +Patch), +StateIn, -StateOut)
+mi_call(form_update(FormId, Patch), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    engine_yield(request_form(update, FormId, Patch)),
+    get_next_signal(SessionId, _),
+    session_form_result(SessionId, _), retract(session_form_result(SessionId, _)).
+
+%% mi_call(form_errors(+FormId, +Issues), +StateIn, -StateOut)
+%% Issues are `error(Path, Message)` / `warning(Path, Message)` terms.
+mi_call(form_errors(FormId, Issues), StateIn, StateIn) :-
+    !,
+    form_issue_dicts(Issues, Dicts),
+    get_session_id(SessionId),
+    engine_yield(request_form(errors, FormId, Dicts)),
+    get_next_signal(SessionId, _),
+    session_form_result(SessionId, _), retract(session_form_result(SessionId, _)).
+
+%% mi_call(close_form(+FormId), +StateIn, -StateOut)
+mi_call(close_form(FormId), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    engine_yield(request_form(close, FormId)),
+    get_next_signal(SessionId, _),
+    session_form_result(SessionId, _), retract(session_form_result(SessionId, _)).
+
+%% mi_call(await_form(+FormId, -Change) / await_form(+FormId, +Since, -Change))
+%% The 2-arity form waits for the next change (the registry's cursor).
+%%
+%% A submit the host's rules reject never reaches the caller: the host returns
+%% `action: invalid` with the errors, and this loops — attaching them to the form
+%% so the user sees what is wrong, then waiting for the next attempt. So a harness
+%% (or a model's `wait_for_form_change`) only ever sees an action the rules
+%% accepted, and neither has to write the reject-and-re-show loop.
+mi_call(await_form(FormId, Change), StateIn, StateIn) :-
+    !,
+    mi_call(await_form(FormId, -1, Change), StateIn, StateIn).
+mi_call(await_form(FormId, Since, Change), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    await_form_loop(SessionId, FormId, Since, StateIn, Change).
+
+await_form_loop(SessionId, FormId, Since, StateIn, Change) :-
+    engine_yield(wait_form(FormId, Since, 0)),
+    get_next_signal(SessionId, _),
+    session_form_result(SessionId, Result),
+    retract(session_form_result(SessionId, _)),
+    (   Result = ok(Dict0)
+    ->  form_change_atom_action(Dict0, Dict),
+        (   get_dict(action, Dict, invalid)
+        ->  (   get_dict(errors, Dict, Errors)
+            ->  mi_call(form_errors(FormId, Errors), StateIn, _)
+            ;   true
+            ),
+            % Follow the registry's cursor, not the caller's original `Since`,
+            % so the retry waits for a new attempt instead of re-reading the
+            % submit that was just refused.
+            await_form_loop(SessionId, FormId, -1, StateIn, Change)
+        ;   Change = Dict
+        )
+    ;   throw(error(form_wait_failed(Result), await_form/3))
+    ).
+
+%% form_change_atom_action(+Change0, -Change)
+%% The host builds the change from JSON, so `action` arrives as a *string*. DML
+%% compares it to an atom — `Change.action == submit` (docs/DML_FORMS.md §3) — and
+%% `"submit" == submit` is false, which silently skipped every action branch.
+%% Convert here: the atom is the structural tag, and the model-facing tools
+%% re-serialize the dict to JSON, where an atom is a string again.
+form_change_atom_action(Change0, Change) :-
+    (   get_dict(action, Change0, Action0), string(Action0)
+    ->  atom_string(Action, Action0),
+        put_dict(action, Change0, Action, Change)
+    ;   Change = Change0
+    ).
+
+%% form_issue_dicts(+Issues, -Dicts)
+form_issue_dicts([], []).
+form_issue_dicts([Issue|Rest], [Dict|Dicts]) :-
+    issue_dict(Issue, Dict),
+    form_issue_dicts(Rest, Dicts).
+
+issue_dict(error(Path, Message), issue{path: Path, level: error, message: Message}) :- !.
+issue_dict(warning(Path, Message), issue{path: Path, level: warning, message: Message}) :- !.
+issue_dict(issue{path: Path, level: Level, message: Message}, issue{path: Path, level: Level, message: Message}) :- !.
+%% A dict already shaped like an issue (e.g. parsed from JSON) passes through.
+issue_dict(Issue, Issue) :- is_dict(Issue), !.
+
 %% mi_call(yield(Text), +StateIn, -StateOut)
 mi_call(yield(Text), StateIn, StateIn) :-
     get_params(StateIn, Params),
@@ -4921,6 +5419,22 @@ mi_call(format(Format, Args), StateIn, StateIn) :-
     ->  with_output_to(string(Text), format(Format, Args)),
         mi_call(output(Text), StateIn, StateIn)
     ;   format(Format, Args)
+    ).
+
+%% mi_call(write(Value), +StateIn, -StateOut)
+%% `write/1` had no handler, so it fell through to SWI's current_output and its
+%% text vanished in the REPL — only `format/2` and `writeln/1` were captured. A
+%% debugging `write(step)` then looks exactly like a goal that produced nothing,
+%% which is the worst possible signal.
+mi_call(write(Value), StateIn, StateIn) :-
+    get_session_id(SessionId),
+    (   session_repl_mode(SessionId, true)
+    ->  with_output_to(string(Text), write(Value)),
+        (   Text == ""
+        ->  true
+        ;   mi_call(output(Text), StateIn, StateIn)
+        )
+    ;   write(Value)
     ).
 
 %% mi_call(writeln(Value), +StateIn, -StateOut)
@@ -5756,7 +6270,7 @@ consult_string(Code, SessionId) :-
 consult_clauses(Stream, SessionId) :-
     read_term(Stream, Term, [module(SessionId), variable_names(Bindings)]),
     (   Term == end_of_file
-    ->  true
+    ->  install_builtin_tools(SessionId)
     ;   preprocess_loaded_term(Term, Bindings, PreparedTerms),
         forall(member(PreparedTerm, PreparedTerms), consult_process_term(PreparedTerm, SessionId)),
         consult_clauses(Stream, SessionId)
@@ -6024,6 +6538,13 @@ is_mi_special_predicate(wait(_)).
 is_mi_special_predicate(wait(_,_)).
 is_mi_special_predicate(param(_,_)).
 is_mi_special_predicate(param(_,_,_)).
+%% Forms (docs/DML_FORMS.md)
+is_mi_special_predicate(form(_,_)).
+is_mi_special_predicate(form_update(_,_)).
+is_mi_special_predicate(form_errors(_,_)).
+is_mi_special_predicate(await_form(_,_)).
+is_mi_special_predicate(await_form(_,_,_)).
+is_mi_special_predicate(close_form(_)).
 %% Prompt predicates (like task but with fresh memory)
 is_mi_special_predicate(prompt(_)).
 is_mi_special_predicate(prompt(_,_)).
@@ -6054,7 +6575,13 @@ is_mi_special_predicate(require_judgment(_,_)).
 is_mi_special_predicate(get_memory(_)).
 is_mi_special_predicate(format(_,_)).
 is_mi_special_predicate(writeln(_)).
+is_mi_special_predicate(write(_)).
 is_mi_special_predicate(input(_,_)).
+%% Conversation (docs/DML_CONVERSATION.md)
+is_mi_special_predicate(input(_)).
+is_mi_special_predicate(chat(_)).
+is_mi_special_predicate(chat(_,_)).
+is_mi_special_predicate(next(_)).
 is_mi_special_predicate(call(_)).
 is_mi_special_predicate(call(_,_)).
 is_mi_special_predicate(call(_,_,_)).

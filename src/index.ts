@@ -6,6 +6,12 @@
  */
 
 export { createDeepClause } from './sdk.js';
+// Engine host seam: lets a non-Node embedding (the browser) supply the SWI-Prolog
+// loader and workspace mount. See docs/DML_FORMS.md-adjacent embedding notes.
+export { setPrologHost, getPrologHost, recordPrologMessage } from './prolog/loader.js';
+// Form spec/types/validators: reusable by a host renderer (the browser UI).
+export * from './forms/index.js';
+export type { PrologHost } from './prolog/loader.js';
 export type { 
   CompactionAction,
   CompactionScope,
@@ -24,7 +30,9 @@ export type {
   DMLEvent,
   TraceEntry,
   ToolDefinition,
-  ToolPolicy 
+  ToolPolicy,
+  FormEventPayload,
+  FormSubmitPayload,
 } from './types.js';
 
 // DML REPL (goal + prompt mode) for CLI and embedding
@@ -83,6 +91,9 @@ export type {
   MemoryCompactionEvent,
 } from './repl/compaction.js';
 export type { HarnessExportOptions, HarnessExportResult } from './repl/export.js';
+// L2 process worker body, for hosts that run it outside `worker_threads`.
+export { startProcessWorker } from './repl/process-worker.js';
+export type { ProcessWorkerPort } from './repl/process-worker.js';
 export { createPiBackend, createPiAdapter, resolvePiPaths, selectPiModel } from './repl/backend.js';
 export { createReplToolset, buildToolCatalog } from './repl/toolset.js';
 export { pickFromList, filterItems, renderPick } from './repl/picker.js';

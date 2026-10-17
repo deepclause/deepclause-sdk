@@ -8,6 +8,7 @@
 
 import type {
   DMLEvent,
+  FormEventPayload,
   ImageBackend,
   LLMBackend,
   MemoryMessage,
@@ -65,8 +66,14 @@ export interface HarnessReplOptions {
    * the model's environment block match the toolset that will run commands.
    */
   executionBackend?: ExecutionBackendKind;
+  /** Name of the single capability host tool (default `bash`; the browser uses `python`). */
+  capabilityTool?: string;
+  /** Factory for the L2 process worker (default: `worker_threads`; browser: a Web Worker). */
+  processWorkerFactory?: import('./worker-host.js').WorkerFactory;
   /** Human-in-the-loop channel for DML `input/2` / `exec(ask_user(...))`. */
   askUser?: (prompt: string, options?: string[]) => Promise<{ answer: string } | { cancelled: true }>;
+  /** Called when a form opens (docs/DML_FORMS.md). */
+  onForm?: (form: FormEventPayload) => void | Promise<void>;
   /** Explicit judgment backend registry. When omitted, an `llm` backend is built from the active model. */
   judgeSelection?: JudgeSelection;
   /** Default judgment backend name (default: `'llm'`). */
@@ -243,10 +250,13 @@ export async function createHarnessRepl(options: HarnessReplOptions): Promise<Ha
     toolPolicy: options.toolPolicy,
     onInputRequired: options.onInputRequired,
     onInput: options.onInput,
+    onForm: options.onForm,
     maxDepth: options.maxDepth,
     maxModelCalls: options.maxModelCalls,
     hostToolsCatalog: options.hostToolsCatalog,
     executionBackend: options.executionBackend,
+    capabilityTool: options.capabilityTool,
+    processWorkerFactory: options.processWorkerFactory,
     askUser: options.askUser,
     history: options.history,
     harnessName: options.harness,

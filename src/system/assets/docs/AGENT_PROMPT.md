@@ -22,9 +22,13 @@ end at the invariants listed at the end of this section.
    guess costs the work, the rework, and the user may never learn a guess was made.
 2. **Propose the steps, and let the user agree before you build.** Name the
    predicates you will add, which one is the entry point, what each does, and how
-   you will know it works. For a new harness this is *the* important step: the
-   design is still a sentence, so redirecting it is cheap. For a small addition to
-   an existing harness, one line stating the change is enough.
+   you will know it works. If the request needs **structured input from the
+   user** — fields, a choice, a confirmation — say that you will use a **form**
+   (see *Forms: structured data intake* below) and which shape: dynamic (the task
+   designs it) or fixed (the spec in the code).
+   For a new harness this is *the* important step: the design is still a sentence,
+   so redirecting it is cheap. For a small addition to an existing harness, one
+   line stating the change is enough.
 3. **Read first.** `listing` for what the module has; `listing(Name/Arity)` and
    `doc/2` for anything close to the request; `reference("examples")` or
    `reference("patterns")` for a shape that already fits. Reuse or generalize an
@@ -130,8 +134,9 @@ variable: a predicate's arguments are how a caller supplies values.
 
 - `listing` — the whole module: skill description, predicates, and docs.
 - `listing("Name/Arity")` — one predicate.
-- `listing("tools")` / `listing("scripts")` — the module's tool annotations /
-  linked scripts.
+- `listing("tools")` / `listing("scripts")` — the tools a nested agent can call
+  (the module's own annotations, plus the built-in form tools) / the linked
+  scripts.
 
 Call `listing` at the start of a session and again after every change.
 
@@ -145,7 +150,12 @@ Call `listing` at the start of a session and again after every change.
   shortened) or `bindings: "none"` (nothing returned) so a term you are not
   reading does not fill the transcript and your context. Both say what they left
   out, so an omitted binding never looks like a goal that bound nothing.
-- It runs on a scratch copy: it does not commit anything. Use it to test.
+- It runs the goal against a **scratch copy of the module**: nothing it defines
+  is committed, so it is the way to test. The copy is of the *module*, not of the
+  world — `spawn`/`serve` inside `execute` create real, session-scoped processes
+  that outlive the call (and run the module as it was then). Testing a service
+  therefore leaves it running: `ps` shows it, and you can talk to it from a later
+  turn, or `/stop` it.
 
 # Modify the module
 
@@ -187,7 +197,171 @@ harness (`-l`, `/load`) is a user action; if that is what is wanted, say so rath
 than performing it as an edit.
 
 Other tools: `reference(topic)` reads the DeepClause docs (`language`,
-`authoring`, `patterns`, `examples`, `snippets`, `tools`).
+`authoring`, `forms`, `patterns`, `examples`, `snippets`, `tools`).
+
+# Forms: structured data intake
+
+When a skill needs **structured data from the user** — a few fields, a choice, a
+confirmation — use a **form**, not prose. Asking a question and parsing the reply
+makes the user type the shape and you guess it; a form gives them the fields and
+gives you the values keyed by name, already checked. Forms are always available —
+no directive, nothing to import.
+
+Two shapes. Pick by where the *fields* come from:
+
+| The fields are… | Shape | What it costs |
+|---|---|---|
+| settled by the request or the context | **dynamic** — give `task/N` the form tools and let the model design the form from your description | a model call; the form fits the case |
+| fixed and already known | **fixed** — write the spec in the code with `form/2` + `await_form/2` | no model; fully deterministic |
+
+Both use the same host machinery and the same validation — only the author of the
+spec differs. Prefer the dynamic shape when the input depends on what the user
+asked for; the fixed shape when you know the fields and want the run to be
+reproducible with no model.
+
+## Dynamic: the task decides, and designs the form
+
+Give the task the form tools and say what you need. The model designs the form
+from your description, waits for the user, and reports what they entered:
+
+```prolog
+agent_main :-
+    system("You collect support tickets. Ask for whatever the case needs."),
+    with_tools([render_form, wait_for_form_change, close_form, set_result, finish],
+        task("Ask for the details this ticket needs, then report exactly what the user entered.",
+             string(Summary))),
+    answer(Summary).
+```
+
+If the *shape* is known but the *values* come from the model, say so in the task
+and let the model fill them: `task("Design a short form with subject, priority
+and description.", ...)`.
+
+That is the whole contract, and it is three calls:
+
+1. `render_form(spec)` — open a form; returns its id.
+2. `wait_for_form_change(formId)` — block until the user acts; returns
+   `{action, values, changed, errors}`. `action` is `"submit"` or `"cancel"` (or
+   an action the spec declared).
+3. `close_form(formId)` — when the loop is done.
+
+In a **chat turn** (`chat/1`) you can stop after step 1: a conversation does not
+end while a form it opened is still unanswered, so the turn waits for the person
+and hands you the submission before it finishes. Step 2 is for another round on a
+form you kept open (after `set_form_issues`/`update_form`).
+
+**A refused submit is the host's business, not yours.** The spec's own
+constraints (`required`, `enum`, ranges, `pattern`) and the harness's
+`form_validate(+Values, -Errors)` run when the user submits. If they reject it,
+the host puts the errors on the form and `wait_for_form_change` keeps waiting —
+a refused submit is never returned. Never invent values on the user's behalf.
+
+## Fixed: the spec is in the code
+
+When the fields are known, write the spec literally and drive it with the
+primitives. `form/2` renders and binds a handle, `await_form/2` blocks through
+refused submits, `close_form/1` closes:
+
+```prolog
+doc(collect_claim/1, "Collect an expense claim. collect_claim(-Values).").
+
+collect_claim(Values) :-
+    form(_{ title: "New expense claim",
+           fields: [ _{name: vendor, type: string,  required: true},
+                     _{name: amount, type: number,  required: true},
+                     _{name: note,   widget: textarea} ] }, F),
+    await_form(F, Change),
+    close_form(F),
+    (   Change.action == submit            % an atom here: submit, cancel
+    ->  Change.values = Values             % dict keyed by field name
+    ;   Values = _{}
+    ).
+```
+
+`form_advisories(+Values, -Warnings)` adds soft warnings that never block.
+`form/2` and friends are **host handlers, not clauses**, so
+`current_predicate(form/2)` reports `no` — exactly as it does for `exec/2`. That
+is expected. Full reference: `reference("forms")`.
+
+## The spec (either shape)
+
+`version` is not needed and a field's `type` defaults to `string`:
+
+```prolog
+_{ title: "New expense claim",
+   fields: [ _{name: vendor, type: string,  required: true},
+             _{name: amount, type: number,  required: true},
+             _{name: note,   widget: textarea} ],
+   actions: [ _{name: submit, title: "File claim"},
+              _{name: cancel, title: "Cancel"} ] }
+```
+
+- `type`: `string` (default), `number`, `integer`, `boolean`, or an `object` /
+  `array` group. `enum` needs a `string` field.
+- `widget` is a presentation hint — `text`, `textarea`, `number`, `slider`,
+  `select`, `radio`, `multiselect`, `checkbox`, `switch`, `date`, `time`,
+  `datetime`, `hidden` — and never affects validation.
+- `actions` defaults to submit/cancel.
+
+A form needs a **human**. `await_form/2` blocks the run until the UI submits, and
+a run with no UI resolves the wait (`cancel` / `unavailable`) rather than hanging.
+So exercise the logic *around* a form with `execute`, or ask the user to run it —
+never treat a missing answer as a real one.
+
+# Conversational agents
+
+A **conversation** is a skill that talks with the person over many turns and acts
+between them. It is a traditional agent loop: the model gets the harness's tools,
+does what it needs, replies, and stops. There is **no `finish`, no `set_result`
+and no nudging** — the reply *is* the answer, and the next message starts the next
+turn.
+
+Two primitives are the whole loop:
+
+```prolog
+agent_main :-
+    system("You are a support assistant. Be brief."),
+    loop.
+
+loop :-
+    input(A),        % the person's next message; fails when there is none
+    chat(A),         % one turn: tools, then it replies and stops
+    loop.
+```
+
+- `input/1` waits for the next message and **has no prompt** — the embedding UI is
+  already a chat interface. It **fails** when there is nobody to talk to (a
+  non-interactive run), which is what ends the loop. Guard it (`-> ... ; true`)
+  when the rest of the harness should still run.
+- `chat/1` appends the message as the user turn and runs the loop with every
+  `tool/N` you declare (plus the built-in form tools). The reply is streamed to
+  the UI and kept in memory; `chat(Message, Reply)` also binds it.
+- **A failed turn does not end the conversation.** `chat/1` reports the failure,
+  keeps the memory as it was, and the next message starts a fresh turn — the
+  person is never dropped out of the chat.
+- **Memory is the conversation.** The next `chat/1` sees what was said; a
+  `system/1` before the loop sets the persona and survives every turn.
+- **`next/1` adds events.** The same inbox also carries a worker's message, so a
+  conversation can react to something that happened while the person was quiet:
+
+  ```prolog
+  loop(Me) :- next(Item), handle(Me, Item), loop(Me).
+  handle(_, user(Text))       :- chat(Text).
+  handle(_, message(mail(M))) :- system("New email."), chat("Summarise: {M}").
+  ```
+
+  `input/1` is `next/1` restricted to the person; a worker's message that arrives
+  first stays queued. Use it when a subagent or service should be able to wake the
+  conversation (a mail check, a finished job) — one turn at a time, and the turn
+  appears in the transcript like any other.
+- Use it as the **foreground goal** (`/goal agent_main`, `-g agent_main`), not
+  inside `execute` or a subagent: those would wait on a prompt nobody can answer.
+
+Do not reach for `task/N` for a conversation (it insists on a result and nags the
+model), and do not reach for `chat/1` when a single turn must return a value —
+that is `task/N`, with a **form** if the value comes from the person. A turn may
+open a form: the person fills it in and the turn continues. Full guide:
+[`docs/DML_CONVERSATION.md`](../../../../docs/DML_CONVERSATION.md).
 
 # Concurrency and subagents
 
@@ -213,6 +387,12 @@ A subagent is isolated and asynchronous:
   `answer/1` — never by an output argument. Write `send(Parent, result(...))` in
   the child and `receive` it in the parent (pass `self(Me)` into the child).
 - **It outlives the turn.** Do not busy-wait; report the id and use `ps` later.
+- **`ps` shows the name you talk to.** A `serve(Name, Goal)` process is labelled
+  `Name`, not the goal functor, so `ps`/`/ps` line up with `whereis(Name, P)` and
+  `service_call(Name, …)`. `process_info/2` keeps the goal, and its `usage`
+  counts *model* tokens: a service that only relays messages legitimately shows
+  zeros, so do not read zero usage as "not running" — `state` is the field for
+  that.
 
 Patterns:
 
@@ -312,9 +492,9 @@ country(ch, "Switzerland").
 rate(chf, 1.08, "2026-01").
 ```
 
-Facts persist across turns and sessions, appear in `listing` and the manifest,
-and travel with `export`. Prefer a fact for stable knowledge the user will ask
-about again; keep large datasets in a file or a linked script.
+Facts persist across turns and sessions, appear in `listing`, and travel with
+`export`. Prefer a fact for stable knowledge the user will ask about again; keep
+large datasets in a file or a linked script.
 
 The module also records its own **history**, queryable from DML (system-owned:
 excluded from `listing`/`export`, but callable):
@@ -802,6 +982,8 @@ More patterns: `reference("patterns")`; shapes: `reference("examples")`.
   - [system/1, user/1](#memory-predicates)
   - [output/1, yield/1, log/1](#output-predicates)
   - [answer/1](#answer1)
+  - [Forms (structured human input)](#forms-structured-human-input)
+  - [Conversation: `chat/1` and `input/1`](#conversation-chat1-and-input1)
 - [Processes and concurrency](#processes-and-concurrency)
 - [Control Flow](#control-flow)
 - [String Interpolation](#string-interpolation)
@@ -1198,6 +1380,29 @@ count_words(File, Count) :-
 tool(count_words(File, Count), "Count words in a workspace file.") :-
     count_words(File, Count).
 ```
+
+The tool head's **last argument is the output**; the ones before it are inputs. A
+tool that needs more than one input therefore needs a **result argument**: a write
+tool is `fs_write(Path, Content, Result)`, not `fs_write(Path, Content)` —
+otherwise the content is taken for the output, the model is never offered a way
+to pass it, and the write silently does nothing.
+
+```prolog
+fs_write(Path, Content, ok) :-
+    file_directory_name(Path, Dir),
+    ( Dir == "." -> true ; make_directory_path(Dir) ),
+    write_file(Path, Content).
+
+tool(fs_write(Path, Content, Result),
+     "Write a text file, creating parent directories.",
+     [string, string]) :-
+    fs_write(Path, Content, Result).
+```
+
+`tool/3` takes the **input types** after the description, in order, one per input
+(`[string, string]` above); the last argument is still the output. A tool whose
+output argument is left unbound fails with an explanation rather than reporting a
+silent success.
 
 The head and its delegate must have the **same name and the same arity**. The
 tool body is what runs when the nested agent calls the tool, so a body that
@@ -1725,6 +1930,147 @@ asker(Question, Answer) :-
     ).
 ```
 
+### Conversation: `chat/1` and `input/1`
+
+A conversation is a harness that talks with the person over many turns and acts
+between them. Failures of `input/1` end the loop.
+
+`write/1`, `writeln/1` and `format/2` are captured as output events in the REPL
+(and in `execute`); outside it they write to the process stdout as usual.
+
+#### `input(-Message)`
+
+Wait for the person's **next message**, with no prompt — the embedding UI is a
+chat interface and is already asking. Fails when there is nobody to talk to (a
+non-interactive run), which is how a conversation loop ends:
+
+```prolog
+loop :-
+    input(A),
+    chat(A),
+    loop.
+```
+
+`input/2` (with a prompt) is for a question inside a task; `input/1` is the turn
+boundary of a conversation.
+
+#### `next(-Item)`
+
+The next thing from the conversation **inbox**: `user(Text)` when the person
+speaks, or `message(Term)` when a worker (a subagent or service) sent this
+session a message. Fails when there is nothing left. This is how a conversation
+also reacts to events, without polling:
+
+```prolog
+loop(Me) :- next(Item), handle(Me, Item), loop(Me).
+
+handle(_, user(Text))       :- chat(Text).
+handle(_, message(mail(M))) :- system("New email."), chat("Summarise: {M}").
+```
+
+`input/1` is `next/1` restricted to the person — a worker's message that arrives
+first stays queued for `next/1`.
+
+#### `chat(+Message)` / `chat(+Message, -Reply)`
+
+One **conversational turn**: append `Message` as the user message, run the agent
+loop with every `tool/N` the harness declares, and stop when the model stops
+calling tools. A traditional agent loop — no `finish`, no `set_result`, no
+nudging. The reply is streamed to the UI and kept in memory, so the next `chat/1`
+sees the conversation; `chat/2` also binds the last assistant message.
+
+```prolog
+agent_main :-
+    system("You are a support assistant. Be brief."),
+    loop.
+
+loop :- input(A), chat(A), loop.
+```
+
+Use it as the foreground goal (not inside `execute` or a subagent). A turn may
+open a form, so structured input fits inside a conversation. **A failed turn does
+not end the conversation**: `chat/1` reports the failure, leaves memory as it was,
+and the next message starts a fresh turn. See
+[`docs/DML_CONVERSATION.md`](../../../../docs/DML_CONVERSATION.md).
+
+### Forms (structured human input)
+
+A form asks the human for typed, validated input and hands the values back keyed
+by field name. Forms are always available — there is no directive and nothing to
+enable.
+
+**Two shapes**, by where the fields come from: **dynamic** — the model designs
+the form from a description (give `task/N` the form tools); **fixed** — the spec
+is written in the code, with no model. Both use the same registry and the same
+validation.
+
+**The spec.** `version` is not needed and a field's `type` defaults to `string`:
+
+```prolog
+Spec = _{ title: "Refund request",
+          fields: [ _{name: amount, type: number, required: true},
+                    _{name: reason, type: string, widget: select, required: true,
+                      enum: ["duplicate_charge", "not_received", "other"]},
+                    _{name: notes,  widget: textarea, maxLength: 500} ],
+          actions: [ _{name: submit, title: "Issue refund", kind: primary},
+                     _{name: cancel, title: "Cancel", kind: link} ] }.
+```
+
+Field `type` is `string` (default), `number`, `integer`, `boolean`, or an
+`object` / `array` group; `enum` requires a `string` field. `widget` is a
+presentation hint only — `text | textarea | number | slider | select | radio |
+multiselect | checkbox | switch | date | time | datetime | hidden` — and never
+affects validation. `actions` defaults to submit/cancel.
+
+**Dynamic: a model drives the loop.** Give `task/N` the form tools and it
+designs the form from the prompt, waits, and reports:
+
+```prolog
+with_tools([render_form, wait_for_form_change, close_form, set_result, finish],
+    task("Ask for the amount and a reason, then report what the user entered.",
+         string(Summary)))
+```
+
+The model's three calls: `render_form(Spec)` → a form id;
+`wait_for_form_change(FormId)` → `{action, values, changed, errors}` with
+`action` = `"submit"` | `"cancel"`; `close_form(FormId)`.
+
+In a **conversation** (`chat/1`) the third leg is optional: a chat turn does not
+end while a form it opened is still unanswered, so it waits for the person and
+hands back the submission. `wait_for_form_change` is then only needed for another
+round on a form you kept open.
+
+**Fixed: the harness drives it itself**, with no model, using the primitives
+`form/2`, `form_update/2`, `form_errors/2`, `await_form/2,3` and `close_form/1`:
+
+```prolog
+agent_main :-
+    form(Spec, F),                       % render; F is the form handle
+    await_form(F, Change),               % blocks until the user acts
+    close_form(F),
+    (   Change.action == submit          % an atom: submit, cancel, …
+    ->  Change.values = Values           % dict keyed by field name
+    ;   Values = _{}
+    ).
+```
+
+`Change` is `{ formId, revision, action, values, changed, errors }`; `action` is
+an **atom**.
+
+**Validation is the host's.** On a submit the host enforces the spec (`required`,
+`enum`, ranges, `pattern`, lengths) and the harness's `form_validate(+Values,
+-Errors)`. A refused submit is never returned: the host puts the errors on the
+form and `await_form/2` / `wait_for_form_change` keeps waiting. Soft rules go in
+`form_advisories(+Values, -Advisories)` (never blocking; the `advisories` tool).
+
+`form/2` and friends are **host handlers, not clauses**, so
+`current_predicate(form/2)` reports `no` — exactly as it does for `exec/2`. That
+is expected; it does not mean forms are unavailable. The model-facing tools
+(`render_form`, `update_form`, `set_form_issues`, `wait_for_form_change`,
+`validate_form`, `advisories`, `close_form`) are built in.
+
+Full reference: `reference("forms")`.
+
 ---
 
 ## Processes and concurrency
@@ -1815,6 +2161,11 @@ counter_service(Count) :-
     ).
 ```
 
+
+The process is labelled with `Name` (not the goal functor), so `ps`, `whereis/2`
+and `service_call/3` all use the same handle. `process_info/2` reports both the
+label and the registered names, and its `usage` counts model tokens — a relay
+service shows zeros while running.
 ### `swarm(+Worker, +Items, -Results[, +Concurrency])` / `pmap(+Worker, +Items, -Values)`
 
 Run `call(Worker, Item, Value)` once per item, each in its own process, and

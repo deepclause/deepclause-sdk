@@ -10,7 +10,8 @@
  * of model text/tool calls is added in M3.
  */
 
-import type { DMLBinding, DMLEvent } from '../types.js';
+import type { DMLBinding, DMLEvent, FormEventPayload } from '../types.js';
+import { valueAtPath, walkFields } from '../forms/spec.js';
 import { spawn } from 'child_process';
 import * as path from 'path';
 import { hyperlink } from '@earendil-works/pi-tui';
@@ -296,6 +297,10 @@ export interface ReplEventRenderer {
   getWidth(): number;
   setWidth(width: number): void;
   writeLine(text?: string): void;
+  /** The goal produced no solution (`false.` in text, a record in JSON). */
+  noSolution(): void;
+  /** Interactive goal terminator (`.` in text modes; nothing in JSON). */
+  goalTerminator(): void;
   writeErrorLine(text: string): void;
   listing(text: string): string;
   image(lines: string[]): void;
@@ -443,6 +448,25 @@ export class ReplRenderer implements ReplEventRenderer {
   }
 
   /**
+   * The goal produced no solution. Text modes print `false.`; JSON mode emits a
+   * `no_solution` record, so a machine consumer never sees a non-JSON line on
+   * stdout (`writeLine` writes raw text).
+   */
+  noSolution(): void {
+    if (this.mode === 'json') {
+      this.sink(`${JSON.stringify({ type: 'no_solution' })}\n`);
+      return;
+    }
+    this.writeLine('false.');
+  }
+
+  /** Interactive goal terminator (`.` in text modes; nothing in JSON). */
+  goalTerminator(): void {
+    if (this.mode === 'json') return;
+    this.writeLine('.');
+  }
+
+  /**
    * Write a terminal-image block (the escape sequence plus reserved blank rows).
    * In a TUI this goes to the image sink; otherwise it is written raw.
    */
@@ -459,6 +483,32 @@ export class ReplRenderer implements ReplEventRenderer {
     }
     this.lastStreamFrame = null;
     this.atLineStart = true;
+  }
+
+  /**
+   * Render a form as text: title, one line per field with its value and any
+   * issue. Editing is the host's job (`onForm`); this is the read-out.
+   */
+  private renderForm(form: FormEventPayload): void {
+    const spec = form.spec;
+    if (form.op === 'close') {
+      this.writeLine(`  ⧉ ${form.formId} closed`);
+      return;
+    }
+    if (!spec) return;
+    const title = spec.title ?? 'form';
+    const description = spec.description ? ` — ${spec.description}` : '';
+    this.writeLine(`  ⧉ ${title}${description}`);
+    const values = form.values ?? {};
+    for (const ref of walkFields(spec.fields ?? [])) {
+      if (ref.field.type === 'object') continue;
+      const value = valueAtPath(values, ref.path);
+      const issue = form.issues?.find((entry) => entry.path === ref.path);
+      const shown = value === undefined ? '' : String(value);
+      const mark = issue ? (issue.level === 'error' ? '✗' : '!') : ' ';
+      const note = issue ? `  ${issue.message}` : '';
+      this.writeLine(`    ${mark} ${ref.field.title ?? ref.path}: ${shown}${note}`);
+    }
   }
 
   /**
@@ -566,6 +616,11 @@ export class ReplRenderer implements ReplEventRenderer {
     }
     if (this.mode === 'json') {
       this.sink(`${JSON.stringify(event)}\n`);
+      return;
+    }
+
+    if (event.type === 'form' && event.form) {
+      this.renderForm(event.form);
       return;
     }
 

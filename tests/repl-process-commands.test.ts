@@ -82,6 +82,13 @@ describe('formatProcessTable', () => {
     expect(table).toContain('waiting');
     expect(table).toContain('3 tok');
   });
+
+  it('shows a registered alias when it differs from the label', () => {
+    // A process may be registered under a name that is not its label (`register/2`
+    // on someone else's pid). The label alone is not what anyone talks to.
+    const table = formatProcessTable([info({ name: 'worker_loop', registeredAs: ['keeper', 'worker_loop'] })]);
+    expect(table).toContain('worker_loop (as keeper)');
+  });
 });
 
 describe('subagent harness tools', () => {
@@ -135,11 +142,16 @@ describe('subagent harness tools', () => {
     return { controller: stub, spawned, sent, stopped };
   }
 
-  it('exposes spawn, ps, send, call, stop, swarm and wait', () => {
+  it('exposes ps, send, stop, swarm and wait (but not spawn or call)', () => {
     const { controller: c } = controller();
     const tools = createHarnessTools(c);
-    for (const name of ['spawn', 'ps', 'send', 'call', 'stop', 'swarm', 'wait']) {
+    for (const name of ['ps', 'send', 'stop', 'swarm', 'wait']) {
       expect(tools.has(name)).toBe(true);
+    }
+    // `spawn` and `call` are DML (`spawn/2`, `service_call/3`): the authoring agent
+    // reaches them through `execute`, so they are not tools.
+    for (const name of ['spawn', 'call']) {
+      expect(tools.has(name)).toBe(false);
     }
   });
 
@@ -152,12 +164,13 @@ describe('subagent harness tools', () => {
     expect(wait).toMatchObject({ outcome: expect.stringContaining('ok(') });
   });
 
-  it('spawn returns a pid and ps lists it', async () => {
-    const { controller: c, spawned } = controller();
+  it('does not expose spawn or call as agent tools; ps still lists processes', async () => {
+    const { controller: c } = controller();
     const tools = createHarnessTools(c);
-    const result = await tools.get('spawn')!.execute({ goal: 'keeper([])', name: 'keeper' });
-    expect(result).toMatchObject({ name: 'keeper' });
-    expect(spawned[0]?.name).toBe('keeper');
+    // Both are DML (`spawn/2`, `service_call/3`) reached through execute.
+    expect(tools.has('spawn')).toBe(false);
+    expect(tools.has('call')).toBe(false);
+    await c.spawnProcess('keeper([])', { name: 'keeper' });
     expect(await tools.get('ps')!.execute({})).toMatchObject({ text: expect.stringContaining('keeper') });
   });
 

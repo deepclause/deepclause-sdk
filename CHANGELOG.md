@@ -1,5 +1,106 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **`write/1` reaches the output channel.** It had no handler, so it fell through
+  to SWI's `current_output` and its text vanished in the REPL — only `format/2`
+  and `writeln/1` were captured. A debugging `write(step)` therefore looked
+  exactly like a goal that produced nothing, which cost a whole debugging session
+  (and nearly got `whereis/2` reported as broken).
+- **A `serve(Name, Goal)` process is labelled `Name`.** A spawn labels a process
+  with its goal functor, so `serve(test_service, test_service_loop)` appeared in
+  `ps` as `test_service_loop` — an anonymous loop nobody could talk to — while
+  `whereis(test_service, P)` resolved fine. `ps` and `/ps` now show the handle you
+  actually use; `process_info/2` keeps the goal and reports the registered names
+  (its `usage` counts model tokens, so zero usage is not evidence of idleness).
+
+- **A refused submit is now the host's business, not the caller's.** The host
+  enforced the rules on submit but returned `action: invalid` with the errors, so
+  every harness and every model-driven loop carried a reject-and-re-show branch
+  (`form_errors` / `set_form_issues`, then wait again). `await_form/2` now loops
+  internally: on a rejection the host attaches the errors to the form (which is
+  re-presented, with the values the user typed) and keeps waiting. A caller only
+  ever sees an action the rules accepted — so the loop is
+  `form` → `await_form` → `close_form`, with no error branch, and
+  `wait_for_form_change` likewise returns only `submit`/`cancel`. A caller that
+  wants the raw errors up front can still call `form_validate/2` (the
+  `validate_form` tool).
+- **A form spec no longer needs `version`, and a field's `type` defaults to
+  `string`.** A model asked for "a form with an amount and a reason" can answer
+  `{title: "Refund", fields: [{name: "amount", type: "number"}, {name: "reason"}]}`,
+  and a bare string field (`"reason"`) is shorthand. `normalizeSpec` fills the
+  gaps; genuinely broken specs are still reported by `validateSpec`.
+- **`spec` travels with every `form` event, and `update` events re-present the
+  form.** Previously an update (a model's `update_form`, or the host showing
+  errors) carried no `spec`, so a renderer could not draw it — the errors were
+  effectively invisible.
+
+### Added
+
+- **`chat/1` and `input/1`: conversational agents.** `input/1` waits for the
+  person's next message with **no prompt** (the embedding UI is already a chat
+  interface) and **fails** when there is nobody to talk to, which ends
+  `loop :- input(A), chat(A), loop.` `chat/1` runs one turn of a **traditional
+  agent loop** — the harness's `tool/N`s, but no `finish`, no `set_result` and no
+  nudging: the model calls tools, replies, and the turn ends when it stops calling
+  tools. The reply is streamed and kept in memory (memory *is* the conversation),
+  and `chat/2` also binds it. `agent.ts` gained a `conversational` mode over the
+  existing loop; `CHAT_PROMPT.md` is its system prompt.
+  [`docs/DML_CONVERSATION.md`](docs/DML_CONVERSATION.md) documents the contract and
+  **Events: `next/1`.** The runner merges the person's input channel and the
+  session's mailbox into **one inbox**, so a conversation can also react to a
+  worker's message: `next(Item)` returns `user(Text)` or `message(Term)` and fails
+  when the inbox is empty, and `input/1` is the same read restricted to the
+  person. A queued message beats a closed inbox (the mailbox is polled once more
+  before giving up), items are queued rather than dropped, and an event turn is a
+  normal turn in the transcript. Declarative `on/1` handlers are deliberately not
+  built — they would need re-entrancy and hide control flow; `next/1` + a
+  `handle/1` clause covers the same ground. A handler can still be added at
+  runtime with `assertz/1`, which works inside a harness.
+- **A chat turn waits for a form it opened.** A conversation ends a turn when the
+  model stops calling tools — which meant a model that rendered a form and then
+  replied (the easy mistake; `render_form` and `wait_for_form_change` are two
+  calls it has to know about) left the form open with nowhere for the submission
+  to go. Now, if a form a turn opened has not handed a change to anyone
+  (`FormRegistry.awaitingForms()`), the turn waits for the person and injects the
+  submission as the next input, then continues. So in a chat, `render_form` alone
+  is enough; `wait_for_form_change` is only for another round on a form kept open.
+  `task/N` is unchanged.
+- **A failed turn no longer ends a conversation.** A thrown model error used to
+  abort the whole run; in a chat that dropped the person out of it. `chat/1` now
+  reports the failure, leaves memory as it was, and the next message starts a
+  fresh turn. `post_agent_result/6` carries the error so the message can say what
+  went wrong (it also fixes `task/N`'s long-dead `error` lookup).
+- **`reference("forms")`.** The bundled `DML_FORMS.md`, so the authoring agent can
+  discover the feature at runtime. `HARNESS_EXAMPLES.md` gained a runnable forms
+  example (§9) and a conversational one (§10), and the prompt teaches the
+  three-call model loop first, with the DML primitives second.
+  `docs/DML_FORMS.md` §4 records why the gate was removed.
+
+### Removed
+
+- **The `:- capability(forms).` directive.** Forms are always available; the
+  primitives and the `tool/N` wrappers are installed into every session. An older
+  file that still carries the directive loads unchanged (`capability/1` is
+  ignored). The built-in tools stay out of a harness's own surface — `listing`,
+  the manifest's predicates, the export, the counts, and the `end_turn` probes —
+  but appear in `listing("tools")` and are offered to `task/N` / `with_tools/2`.
+
+### Fixed
+
+- **A form's `action` is an atom in DML.** The host sent it as a JSON string, so
+  `Change.action == submit` — the documented idiom, and what every example used —
+  was silently always false, and a no-model loop fell through and answered
+  `invalid`. It is converted at the boundary; the model-facing tools re-serialize
+  to JSON, where it is a string again.
+- **`--json` output is now pure JSON.** `repl --json -g` wrote a raw `false.`
+  line when a goal produced no solution, corrupting the one-object-per-line
+  stream for any tooling that reads it. It now emits `{"type":"no_solution"}`.
+  A goal that committed with `answer/1` is no longer reported as a failure, and
+  the interactive goal path no longer leaks its `.` terminator in JSON mode.
+
 ## 0.2.2 - 2026-10-15
 
 ### Fixed

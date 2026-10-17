@@ -95,10 +95,13 @@ export class TuiRenderer {
    * collapses with one the line renderer adds, so this cannot double them.
    */
   private lastBlock: 'none' | 'text' | 'component' = 'none';
+  /** Observer for every event, regardless of what the TUI chooses to draw. */
+  private readonly onEvent?: (event: DMLEvent) => void;
 
   constructor(options: TuiRendererOptions) {
     this.document = options.document;
     this.onWorking = options.onWorking;
+    this.onEvent = options.onEvent;
     this.showEvents = options.events !== false;
     this.text = new ReplRenderer({
       mode: 'rich',
@@ -144,6 +147,9 @@ export class TuiRenderer {
   }
 
   render(event: DMLEvent): void {
+    // Every event is observed before the switch: the status tracker needs the
+    // `usage`/`model_call` stream, most of which the TUI never draws.
+    this.onEvent?.(event);
     switch (event.type) {
       case 'tool_call':
         this.renderToolCall(event);
@@ -306,6 +312,14 @@ export class TuiRenderer {
 
   writeLine(text = ''): void {
     this.text.writeLine(text);
+  }
+
+  noSolution(): void {
+    this.text.noSolution();
+  }
+
+  goalTerminator(): void {
+    this.text.goalTerminator();
   }
 
   writeErrorLine(text: string): void {

@@ -41,13 +41,17 @@ import {
 } from '@earendil-works/pi-tui';
 import { editorTheme, formatInputAnswer } from '../repl/tui/theme.js';
 import { PromptEditor } from '../repl/tui/editor.js';
+import { FormView } from '../repl/tui/form-view.js';
+import { applyFormKey, initialState, rows } from '../repl/form-widget.js';
 import { loadProjectContext } from '../repl/project-context.js';
 import { createPiBackend, THINKING_LEVELS } from '../repl/backend.js';
 import { createReplToolset, type ReplToolset } from '../repl/toolset.js';
 import { takeStartupPrologMessages } from '../prolog/loader.js';
 import { createPiImageBackend } from '../repl/imagegen.js';
 import { EnvModelResolver, PiModelResolver, type ModelResolver } from '../repl/model-resolver.js';
-import type { ImageBackend } from '../types.js';
+import type { DMLEvent, FormEventPayload, ImageBackend } from '../types.js';
+import type { JsonObject } from '../forms/spec.js';
+import { pickForm } from '../repl/form-widget.js';
 import { parseModelId, resolveModelSlotConfig, type Provider } from '../system/config/model-slots.js';
 import { loadReplConfig, resolveReplCompactionConfig, updateConfig } from './config.js';
 import {
@@ -348,6 +352,7 @@ export async function runGoalWithRenderer(
 ): Promise<number> {
   let hadError = false;
   let printedAny = false;
+  let answered = false;
   for await (const event of repl.query(goal, { signal: options.signal })) {
     if (event.type === 'solution') {
       options.renderer.solution(event.solution?.bindings ?? []);
@@ -356,6 +361,9 @@ export async function runGoalWithRenderer(
     } else if (event.type === 'error') {
       hadError = true;
       options.renderer.render(event);
+    } else if (event.type === 'answer') {
+      answered = true;
+      options.renderer.render(event);
     } else if (event.type === 'finished') {
       // Nothing to print for finished.
     } else {
@@ -363,15 +371,82 @@ export async function runGoalWithRenderer(
     }
   }
   if (!printedAny && !hadError) {
-    options.renderer.writeLine('false.');
+    // A goal that committed with `answer/1` succeeded; one that produced neither
+    // a solution nor an answer simply failed. (`goalTerminator`/`noSolution`
+    // keep `--json` stdout pure, where a raw `false.` would corrupt the stream.)
+    if (answered) options.renderer.goalTerminator();
+    else options.renderer.noSolution();
   }
   return hadError ? 1 : 0;
+}
+
+/**
+ * The REPL's form interaction (v0): a field-by-field wizard over the existing
+ * input channel. The pi-tui form widget is the next step (docs/DML_FORMS.md §9).
+ */
+async function presentFormWidget(repl: HarnessRepl, form: FormEventPayload): Promise<void> {
+  const spec = form.spec;
+  if (!spec) return;
+  const change = await pickForm({ spec, values: form.values, issues: form.issues });
+  repl.session.submitForm(form.formId, change
+    ? { action: change.action, values: change.values }
+    : { action: 'cancel', values: form.values ?? {} });
+}
+
+/**
+ * The TUI/non-TTY form interaction: a field-by-field wizard over the existing
+ * input channel. The plain-TTY path uses the widget instead.
+ */
+async function presentForm(repl: HarnessRepl, form: FormEventPayload): Promise<void> {
+  const spec = form.spec;
+  if (!spec) return;
+  const values: JsonObject = { ...(form.values ?? {}) };
+  const fields = (spec.fields ?? []).filter(
+    (field) => field.type !== 'object' && field.widget !== 'hidden',
+  );
+  for (const field of fields) {
+    const label = field.title ?? field.name;
+    const current = values[field.name];
+    const hint = current === undefined || current === '' ? '' : ` (${String(current)})`;
+    const answer = await repl.session.requestHumanInput(`${label}${field.required ? ' *' : ''}${hint}`);
+    if (answer === undefined) {
+      repl.session.submitForm(form.formId, { action: 'cancel', values });
+      return;
+    }
+    if (answer.trim() !== '') values[field.name] = coerceFieldValue(field.type, answer.trim());
+  }
+  repl.session.submitForm(form.formId, { action: 'submit', values });
+}
+
+function coerceFieldValue(type: string, raw: string): string | number | boolean {
+  if (type === 'number' || type === 'integer') {
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : raw;
+  }
+  if (type === 'boolean') return /^(y|yes|true|1)$/i.test(raw);
+  return raw;
 }
 
 function selectRenderMode(options: ReplCliOptions): RenderMode {
   if (options.json) return 'json';
   if (options.plain) return 'plain';
   return process.stdout.isTTY ? 'rich' : 'plain';
+}
+
+/**
+ * Should a form re-presented after a rejected submit be cancelled instead?
+ *
+ * A scripted run (`--answer`) supplies the same canned reply to every prompt. The
+ * host re-shows a refused submit so a *person* can correct it — but re-feeding the
+ * canned answer would refuse, re-show, refuse … forever. So in that mode the
+ * second presentation cancels and the run finishes. A model's own `update_form`
+ * carries no issues and is unaffected.
+ */
+export function cancelsScriptedRetry(
+  options: ReplCliOptions,
+  form: FormEventPayload,
+): boolean {
+  return options.answer !== undefined && form.op === 'update' && (form.issues?.length ?? 0) > 0;
 }
 
 /**
@@ -384,7 +459,19 @@ export function buildCliOnInput(
   options: ReplCliOptions,
 ): ((prompt: string, choices?: string[]) => Promise<string | undefined>) | undefined {
   if (options.answer !== undefined) {
-    return async () => options.answer;
+    // A promptless request is `input/1` — the person's next chat message. A
+    // scripted run has exactly one conversation message; replaying it would make
+    // a chat loop turn forever, so after it there is nobody to talk to and the
+    // conversation ends. Prompted requests (a form field, a question) are not
+    // limited: the same canned reply answers each one.
+    let usedForMessage = false;
+    return async (prompt: string) => {
+      if (prompt === '') {
+        if (usedForMessage) return undefined;
+        usedForMessage = true;
+      }
+      return options.answer;
+    };
   }
   if (options.noAsk) {
     return async () => undefined;
@@ -449,6 +536,8 @@ export interface ReplRuntime {
   inputHistory: string[];
   /** Current usage/context/model status for the status bar. */
   statusSnapshot(): ReplStatusSnapshot;
+  /** Feed an event to the status tracker (the TUI renders through its own path). */
+  observeEvent(event: DMLEvent): void;
   /** Resolved interactive UI mode (`auto` unless overridden by config/flags). */
   tuiMode: 'auto' | 'on' | 'off';
   /** Replace the input channel (the interactive loop uses its own readline). */
@@ -546,7 +635,10 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
       llmBackend = pi.backend;
       harnessModel = pi.modelId.split('/').slice(1).join('/') || pi.modelId;
       harnessProvider = (pi.provider as Provider) ?? harnessProvider;
-      contextWindow = pi.contextWindow;
+      contextWindow = pi.contextWindow ?? resolveModelSlotConfig(config, 'run', {
+        modelId: options.model ?? config.models.run,
+        temperature: options.temperature ?? config.temperatures.run,
+      }).contextWindow;
       reasoning = pi.reasoning;
       thinkingLevel = pi.thinkingLevel;
       modelResolver = new PiModelResolver(pi.registry);
@@ -669,6 +761,15 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
     judgeSelection,
     imageBackend,
     modelResolver,
+    onForm: async (form) => {
+      if (cancelsScriptedRetry(options, form)) {
+        repl.session.submitForm(form.formId, { action: 'cancel', values: form.values ?? {} });
+        return;
+      }
+      return options.plain && process.stdin.isTTY && process.stdout.isTTY
+        ? presentFormWidget(repl, form)
+        : presentForm(repl, form);
+    },
     history: historyOptions,
     harness: harnessName,
     execution: options.execution,
@@ -727,6 +828,7 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
     historyEnabled: Boolean(historyOptions),
     inputHistory,
     statusSnapshot: () => statusTracker.snapshot(),
+    observeEvent: (event) => statusTracker.observe(event),
     tuiMode: options.tui ?? config.repl.tui ?? 'auto',
     setOnInput: (handler) => repl.setOnInput(handler),
     missingCredential,
@@ -1330,7 +1432,8 @@ export async function runInteractiveGoal(
   } finally {
     await iterator.return?.(undefined);
   }
-  renderer.writeLine(answered ? '.' : 'false.');
+  if (answered) renderer.goalTerminator();
+  else renderer.noSolution();
 }
 
 /**
@@ -1369,6 +1472,9 @@ export async function runTui(
   const working = new WorkingLine(tui);
   const renderer = new TuiRenderer({
     document,
+    // The TUI draws through its own switch, but the status tracker must still see
+    // every event (usage, model_call, …) or the footer loses its counters.
+    onEvent: (event) => runtime.observeEvent(event),
     onWorking: (label) => {
       working.set(label);
       tui.requestRender();
@@ -1882,9 +1988,13 @@ export async function runTui(
   // the first and last line of output are not jammed against the chrome. Fixed
   // spacers rather than padding inside the scroll view: they do not scroll away and
   // do not consume scrollback.
+  // The form panel: shown while a form is open, and the TUI edits its fields
+  // through the editor (one prompt each), updating this panel as it goes.
+  const formView = new FormView();
   const dock = new VStack([
     { component: working, basis: 'auto', grow: 0, shrink: 1, minSize: 0 },
     { component: servicesPanel, basis: 'auto', grow: 0, shrink: 1, minSize: 0 },
+    { component: formView, basis: 'auto', grow: 0, shrink: 1, minSize: 0 },
     { component: new Spacer(1), basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
     { component: editorContainer, basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
     { component: statusBar, basis: 'auto', grow: 0, shrink: 1, minSize: 1 },
@@ -1911,6 +2021,37 @@ export async function runTui(
     ]));
   };
   applyLayout();
+
+  // A form opened by the running turn is shown in the dock and edited field by
+  // field through the editor; the plain-TTY path uses the raw widget instead.
+  runtime.repl.session.setFormHandler(async (form) => {
+    const spec = form.spec;
+    if (!spec) return;
+    let state = initialState(spec, form.values ?? {}, form.issues ?? []);
+    formView.setState(state);
+    tui.requestRender();
+    const list = rows(spec);
+    try {
+      for (let index = 0; index < list.length; index += 1) {
+        const row = list[index];
+        if (row.kind !== 'field') continue;
+        const answer = await runtime.repl.session.requestHumanInput(`${row.title}${row.required ? ' *' : ''}`);
+        if (answer === undefined) {
+          runtime.repl.session.submitForm(form.formId, { action: 'cancel', values: state.values });
+          return;
+        }
+        if (answer !== '') {
+          state = applyFormKey({ ...state, focus: index, editing: true, buffer: answer }, 'enter').state;
+          formView.setState(state);
+          tui.requestRender();
+        }
+      }
+      runtime.repl.session.submitForm(form.formId, { action: 'submit', values: state.values });
+    } finally {
+      formView.setState(undefined);
+      tui.requestRender();
+    }
+  });
 
   tui.start();
 

@@ -6,6 +6,7 @@ import type { SWIPLModule } from './prolog/loader.js';
 import type {
   DMLBinding,
   DMLEvent,
+  FormEventPayload,
   FrameKind,
   ImageBackend,
   LLMBackendMedia,
@@ -21,6 +22,9 @@ import { mountWorkspace } from './prolog/loader.js';
 import { runAgentLoop } from './agent.js';
 import { takePrologMessages } from './prolog/loader.js';
 import { validateToolArguments } from './repl/tool-arguments.js';
+import type { FormRegistry } from './forms/registry.js';
+import type { FormIssue, FormSpec, JsonObject } from './forms/spec.js';
+import { normalizeSpec, validateValues } from './forms/spec.js';
 import { judgeAnswersToValues, judgeCacheKey, normalizeJudgeState, parseJudgeQuestions, validateJudgeAnswers, valuesToPrologList } from './judge/marshal.js';
 import type { JudgeAnswer, JudgeCapabilities, JudgeSelection, JudgeUsage, JsonValue, JudgeQuestion } from './judge/types.js';
 import {
@@ -201,6 +205,8 @@ export interface RunnerOptions {
   modelResolver?: ModelResolver;
   /** Effective shell backend, passed to nested task agents for their env block. */
   environment?: import('./system/runtime/shell-manager.js').ExecutionEnvironment;
+  /** Name of the single capability host tool (default `bash`; the browser uses `python`). */
+  capabilityTool?: string;
 }
 
 export interface ProcessRequestPayload {
@@ -222,6 +228,34 @@ export interface ProcessRequestResult {
   term: string;
 }
 
+/** Decode `issue{path, level, message}` dicts from Prolog into `FormIssue[]`. */
+function toFormIssues(raw: unknown): FormIssue[] {
+  const value = toJsValue(raw);
+  if (!Array.isArray(value)) return [];
+  return value.map((entry) => {
+    const obj = toJsValue(entry) as Record<string, unknown>;
+    return {
+      path: String(obj?.path ?? ''),
+      level: obj?.level === 'warning' ? 'warning' : 'error',
+      message: String(obj?.message ?? ''),
+    };
+  });
+}
+
+/**
+ * Does this action run the harness's hard rules? `submit` by default; an action
+ * may opt out with `validates: []` (or opt in with `all`/`hard`/a path list).
+ */
+function shouldValidate(spec: FormSpec | undefined, action: string): boolean {
+  if (['cancel', 'closed', 'timeout', 'unavailable', 'cancelled', 'invalid'].includes(action)) return false;
+  const declared = spec?.actions?.find((entry) => entry.name === action);
+  if (!declared) return action === 'submit';
+  const validates = declared.validates;
+  if (validates === undefined) return action === 'submit';
+  if (Array.isArray(validates)) return validates.length > 0;
+  return validates === 'all' || validates === 'hard';
+}
+
 export interface InternalRunOptions {
   args?: unknown[];
   params?: Record<string, unknown>;
@@ -238,6 +272,13 @@ export interface InternalRunOptions {
   ) => Promise<ProcessRequestResult>;
   signal?: AbortSignal;
   initialMessages?: MemoryMessage[];
+  /** Form host state, when the `forms` capability is active (docs/DML_FORMS.md). */
+  forms?: FormRegistry;
+  /**
+   * Called when a form opens, so an interactive host can collect values. Awaited
+   * inside the step (like `onInputRequired`), so the run pauses until it returns.
+   */
+  onForm?: (form: FormEventPayload) => void | Promise<void>;
   /** Per-run default judgment backend name override. */
   judgeBackend?: string;
   /**
@@ -247,11 +288,29 @@ export interface InternalRunOptions {
   onModelCall?: () => boolean | Promise<boolean>;
 }
 
+/**
+ * What the conversation inbox needs from its host. The top-level run and the tool
+ * engine both provide it; the tool engine has no input channel, so it is optional
+ * there (`next/1` inside a tool still reads worker messages).
+ */
+interface ChatSources {
+  onInputRequired?: (prompt: string) => Promise<string | undefined>;
+  onProcessRequest?: (
+    request: ProcessRequestPayload,
+    signal?: AbortSignal,
+  ) => Promise<ProcessRequestResult>;
+  signal?: AbortSignal;
+}
+
 interface RunnerExecutionContext {
   workspacePath?: string;
   signal?: AbortSignal;
   toolPolicy?: ToolPolicy | null;
   onModelCall?: () => boolean | Promise<boolean>;
+  /** Form host state, so a tool body can call the form primitives. */
+  forms?: FormRegistry;
+  /** Host interaction for an opened form (called from the tool engine too). */
+  onForm?: (form: FormEventPayload) => void | Promise<void>;
   /** Handles a DML process primitive reached inside a tool engine. */
   onProcessRequest?: (
     request: ProcessRequestPayload,
@@ -364,6 +423,19 @@ export class DMLRunner {
   private sessionId: string = '';
   private currentMemory: MemoryMessage[] = [];
   private stepCounter = 0;
+  /**
+   * Conversation inbox (docs/DML_CONVERSATION.md §5).
+   *
+   * A conversation waits on two sources that a harness cannot see at once: the
+   * person (the host's input channel) and the session's mailbox (a worker's
+   * message). The runner merges them here, so `next/1` is one blocking read and
+   * `input/1` is the same read restricted to the person. Items are queued, never
+   * dropped: an event that arrives while the person is typing waits its turn.
+   */
+  private chatInbox: Array<{ kind: 'user' | 'message' | 'closed'; term: string }> = [];
+  /** One outstanding host input request at a time, reused across waits. */
+  private chatInputPending: Promise<void> | null = null;
+  private chatInboxWake: (() => void) | null = null;
   private judgeCache = new Map<string, JudgeAnswer[]>();
   /**
    * DML tools currently executing, innermost last.
@@ -622,6 +694,41 @@ export class DMLRunner {
             const message = error instanceof Error ? error.message : String(error);
             this.postProcessResult(String(payload.op), `error(${JSON.stringify(message)})`);
           }
+          break;
+        }
+
+        case 'request_form': {
+          // A form operation. The host owns the registry; the result is posted
+          // back so Prolog/MI keeps the encoding (docs/DML_FORMS.md §7).
+          const payload = (step.payload ?? {}) as Record<string, unknown>;
+          const event = this.handleFormRequest(payload, options.forms);
+          if (event) {
+            yield event;
+            // `update` re-presents too: a rejected submit (or a model editing the
+            // form) must reach the person filling it in, with the errors on it.
+            if ((event.form?.op === 'open' || event.form?.op === 'update') && options.onForm) {
+              await options.onForm(event.form);
+            }
+          }
+          break;
+        }
+
+        case 'wait_form': {
+          const payload = (step.payload ?? {}) as Record<string, unknown>;
+          const formId = String(toJsValue(payload.formId) ?? '');
+          const since = Number(toJsValue(payload.since) ?? 0);
+          const timeoutMs = Number(toJsValue(payload.timeout) ?? 0);
+          this.postFormResult(
+            await this.handleFormWait(formId, since, timeoutMs, options.forms, options.signal),
+          );
+          break;
+        }
+
+        case 'wait_next': {
+          const accept = String(toJsValue((step.payload as Record<string, unknown>)?.accept) ?? 'any');
+          if (this.armChatInput(options)) yield { type: 'input_required', prompt: '' };
+          const item = await this.waitForChatItem(accept, options);
+          this.postNextResult(item.term);
           break;
         }
 
@@ -962,6 +1069,9 @@ export class DMLRunner {
   ): AsyncGenerator<DMLEvent> {
     const rawPayload = payload as Record<string, unknown>;
     const taskDescription = String(toJsValue(rawPayload.taskDescription) ?? '');
+    // `chat` is a conversational turn: tools, no finish, ends when the model
+    // stops calling tools (see agent.ts `conversational`).
+    const conversational = String(toJsValue(rawPayload.mode) ?? '') === 'chat';
     const stepId = `step_${this.stepCounter++}`;
 
     yield { type: 'task_activity', taskState: 'started', taskDescription, taskId: stepId };
@@ -1152,6 +1262,8 @@ export class DMLRunner {
             toolPolicy: options.toolPolicy,
             onModelCall: options.onModelCall,
             onProcessRequest: options.onProcessRequest,
+            forms: options.forms,
+            onForm: options.onForm,
           },
           withheld,
           emitToolCall,
@@ -1165,10 +1277,32 @@ export class DMLRunner {
     const resultPromise = runAgentLoop({
       taskDescription,
       outputVars,
+      conversational,
+      // A chat turn does not end while a form it opened is still unanswered: the
+      // model may have rendered the form and then replied without waiting (it
+      // does not have to know the two-call protocol). Wait for the submission and
+      // hand it back as the next turn's input, so nothing is lost.
+      onIdleTurn: async () => {
+        if (!conversational || !options.forms) return null;
+        const awaiting = options.forms.awaitingForms();
+        if (awaiting.length === 0) return null;
+        const waits = await Promise.all(
+          awaiting.map((record) => options.forms!.wait(record.formId, -1, { signal: options.signal })),
+        );
+        return waits
+          .map((change) => {
+            const values = JSON.stringify(change.values ?? {});
+            return change.action === 'submit'
+              ? `The person submitted the form ${change.formId}: ${values}`
+              : `The person dismissed the form ${change.formId} (action: ${change.action}).`;
+          })
+          .join('\n');
+      },
       memory: effectiveMemory,
       tools: availableTools,
       workspacePath: options.workspacePath,
       environment: this.options.environment,
+      capabilityTool: this.options.capabilityTool,
       resolveMedia: (refs) => this.readMediaRefs(options.workspacePath, refs),
       modelOptions: {
         model: scopedModel?.id ?? this.options.model,
@@ -1240,8 +1374,12 @@ export class DMLRunner {
       llmBackend: this.options.llmBackend,
     });
 
-    // Yield streaming events as they arrive
-    if (this.options.streaming) {
+    // Drain host events as they arrive. This must run even when not streaming:
+    // a tool can block on a host request — a form wait, an `ask_user` — and that
+    // request must reach the consumer *before* the tool returns, or the run
+    // deadlocks. Non-streaming queues no stream/reasoning chunks, so yielding
+    // everything here is equivalent.
+    {
       while (true) {
         // Process any queued events
         while (streamQueue.length > 0) {
@@ -1250,20 +1388,44 @@ export class DMLRunner {
 
         // Check if result is ready
         const raceResult = await Promise.race([
-          resultPromise.then(r => ({ type: 'done' as const, result: r })),
+          resultPromise.then(
+            r => ({ type: 'done' as const, result: r }),
+            (error: unknown) => ({ type: 'failed' as const, error }),
+          ),
           new Promise<{ type: 'stream' }>(resolve => {
             streamResolve = () => resolve({ type: 'stream' });
           }),
         ]);
+
+        if (raceResult.type === 'failed') {
+          const message = raceResult.error instanceof Error
+            ? raceResult.error.message
+            : String(raceResult.error);
+          if (!conversational) throw raceResult.error;
+          // A conversation must survive a failed turn: report it and keep the
+          // memory as it was, so the person can simply type again. Failing the
+          // turn here would end `loop :- input(A), chat(A), loop.`
+          this.postAgentResult(
+            { success: false, outputs: [], variables: {}, messages: [] },
+            preparedMemory.filter((entry) => entry.role === 'system'),
+            message,
+          );
+          return;
+        }
 
         if (raceResult.type === 'done') {
           // Drain remaining queue
           while (streamQueue.length > 0) {
             yield streamQueue.shift()!;
           }
-          
-          // In streaming mode, output was already shown via onStream - don't repeat it
-          // The outputs array is kept for memory/history purposes only
+
+          // In streaming mode, output was already shown via onStream - don't
+          // repeat it. The outputs array is kept for memory/history purposes.
+          if (!this.options.streaming) {
+            for (const output of raceResult.result.outputs) {
+              yield { type: 'output', content: output };
+            }
+          }
 
           const finalizedMemory = [
             ...preparedMemory.filter((message) => message.role === 'system'),
@@ -1284,45 +1446,6 @@ export class DMLRunner {
         }
         // Otherwise continue loop to yield queued stream events
       }
-    } else {
-      // Non-streaming mode - wait for completion
-      const result = await resultPromise;
-
-      // Drain tool_call events from queue (they were queued during agent execution)
-      if (process.env.DEBUG_QUEUE) {
-        console.log('[RUNNER] Non-streaming: streamQueue length before drain:', streamQueue.length);
-        if (streamQueue.length > 0) {
-          console.log('[RUNNER] streamQueue contents:', streamQueue.map(e => `${e.type}:${e.content?.substring(0, 40)}`));
-        }
-      }
-      while (streamQueue.length > 0) {
-        yield streamQueue.shift()!;
-      }
-
-      if (process.env.DEBUG_QUEUE) {
-        console.log('[RUNNER] Non-streaming agent result.outputs:', result.outputs);
-      }
-
-      // Stream any output from the agent
-      for (const output of result.outputs) {
-        yield { type: 'output', content: output };
-      }
-
-      const finalizedMemory = [
-        ...preparedMemory.filter((message) => message.role === 'system'),
-        ...result.messages,
-      ];
-
-      while (streamQueue.length > 0) {
-        yield streamQueue.shift()!;
-      }
-
-      // Update memory with full agent conversation
-      this.currentMemory = finalizedMemory;
-
-      // Post result back to Prolog
-      stepSucceeded = result.success;
-      this.postAgentResult(result, finalizedMemory);
     }
     } finally {
       yield {
@@ -2272,6 +2395,7 @@ export class DMLRunner {
             const memory = this.extractMemoryFromPayload(payload as Record<string, unknown>);
             const preparedMemory = memory;
 
+            const nestedConversational = String(toJsValue((payload as Record<string, unknown>)?.mode) ?? '') === 'chat';
             // Extract reasoning effort and recipe context for nested loops
             const nestedReasoningEffort = String(toJsValue((payload as Record<string, unknown>)?.reasoningEffort) ?? 'none');
             const nestedRecipeContext = String(toJsValue((payload as Record<string, unknown>)?.recipeContext) ?? '');
@@ -2338,11 +2462,13 @@ export class DMLRunner {
               const result = await runAgentLoop({
                 taskDescription,
                 outputVars,
+                conversational: nestedConversational,
                 memory: nestedEffectiveMemory,
                 tools: availableTools,
                 // Withheld to break a call cycle; declared to the model so a
                 // call can be answered with the reason rather than "not found".
                 excludedTools: nestedExcludedTools,
+                capabilityTool: this.options.capabilityTool,
                 modelOptions: {
                   model: this.options.model,
                   provider: this.options.provider,
@@ -2447,7 +2573,46 @@ export class DMLRunner {
             break;
           }
           
+          case 'request_form': {
+            // A DML tool reached a form primitive. Resolve it through the same
+            // host registry as the enclosing run (docs/DML_FORMS.md §4).
+            const formPayload = (payload ?? {}) as Record<string, unknown>;
+            const event = this.handleFormRequest(formPayload, runContext.forms);
+            if (event) {
+              onToolEvent?.(event);
+              // The host interaction must run here too: a form opened by a tool
+              // (`render_form`) is the common case, and without this nothing
+              // prompts and the run just blocks on the wait.
+              if ((event.form?.op === 'open' || event.form?.op === 'update') && runContext.onForm) {
+                await runContext.onForm(event.form);
+              }
+            }
+            break;
+          }
+
+          case 'wait_form': {
+            const formPayload = (payload ?? {}) as Record<string, unknown>;
+            const formId = String(toJsValue(formPayload.formId) ?? '');
+            const since = Number(toJsValue(formPayload.since) ?? 0);
+            const timeoutMs = Number(toJsValue(formPayload.timeout) ?? 0);
+            this.postFormResult(
+              await this.handleFormWait(formId, since, timeoutMs, runContext.forms, runContext.signal),
+            );
+            break;
+          }
+
+          case 'wait_next': {
+            // A conversation turn inside a tool (rare, but the same contract).
+            const accept = String(toJsValue((payload as Record<string, unknown>)?.accept) ?? 'any');
+            const item = await this.waitForChatItem(accept, runContext);
+            this.postNextResult(item.term);
+            break;
+          }
+
           case 'error': {
+            // A tool-engine error (a thrown body, or a tool that returned no
+            // result). Report it as a failure so it is not mistaken for success.
+            onToolEvent?.(buildToolFailureEvent(toolName, {}, new Error(content)));
             return { result: { error: content }, outputs };
           }
           
@@ -2552,7 +2717,7 @@ export class DMLRunner {
     outputs: string[];
     variables: Record<string, unknown>;
     messages: MemoryMessage[];
-  }, fullMemory?: MemoryMessage[]): void {
+  }, fullMemory?: MemoryMessage[], error?: string): void {
     // Keys need to be quoted because they start with uppercase (Var1, Var2, etc.)
     const varsStr = Object.entries(result.variables)
       .map(([k, v]) => `'${k}': ${this.toPrologTerm(v)}`)
@@ -2563,7 +2728,7 @@ export class DMLRunner {
     const fullMemoryStr = this.serializeMemoryMessages(fullMemory ?? []);
 
     this.query(
-      `deepclause_mi:post_agent_result('${this.sessionId}', ${result.success}, vars{${varsStr}}, [${messagesStr}], [${fullMemoryStr}])`
+      `deepclause_mi:post_agent_result('${this.sessionId}', ${result.success}, vars{${varsStr}}, [${messagesStr}], [${fullMemoryStr}], ${this.toPrologTerm(error ?? '')})`
     );
   }
 
@@ -2571,6 +2736,212 @@ export class DMLRunner {
    * Post a process primitive result back to Prolog under a named slot.
    * `term` is a raw Prolog term string, so the caller controls encoding.
    */
+  /**
+   * Apply a form operation and return the `form` event to emit, if any.
+   * The registry owns state; the result is posted back to Prolog as a term so
+   * the MI keeps the encoding, like `request_proc` (docs/DML_FORMS.md §7).
+   */
+  private handleFormRequest(payload: Record<string, unknown>, forms: FormRegistry | undefined): DMLEvent | undefined {
+    if (!forms) {
+      this.postFormResult('error(no_form_host)');
+      return undefined;
+    }
+    const op = String(toJsValue(payload.op) ?? '');
+
+    if (op === 'open') {
+      // A caller (a harness, or a model that designed the form) may leave out the
+      // boilerplate: `version`, and each field's `type`.
+      const spec = normalizeSpec(toJsValue(payload.spec));
+      const opened = forms.open(spec);
+      this.postFormResult(`ok(${this.toPrologTerm({ formId: opened.formId, revision: opened.revision })})`);
+      return {
+        type: 'form',
+        form: { op: 'open', formId: opened.formId, revision: opened.revision, spec, values: opened.values, issues: [] },
+      };
+    }
+
+    const formId = String(toJsValue(payload.formId) ?? '');
+    if (op === 'update') {
+      const patch = (toJsValue(payload.patch) ?? {}) as JsonObject;
+      forms.update(formId, patch);
+      this.postFormResult('ok');
+      const record = forms.get(formId);
+      // `spec` travels with every form event: a renderer that only gets an update
+      // still needs the fields to draw (and to show the issues against them).
+      return record
+        ? { type: 'form', form: { op: 'update', formId, revision: record.revision, spec: record.spec, patch, values: record.values, issues: record.issues } }
+        : undefined;
+    }
+    if (op === 'errors') {
+      const issues = toFormIssues(payload.issues);
+      forms.setIssues(formId, issues);
+      this.postFormResult('ok');
+      const record = forms.get(formId);
+      return record
+        ? { type: 'form', form: { op: 'update', formId, revision: record.revision, spec: record.spec, values: record.values, issues } }
+        : undefined;
+    }
+    if (op === 'close') {
+      forms.close(formId, 'submitted');
+      this.postFormResult('ok');
+      const record = forms.get(formId);
+      return { type: 'form', form: { op: 'close', formId, revision: record?.revision ?? 0, state: 'submitted' } };
+    }
+
+    this.postFormResult(`error(unknown_form_op(${op}))`);
+    return undefined;
+  }
+
+  /** Await a form change and return the result term to post to Prolog. */
+  /**
+   * Wait for a UI change, enforcing the rules the host owns.
+   *
+   * A submit the rules reject comes back as `invalid` with the errors. The DML
+   * side (see `mi_call(await_form(...))`) turns that into "show the errors, wait
+   * again", so neither a harness nor a model ever acts on a refused submit — and
+   * neither has to write the re-show loop.
+   */
+  private async handleFormWait(
+    formId: string,
+    since: number,
+    timeoutMs: number,
+    forms: FormRegistry | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<string> {
+    if (!forms) return 'error(no_form_host)';
+    try {
+      const change = await forms.wait(formId, since, {
+        timeoutMs: timeoutMs > 0 ? timeoutMs : undefined,
+        signal,
+      });
+      // Layer 1: the spec's own constraints (required, enum, min/max, pattern).
+      // Layer 2: the harness's `form_validate/2` domain rules. Both block.
+      const record = forms.get(formId);
+      if (record && shouldValidate(record.spec, change.action)) {
+        const errors = [
+          ...validateValues(record.spec, change.values),
+          ...this.validateFormValues(change.values),
+        ];
+        if (errors.length > 0) {
+          return `ok(${this.toPrologTerm({ ...change, action: 'invalid', errors })})`;
+        }
+      }
+      return `ok(${this.toPrologTerm(change)})`;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return `error(${JSON.stringify(message)})`;
+    }
+  }
+
+  /** Run the harness's `form_validate/2` and return the issue dicts it produced. */
+  private validateFormValues(values: JsonObject): FormIssue[] {
+    const result = this.query(
+      `deepclause_mi:form_validate_values('${this.sessionId}', ${this.toPrologTerm(values)}, Issues)`,
+    );
+    return toFormIssues(result?.Issues);
+  }
+
+  // ---- Conversation inbox (docs/DML_CONVERSATION.md §5) ------------------
+
+  /** Start the host's input request, unless one is already outstanding. */
+  private armChatInput(options: ChatSources): boolean {
+    if (this.chatInputPending) return false;
+    if (!options.onInputRequired) return false;
+    this.chatInputPending = options
+      .onInputRequired('')
+      .then((text) => {
+        this.chatInputPending = null;
+        // No answer means nobody is there: close the inbox, which ends a
+        // conversation loop instead of spinning on empty turns.
+        this.pushChatItem(
+          text === undefined || text === null
+            ? { kind: 'closed', term: 'closed' }
+            : { kind: 'user', term: `user(${this.toPrologTerm(text)})` },
+        );
+      })
+      .catch(() => {
+        this.chatInputPending = null;
+        this.pushChatItem({ kind: 'closed', term: 'closed' });
+      });
+    return true;
+  }
+
+  private pushChatItem(item: { kind: 'user' | 'message' | 'closed'; term: string }): void {
+    this.chatInbox.push(item);
+    const wake = this.chatInboxWake;
+    this.chatInboxWake = null;
+    wake?.();
+  }
+
+  /**
+   * The next item the caller accepts; `user` skips (keeps) worker messages.
+   * A closed inbox is the last resort: a message that arrived is worth more than
+   * "nobody is typing", so it is handed out only when nothing else is queued.
+   */
+  private takeChatItem(accept: string): { kind: 'user' | 'message' | 'closed'; term: string } | undefined {
+    const open = this.chatInbox.findIndex(
+      (item) => item.kind !== 'closed' && (accept === 'any' || item.kind === 'user'),
+    );
+    if (open >= 0) return this.chatInbox.splice(open, 1)[0];
+    const closed = this.chatInbox.findIndex((item) => item.kind === 'closed');
+    return closed >= 0 ? this.chatInbox.splice(closed, 1)[0] : undefined;
+  }
+
+  /**
+   * Wait for the next inbox item: the person's message, or one a worker sent this
+   * session. The mailbox is polled with a short timeout rather than held open, so
+   * a run that ends mid-wait leaves no receiver behind.
+   */
+  private async waitForChatItem(
+    accept: string,
+    options: ChatSources,
+  ): Promise<{ kind: 'user' | 'message' | 'closed'; term: string }> {
+    for (;;) {
+      const ready = this.takeChatItem(accept);
+      if (ready && ready.kind !== 'closed') return ready;
+
+      if (ready?.kind === 'closed') {
+        // The person is gone, but a worker's message may still be in flight: give
+        // the mailbox one last chance so closing the input does not swallow it.
+        await this.pollChatMessage(options);
+        return this.takeChatItem(accept) ?? ready;
+      }
+
+      const wake = new Promise<void>((resolve) => {
+        this.chatInboxWake = resolve;
+      });
+      await Promise.race([wake, this.pollChatMessage(options)]);
+    }
+  }
+
+  /** One mailbox poll, so the inbox sees worker messages as they arrive. */
+  private async pollChatMessage(options: ChatSources): Promise<void> {
+    if (!options.onProcessRequest) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 200));
+      return;
+    }
+    try {
+      const result = await options.onProcessRequest({ op: 'receive', timeout: 200 }, options.signal);
+      if (result.term.startsWith('ok(')) {
+        // `ok(<term>)` — the message a worker sent to this session.
+        this.pushChatItem({ kind: 'message', term: `message(${result.term.slice(3, -1)})` });
+      }
+    } catch {
+      // No process host in this run: the person is the only source.
+      await new Promise<void>((resolve) => setTimeout(resolve, 200));
+    }
+  }
+
+  /** Post the conversation inbox item back to Prolog under its slot. */
+  private postNextResult(term: string): void {
+    this.query(`deepclause_mi:post_next_result('${this.sessionId}', ${term})`);
+  }
+
+  /** Post a form primitive result back to Prolog under the form slot. */
+  private postFormResult(term: string): void {
+    this.query(`deepclause_mi:post_form_result('${this.sessionId}', ${term})`);
+  }
+
   private postProcessResult(key: string, term: string): void {
     const atom = /^[a-z][A-Za-z0-9_]*$/.test(key) ? key : `'${key.replace(/'/g, "''")}'`;
     this.query(`deepclause_mi:post_proc_result('${this.sessionId}', ${atom}, ${term})`);

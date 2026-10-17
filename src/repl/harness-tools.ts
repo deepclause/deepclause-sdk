@@ -133,7 +133,12 @@ export function formatProcessTable(processes: ProcessInfo[], currentVersion?: st
       // before the latest edit — the process is fine, its code is just older.
       const stale = currentVersion && p.harnessVersion && p.harnessVersion !== currentVersion;
       const code = p.harnessVersion ? ` · code ${p.harnessVersion.slice(0, 7)}${stale ? ' (old)' : ''}` : '';
-      return `${pidTermText(p.pid)}  ${p.name}  ${p.state}${error}  mailbox ${p.mailboxDepth}${usage}${code}${activity}`;
+      // `serve(Name, Goal)` labels a process by its goal functor but is reached by
+      // its registered name, so show both: reading only the label is how a live
+      // `test_service` looks like an anonymous `test_service_loop`.
+      const aliases = (p.registeredAs ?? []).filter((name) => name !== p.name);
+      const names = aliases.length > 0 ? ` (as ${aliases.join(', ')})` : '';
+      return `${pidTermText(p.pid)}  ${p.name}${names}  ${p.state}${error}  mailbox ${p.mailboxDepth}${usage}${code}${activity}`;
     })
     .join('\n');
 }
@@ -363,46 +368,16 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
   });
 
   tools.set('reference', {
-    description: 'Read DeepClause language documentation. Topics: "language" (DML reference), "authoring" (authoring guide), "patterns" (harness patterns by use case), "examples" (harness examples), "snippets" (Prolog snippets), "tools" (host tool catalog).',
+    description: 'Read DeepClause language documentation. Topics: "language" (DML reference), "authoring" (authoring guide), "forms" (structured human input), "patterns" (harness patterns by use case), "examples" (harness examples), "snippets" (Prolog snippets), "tools" (host tool catalog).',
     parameters: {
       type: 'object',
-      properties: { topic: stringProp('language | authoring | examples | snippets | tools.') },
+      properties: { topic: stringProp('language | authoring | forms | examples | snippets | tools.') },
       required: ['topic'],
     },
     execute: async (args) => text(await controller.reference(String(args.topic ?? 'language'))),
   });
 
   // ---- Session-scoped subagents (spec §9.1) ------------------------------
-
-  tools.set('spawn', {
-    description: 'Start a session-scoped subagent running a DML goal. Returns immediately with its id; it keeps running after this turn. The goal decides the shape: return when done, loop on receive/2 to wait for messages, or call input/2 to ask the user. Do not await it unless the user asked for its result. For the same worker over a list, use the DML built-ins swarm/3 or pmap/3 (run with execute) instead of many spawn calls.',
-    parameters: {
-      type: 'object',
-      properties: {
-        goal: stringProp('The DML goal to run, e.g. "keeper([])" or "summarise(topic)".'),
-        name: stringProp('Optional readable label (defaults to the goal functor).'),
-        priority: stringProp('foreground | interactive | background (default background).'),
-      },
-      required: ['goal'],
-    },
-    execute: async (args) => {
-      const goal = String(args.goal ?? '').trim();
-      if (!goal) return { error: 'spawn requires a goal' };
-      try {
-        const priority = args.priority === 'foreground' || args.priority === 'interactive'
-          ? args.priority
-          : 'background';
-        const pid = await controller.spawnProcess(goal, {
-          name: typeof args.name === 'string' && args.name.trim() ? args.name.trim() : undefined,
-          priority,
-        });
-        const name = controller.processes().find((p) => p.pid.id === pid.id)?.name ?? goal;
-        return { pid: pidTermText(pid), name };
-      } catch (error) {
-        return { error: error instanceof Error ? error.message : String(error) };
-      }
-    },
-  });
 
   tools.set('ps', {
     description: 'List the session\'s subagents (id, name, state, mailbox depth, usage, and the harness code version each runs). Pass `code` to print the full harness snapshot a subagent is running — the way to check whether a worker is on stale code.',
@@ -432,26 +407,6 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
       try {
         controller.sendProcess(String(args.to ?? ''), String(args.message ?? 'true'));
         return { ok: true };
-      } catch (error) {
-        return { error: error instanceof Error ? error.message : String(error) };
-      }
-    },
-  });
-
-  tools.set('call', {
-    description: 'Send a request to a service subagent and wait for its reply (the library(service) request/reply protocol).',
-    parameters: {
-      type: 'object',
-      properties: {
-        to: stringProp('Process id (proc(...)) or registered name.'),
-        message: stringProp('The request term.'),
-      },
-      required: ['to', 'message'],
-    },
-    execute: async (args) => {
-      try {
-        const reply = await controller.callProcess(String(args.to ?? ''), String(args.message ?? 'true'));
-        return { reply };
       } catch (error) {
         return { error: error instanceof Error ? error.message : String(error) };
       }

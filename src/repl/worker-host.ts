@@ -187,11 +187,14 @@ export class RemoteProcessHost implements ProcessBackend {
     return this.cache;
   }
 
-  async callTerm(to: Pid | string, messageTerm: string, timeoutMs: number): Promise<string> {
-    const result = (await this.request({ type: 'call', requestId: 0, to, message: messageTerm, timeoutMs })) as {
+  async callTerm(to: Pid | string, messageTerm: string, timeoutMs: number, signal?: AbortSignal): Promise<string> {
+    const pending = this.request({ type: 'call', requestId: 0, to, message: messageTerm, timeoutMs }) as Promise<{
       value?: string;
       error?: string;
-    };
+    }>;
+    // The worker keeps its own timeout; aborting here releases the caller (the
+    // turn) immediately instead of blocking it for the full timeout.
+    const result = await raceWithAbort(signal, pending);
     if (result.error) throw new Error(result.error);
     return result.value ?? '';
   }
@@ -361,4 +364,24 @@ export class RemoteProcessHost implements ProcessBackend {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Resolve `promise`, or reject as soon as `signal` aborts. */
+function raceWithAbort<T>(signal: AbortSignal | undefined, promise: Promise<T>): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(new Error('call aborted'));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(new Error('call aborted'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
 }
