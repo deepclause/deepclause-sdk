@@ -164,8 +164,10 @@ export class RemoteProcessHost implements ProcessBackend {
   }
 
   async stop(target: Pid | string, reason: unknown = 'shutdown'): Promise<void> {
-    this.post({ type: 'stop', target, reason });
-    await delay(0);
+    // A request, not a post: the worker applies the stop before replying, so the
+    // refresh below reflects it. (`post` + `delay(0)` raced, and `ps` then showed
+    // "running" for a process the caller had just been told was stopped.)
+    await this.request({ type: 'stop', requestId: 0, target, reason });
     await this.refresh();
   }
 
@@ -255,6 +257,9 @@ export class RemoteProcessHost implements ProcessBackend {
         if (message.event.type === 'started' || message.event.type === 'exited') void this.refresh();
         break;
       case 'spawn_result':
+        this.resolveRpc(message.requestId, message);
+        break;
+      case 'stop_result':
         this.resolveRpc(message.requestId, message);
         break;
       case 'processes_result':
@@ -360,10 +365,6 @@ export class RemoteProcessHost implements ProcessBackend {
     for (const rpc of this.pending.values()) rpc.reject(error);
     this.pending.clear();
   }
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Resolve `promise`, or reject as soon as `signal` aborts. */

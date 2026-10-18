@@ -305,3 +305,52 @@ describe('serve labels the process with the service name', () => {
     expect(formatProcessTable(repl.session.processes(), repl.session.currentHarnessVersion())).toContain('echo  ');
   });
 });
+
+describe('spawn_opt options and the serve arities', () => {
+  /** The first solution's binding for the single output variable (or the error). */
+  async function value(goal: string): Promise<string | undefined> {
+    for await (const event of repl.query(goal)) {
+      if (event.type === 'solution') {
+        const bindings = (event.solution as { bindings?: Array<{ name: string; value: string }> } | undefined)?.bindings;
+        return bindings?.[0]?.value;
+      }
+      if (event.type === 'error') return `error: ${event.error ?? event.content ?? ''}`;
+    }
+    return undefined;
+  }
+
+  it('serve/3 binds the pid, so a caller need not whereis for it', async () => {
+    await define('idle/0', 'idle :- receive(_, 60000).');
+    const pid = await value('serve(svc3, idle, P)');
+    expect(pid).toContain('proc(');
+    expect(repl.session.whereisProcess('svc3')?.id).toBe(repl.session.processes().find((p) => p.name === 'svc3')?.pid.id);
+  });
+
+  it('accepts a list of options and a single option, not only a dict', async () => {
+    await define('idle/0', 'idle :- receive(_, 60000).');
+    await value('spawn_opt(idle, _, [name(from_list), priority(background)])');
+    await value('spawn_opt(idle, _, name(from_term))');
+    const names = repl.session.processes().map((process) => process.name);
+    // Both used to be *silently ignored*: the process kept its goal label.
+    expect(names).toContain('from_list');
+    expect(names).toContain('from_term');
+    expect(repl.session.whereisProcess('from_list')).toBeDefined();
+  });
+
+  it('rejects an option it does not understand instead of ignoring it', async () => {
+    await define('idle/0', 'idle :- receive(_, 60000).');
+    const result = await value('spawn_opt(idle, _, [nonsense(1)])');
+    expect(result).toContain('spawn_opt/3 does not understand the option');
+  });
+
+  it('make a stopped process show as killed as soon as stop() returns', async () => {
+    await define('idle2/0', 'idle2 :- receive(_, 60000).');
+    await value('spawn_opt(idle2, _, name(to_kill))');
+    const pid = repl.session.whereisProcess('to_kill');
+    expect(pid).toBeDefined();
+    await repl.session.stopProcess(pid!);
+    // A fire-and-forget stop used to race the refresh: the tool said ok while
+    // `ps` still said "running".
+    expect(repl.session.processes().find((process) => process.name === 'to_kill')?.state).toBe('killed');
+  });
+});

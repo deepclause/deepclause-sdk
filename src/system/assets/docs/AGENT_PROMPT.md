@@ -387,6 +387,7 @@ A subagent is isolated and asynchronous:
   `answer/1` — never by an output argument. Write `send(Parent, result(...))` in
   the child and `receive` it in the parent (pass `self(Me)` into the child).
 - **It outlives the turn.** Do not busy-wait; report the id and use `ps` later.
+  `serve(Name, Loop, Pid)` binds the pid; `serve/2` only registers the name.
 - **`ps` shows the name you talk to.** A `serve(Name, Goal)` process is labelled
   `Name`, not the goal functor, so `ps`/`/ps` line up with `whereis(Name, P)` and
   `service_call(Name, …)`. `process_info/2` keeps the goal, and its `usage`
@@ -2114,8 +2115,11 @@ collect([Topic|Topics], [Topic-Summary|Rest]) :-
     collect(Topics, Rest).
 ```
 
-`spawn_opt/3` takes a dict of options: `name`, `priority`
-(`foreground`/`interactive`/`background`), `timeout` (ms), and `code`.
+`spawn_opt/3` takes the keys `name`, `priority`
+(`foreground`/`interactive`/`background`), `timeout` (ms) and `code` — as a dict
+(`_{name: worker}`), a list (`[name(worker), priority(background)]`) or a single
+option (`name(worker)`). An option it does not understand is an error; it used to
+be ignored, so the process silently kept its default label.
 
 The goal's shape decides the lifecycle:
 
@@ -2144,9 +2148,11 @@ session; `whereis(Name, Pid)` resolves it. A name is released when the process
 exits. A process's default label is its goal's functor, so `send(keeper, stop)`
 reaches an unregistered `keeper/…` process.
 
-### `serve(+Name, +Goal)` / `service_call(+Target, +Request, -Reply[, +Timeout])` / `service_cast(+Target, +Message)`
+### `serve(+Name, +Goal[, -Pid])` / `service_call(+Target, +Request, -Reply[, +Timeout])` / `service_cast(+Target, +Message)`
 
-`serve/2` is `spawn/2` + `register/2`. `service_call` sends
+`serve/2` is `spawn/2` + `register/2` and binds nothing; `serve/3` also binds the
+pid (what you need to `stop`, `wait` or link it — `spawn/2` already returns one, so
+there is no separate "options" argument). `service_call` sends
 `request(Self, Ref, Request)` and waits for `reply(Ref, Reply)`, ignoring other
 messages; `service_cast` sends without waiting. A service is an ordinary
 `receive` loop:

@@ -283,7 +283,7 @@ in parallel.
   each in its own process, results in input order. Bound the list.
 - **Background a long goal** (`spawn/2`): report the id and carry on; the user
   watches it with `/ps --watch --logs`.
-- **A service** (`serve/2` + `service_call/3`): a long-lived `receive` loop that
+- **A service** (`serve/2` — or `serve/3` for the pid — plus `service_call/3`): a long-lived `receive` loop that
   answers requests; also good for a single-writer or rate-limited step.
 
 A subagent is isolated (private module snapshot) and asynchronous (value

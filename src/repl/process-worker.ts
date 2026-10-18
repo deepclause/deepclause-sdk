@@ -144,6 +144,9 @@ async function handle(
 
     case 'stop':
       await session.stopProcess(message.target, message.reason);
+      // Reply, so the caller can refresh `ps` knowing the state has changed: a
+      // fire-and-forget stop reported `ok` while `/ps` still said "running".
+      port.postMessage({ type: 'stop_result', requestId: message.requestId });
       break;
 
     case 'register':

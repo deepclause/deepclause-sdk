@@ -33,7 +33,7 @@ export interface WorkerInitData {
 export type MainToWorker =
   | { type: 'spawn'; requestId: number; goal: string; options: SpawnOptions; harnessText?: string; harnessVersion?: string }
   | { type: 'send'; to: Pid | string; message: unknown }
-  | { type: 'stop'; target: Pid | string; reason: unknown }
+  | { type: 'stop'; requestId: number; target: Pid | string; reason: unknown }
   | { type: 'register'; name: string; pid: Pid }
   | { type: 'processes'; requestId: number }
   | { type: 'foreground'; requestId: number; request: ProcessRequestPayload; harnessText?: string; harnessVersion?: string }
@@ -48,6 +48,7 @@ export type WorkerToMain =
   | { type: 'fatal'; error: string }
   | { type: 'event'; event: ProcessEvent }
   | { type: 'spawn_result'; requestId: number; pid?: Pid; error?: string }
+  | { type: 'stop_result'; requestId: number }
   | { type: 'processes_result'; requestId: number; processes: ProcessInfo[] }
   | { type: 'foreground_result'; requestId: number; ok: true; result: ProcessRequestResult }
   | { type: 'foreground_result'; requestId: number; ok: false; error: string }

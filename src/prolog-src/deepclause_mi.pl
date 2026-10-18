@@ -4680,7 +4680,7 @@ mi_call(spawn_opt(Goal, Pid, Options), StateIn, StateIn) :-
     get_session_id(SessionId),
     copy_term(Goal, GoalCopy),
     term_string(GoalCopy, GoalText),
-    (   is_dict(Options) -> term_string(Options, OptionsText) ; OptionsText = "{}" ),
+    spawn_options_text(Options, OptionsText),
     engine_yield(request_proc(spawn(GoalText, OptionsText))),
     get_next_signal(SessionId, _),
     session_proc_result(SessionId, spawn, SpawnResult),
@@ -4689,6 +4689,39 @@ mi_call(spawn_opt(Goal, Pid, Options), StateIn, StateIn) :-
     ->  true
     ;   throw(error(process_spawn_failed(SpawnResult), spawn_opt/3))
     ).
+
+%% spawn_options_text(+Options, -Text)
+%% `spawn_opt/3` takes an options **dict** (`_{name: worker}`), but the obvious
+%% Prolog spelling is a list (`[name(worker)]`) or a single option
+%% (`name(worker)`). A non-dict used to be silently ignored, so the process kept
+%% its default label and nothing said so — the agent's `name(tstsvc)` did nothing,
+%% and two of this repo's own tests pass a list and believe they named a worker.
+spawn_options_text(Options, Text) :-
+    (   Options == []
+    ->  Text = "{}"
+    ;   is_dict(Options)
+    ->  term_string(Options, Text)
+    ;   (   is_list(Options) -> List = Options ; List = [Options] ),
+        spawn_option_pairs(List, Pairs),
+        dict_pairs(Dict, _, Pairs),
+        term_string(Dict, Text)
+    ).
+
+spawn_option_pairs([], []).
+spawn_option_pairs([Option|Rest], [Key-Value|Pairs]) :-
+    spawn_option(Option, Key, Value),
+    spawn_option_pairs(Rest, Pairs).
+
+spawn_option(name(V), name, V) :- !.
+spawn_option(priority(V), priority, V) :- !.
+spawn_option(timeout(V), timeout, V) :- !.
+spawn_option(code(V), code, V) :- !.
+spawn_option(Key-V, Key, V) :- atom(Key), !.
+spawn_option(Option, _, _) :-
+    format(atom(Message),
+        'spawn_opt/3 does not understand the option ~w (use name(...), priority(...), timeout(...), code(...), or a dict)',
+        [Option]),
+    throw(error(domain_error(spawn_option, Option), Message)).
 
 %% mi_call(send(+Target, +Message), +StateIn, -StateOut)
 mi_call(send(To, Message), StateIn, StateIn) :-
@@ -4886,13 +4919,32 @@ mi_call(serve(Name, Goal), StateIn, StateIn) :-
     get_next_signal(SessionId, _),
     session_proc_result(SessionId, spawn, SpawnResult),
     retract(session_proc_result(SessionId, spawn, _)),
-    SpawnResult = ok(Pid),
+    % A failed spawn must be an error, not a silent failure: unifying with ok/1
+    % used to fail, so `serve/2` looked like a predicate with no solutions.
+    (   SpawnResult = ok(Pid)
+    ->  true
+    ;   throw(error(process_spawn_failed(SpawnResult), serve/2))
+    ),
     term_string(Name, NameText),
     term_string(Pid, PidText),
     engine_yield(request_proc(register(NameText, PidText))),
     get_next_signal(SessionId, _),
-    session_proc_result(SessionId, register, _),
-    retract(session_proc_result(SessionId, register, _)).
+    session_proc_result(SessionId, register, RegisterResult),
+    retract(session_proc_result(SessionId, register, _)),
+    (   RegisterResult == ok
+    ->  true
+    ;   throw(error(process_register_failed(RegisterResult), serve/2))
+    ).
+
+%% mi_call(serve(+Name, +Goal, -Pid), +StateIn, -StateOut)
+%% `serve/2` registers and binds nothing; the pid is what a caller needs next (to
+%% `wait`, `stop` or link it), and `spawn/2` already binds one. So this is the same
+%% call with the pid out — not a third "options" argument (`serve/3` did not exist,
+%% which is a guess the argument shapes invite).
+mi_call(serve(Name, Goal, Pid), StateIn, StateOut) :-
+    !,
+    mi_call(serve(Name, Goal), StateIn, State1),
+    mi_call(whereis(Name, Pid), State1, StateOut).
 
 %% mi_call(service_cast(+Target, +Message), +StateIn, -StateOut)
 mi_call(service_cast(Target, Message), StateIn, StateIn) :-
@@ -6528,6 +6580,7 @@ is_mi_special_predicate(sleep(_)).
 is_mi_special_predicate(make_ref(_)).
 is_mi_special_predicate(now_ms(_)).
 is_mi_special_predicate(serve(_,_)).
+is_mi_special_predicate(serve(_,_,_)).
 is_mi_special_predicate(service_cast(_,_)).
 is_mi_special_predicate(service_call(_,_,_)).
 is_mi_special_predicate(service_call(_,_,_,_)).

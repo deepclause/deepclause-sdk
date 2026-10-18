@@ -4,6 +4,21 @@
 
 ### Changed
 
+- **`serve/3` binds the pid, and `spawn_opt/3` accepts real options.** `serve/2`
+  registers the name and binds nothing, while `spawn/2` returns a pid — so a
+  harness that needs the pid (to stop/wait) naturally guessed `serve(Name, Goal,
+  Pid)` and got `existence_error(procedure, serve/3)`. That shape now works; the
+  reference no longer invites the guess. `spawn_opt/3`'s options were documented
+  as a dict but a list (`[name(worker)]`) or a single option (`name(worker)`) was
+  **silently ignored**, leaving the process with its default label — two of this
+  repo's own tests did exactly that. All three spellings now work, and an option
+  it does not understand is an error.
+- **`stop` is visible in `ps` as soon as it returns.** In L2 the stop was posted
+  and the process table refreshed after a `delay(0)`, which raced: the tool
+  replied `ok` while `ps` still showed `running`, and the caller had to `exit/2`
+  and sleep to be believed. The stop is now an RPC, so the worker has applied it
+  before the reply.
+
 - **`write/1` reaches the output channel.** It had no handler, so it fell through
   to SWI's `current_output` and its text vanished in the REPL — only `format/2`
   and `writeln/1` were captured. A debugging `write(step)` therefore looked
