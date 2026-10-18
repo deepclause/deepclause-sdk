@@ -105,6 +105,20 @@
 
 ### Fixed
 
+- **`end_turn` no longer lies about what it committed.** `committed` was
+  hard-coded `true`, so a transaction whose *every* edit was refused reported
+  `{committed: true, changed: []}` — which reads as "committed, nothing changed"
+  and hid that the edit never landed (an agent spent four attempts on this).
+  `changed` was also a set diff over predicate indicators, so replacing a
+  predicate — the most common edit — reported `[]`. It is now `+f/1` added,
+  `-f/1` removed, `~f/1` rewritten in place, and `committed` means a version was
+  recorded.
+- **Changing a predicate's arity is documented as two edits.** A predicate is
+  `name/arity`: `define("f/2", …)` while `f/3` exists adds `/2` and leaves `/3`
+  alone, so a harness can look "stuck" at the old arity. The prompt now says to
+  `delete` the old arity in the same transaction, and explains the head/block
+  arity guard.
+
 - **A form's `action` is an atom in DML.** The host sent it as a JSON string, so
   `Change.action == submit` — the documented idiom, and what every example used —
   was silently always false, and a no-model loop fell through and answered

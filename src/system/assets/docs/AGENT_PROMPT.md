@@ -177,6 +177,18 @@ Editing is a **transaction**:
   when a helper looks nondeterministic — e.g. yields many solutions on fresh
   variables because it is missing a commit. Fix such warnings with `once/1` or
   `!` before moving on; they are exactly the predicates that flood `execute`.
+  **Read its result, not your intent.** `committed: false` with `changed: []`
+  means *nothing was recorded* — every edit in the turn was refused (check the
+  per-call results above it) or the block was identical. `changed` is
+  `+f/1` added, `-f/1` removed, `~f/1` rewritten in place; an arity change shows
+  as one `+` and one `-`.
+- **Renaming by arity needs two edits.** A predicate is `name/arity`, so
+  `define("web_sources/2", …)` while `web_sources/3` exists *adds* `/2` and leaves
+  `/3` behind — a second predicate. `define` only replaces the arities its clause
+  block defines, and it refuses a head whose arity differs from the block
+  ("define was told to replace f/2, but the clause block defines f/3"), which is
+  the typo guard. To change an arity: `delete("f/3")` and `define` `f/2` in the
+  same transaction, and update every call site.
 - `rollback` — discard the transaction and restore the last committed module.
 
 Edits are **refused** while no transaction is open, and after `end_turn` you must

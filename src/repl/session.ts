@@ -1917,8 +1917,8 @@ export class DMLSession {
     }
     const before = this.transactionBefore;
     const after = this.predicateList();
-    const changed = this.simplePredicateDiff(before, after);
     const touched = this.editTouched();
+    const changed = this.simplePredicateDiff(before, after, touched);
     this.transactionBefore = null;
     const committed = this.transactionDirty;
     let version: number | undefined;
@@ -1941,7 +1941,11 @@ export class DMLSession {
       warnings.push(...this.probeToolContracts());
       warnings.push(...this.probeDocContracts());
     }
-    return { committed: true, changed, warnings };
+    // `committed` means a version was recorded. It used to be hard-coded `true`,
+    // so a turn whose every edit was refused reported `{committed: true,
+    // changed: []}` — which reads as "committed, nothing changed" and hides that
+    // the edit never landed.
+    return { committed, changed, warnings };
   }
 
   /**
@@ -2097,11 +2101,25 @@ export class DMLSession {
     this.transactionDirty = false;
   }
 
-  private simplePredicateDiff(before: string[], after: string[]): string[] {
+  /**
+   * `+f/1` added, `-f/1` removed, `~f/1` rewritten in place.
+   *
+   * A set diff alone reports `[]` when a predicate is replaced by a new definition
+   * with the same name and arity — the most common edit there is. An agent that
+   * reads `changed` as "did my edit land?" was then told nothing had happened
+   * while the clause block had in fact been swapped. `touched` is what makes the
+   * rewrite visible: the edit tools replace by abolish-and-reassert, so anything
+   * they touched and that still exists was rewritten.
+   */
+  private simplePredicateDiff(before: string[], after: string[], touched: string[] = []): string[] {
     const beforeSet = new Set(before);
     const afterSet = new Set(after);
+    const touchedSet = new Set(touched);
     const changed: string[] = [];
-    for (const predicate of after) if (!beforeSet.has(predicate)) changed.push(`+${predicate}`);
+    for (const predicate of after) {
+      if (!beforeSet.has(predicate)) changed.push(`+${predicate}`);
+      else if (touchedSet.has(predicate)) changed.push(`~${predicate}`);
+    }
     for (const predicate of before) if (!afterSet.has(predicate)) changed.push(`-${predicate}`);
     return changed.sort();
   }
