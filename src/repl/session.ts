@@ -2330,6 +2330,7 @@ export class DMLSession {
     signal?: AbortSignal,
     onEvent?: (event: DMLEvent) => void,
     bindingMode: BindingMode = 'full',
+    _timeoutMs?: number,
   ): Promise<HarnessExecuteResult> {
     return this.executeGoal(goal, limit ?? 5, onEvent, signal, bindingMode);
   }

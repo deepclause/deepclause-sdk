@@ -84,6 +84,8 @@ export interface HarnessToolController {
     signal?: AbortSignal,
     onEvent?: (event: DMLEvent) => void,
     bindingMode?: BindingMode,
+    /** Optional wall-clock bound for host-integrated execute workers (ms). */
+    timeoutMs?: number,
   ): Promise<HarnessExecuteResult>;
   /** ASCII diagram of a skill and its sub-agent/tool calls. */
   visualize(entry?: string, mode?: DiagramMode): Promise<{ message: string; event?: DMLEvent }>;
@@ -276,12 +278,13 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
   });
 
   tools.set('execute', {
-    description: 'Run a DML goal against the scratch harness and return its bindings and output. Use this to test changes before committing.',
+    description: 'Run a DML goal against the scratch harness and return its bindings and output. Use this to test changes before committing. The host kills the scratch worker after the timeout (default 60s).',
     parameters: {
       type: 'object',
       properties: {
         goal: stringProp('The DML goal to run, e.g. "fact(5, F)".'),
         limit: { type: 'integer', description: 'Maximum solutions to collect (default 5).' },
+        timeoutMs: { type: 'integer', description: 'Optional wall-clock bound in milliseconds (default 60000; max 600000). A timed-out goal is killed without wedging the session.' },
         bindings: stringProp(
           "How much of each binding to return. 'full' (default) returns the values as they are; "
           + "'brief' keeps the names and shortens each value, for a goal that binds one large term; "
@@ -297,6 +300,9 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
       context?.signal,
       context?.onEvent,
       readBindingMode(args.bindings),
+      typeof args.timeoutMs === 'number' && args.timeoutMs > 0
+        ? Math.min(Math.round(args.timeoutMs), 600_000)
+        : undefined,
     ),
   });
 
