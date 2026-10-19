@@ -1,8 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-10-19
 
 ### Changed
+
+- **A turn's history is written through, and a resume reads all of it.** The turn
+  record is written at start and events flush every 250 ms (instead of a 200-event
+  batch at turn end), tool results are persisted, the full event history is read
+  rather than the last 200 events, and a session with a transcript but no harness
+  snapshot resumes from the current harness instead of failing.
 
 - **`serve/3` binds the pid, and `spawn_opt/3` accepts real options.** `serve/2`
   registers the name and binds nothing, while `spawn/2` returns a pid — so a
@@ -54,6 +60,16 @@
 
 ### Added
 
+- **Process sessions the embedding controls.** `createProcessSession(pid)` runs a
+  process in a session the host owns (the executor keeps the pid table and
+  mailbox); `beforeProcessStart` / `beforeProcessSpawn` are awaited on both sides
+  of the worker boundary so a child starts from the workspace as it is at spawn
+  time; `ProcessWorkerOptions.localTools` registers tools implemented *inside* the
+  worker (a worker-local Python host), replacing the host proxy of the same name.
+- **`execute` takes an optional `timeoutMs`**, passed through to an embedding host
+  that runs `execute` in a disposable worker (the host applies its own default —
+  60 s in the web app — when omitted).
+
 - **`chat/1` and `input/1`: conversational agents.** `input/1` waits for the
   person's next message with **no prompt** (the embedding UI is already a chat
   interface) and **fails** when there is nobody to talk to, which ends
@@ -104,6 +120,15 @@
   but appear in `listing("tools")` and are offered to `task/N` / `with_tools/2`.
 
 ### Fixed
+
+- **A duplicate `serve(Name, …)` is rejected before a process exists.** It used to
+  spawn first and fail in `register/2`, leaving a live, unreachable service.
+- **An aborted or timed-out execute worker drops its host mailbox waiter**, so a
+  later service reply is not delivered to the dead caller (which then made the
+  *new* caller wait until its own timeout).
+- **A `tool/N` that delegates to a host handler** (`service_call/3`, `form/2`,
+  `exec/2`, …) is no longer reported as undefined by the `end_turn` contract
+  check; those are `mi_call` specials, not session clauses.
 
 - **A stale L2 worker bundle fails loudly.** Worker processes load
   `dist/repl/process-worker.js`, so editing `src` without `npm run build` ran old
