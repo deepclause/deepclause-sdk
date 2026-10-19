@@ -16,7 +16,7 @@ import type { ProcessRequestPayload, ProcessRequestResult } from '../runner.js';
 import type { ProcessBackend } from './process-backend.js';
 import type { DMLSession } from './session.js';
 import { pidKey, type ProcessEvent, type ProcessInfo, type Pid, type SpawnOptions } from './processes.js';
-import type { MainToWorker, WorkerInitData, WorkerToMain } from './worker-protocol.js';
+import { WORKER_PROTOCOL_VERSION, type MainToWorker, type WorkerInitData, type WorkerToMain } from './worker-protocol.js';
 
 /** The slice of `worker_threads.Worker` this host uses (injectable for tests). */
 export interface WorkerLike {
@@ -33,6 +33,18 @@ export interface RemoteProcessHostOptions {
   onEvent?: (event: ProcessEvent) => void;
   workerFactory?: WorkerFactory;
   refreshMs?: number;
+  /**
+   * Awaited before the worker is created. A browser embedding uses this to
+   * publish its latest workspace changes, so the worker's hydrate pulls the
+   * current tree instead of one that is up to a debounce old.
+   */
+  beforeStart?: () => Promise<void>;
+  /**
+   * Awaited before every spawn/foreground request. The worker's own
+   * `beforeSpawn` then pulls the changes, so a child starts from the tree as it
+   * is at spawn time, not as it was when the worker was created.
+   */
+  beforeSpawn?: () => Promise<void>;
 }
 
 interface PendingRpc {
@@ -63,6 +75,8 @@ export class RemoteProcessHost implements ProcessBackend {
   private readonly onEvent?: (event: ProcessEvent) => void;
   private readonly workerFactory: WorkerFactory;
   private readonly refreshMs: number;
+  private readonly beforeStart?: () => Promise<void>;
+  private readonly beforeSpawn?: () => Promise<void>;
 
   private worker?: WorkerLike;
   private ready = false;
@@ -81,6 +95,8 @@ export class RemoteProcessHost implements ProcessBackend {
     this.onEvent = options.onEvent;
     this.workerFactory = options.workerFactory ?? defaultWorkerFactory;
     this.refreshMs = options.refreshMs ?? 400;
+    this.beforeStart = options.beforeStart;
+    this.beforeSpawn = options.beforeSpawn;
   }
 
   async start(): Promise<void> {
@@ -89,6 +105,7 @@ export class RemoteProcessHost implements ProcessBackend {
     this.snapshotTexts.set(snapshot.version, snapshot.text);
     this.lastSnapshotVersion = snapshot.version;
     const init: WorkerInitData = {
+      protocolVersion: WORKER_PROTOCOL_VERSION,
       workspacePath: this.session.workspacePathValue(),
       sessionId: `${this.session.getSessionId()}__w`,
       harnessText: snapshot.text,
@@ -104,6 +121,7 @@ export class RemoteProcessHost implements ProcessBackend {
       this.onReady = resolve;
       this.onFatal = reject;
     });
+    await this.beforeStart?.();
     const worker = this.workerFactory(init);
     this.worker = worker;
     worker.on('message', (message) => this.handleMessage(message));
@@ -142,6 +160,7 @@ export class RemoteProcessHost implements ProcessBackend {
   // ---- ProcessBackend -----------------------------------------------------
 
   async spawn(goal: string, options: SpawnOptions = {}): Promise<Pid> {
+    await this.beforeSpawn?.();
     const result = (await this.request({
       type: 'spawn',
       requestId: 0,
@@ -202,6 +221,7 @@ export class RemoteProcessHost implements ProcessBackend {
   }
 
   async foregroundHandle(request: ProcessRequestPayload, _signal?: AbortSignal): Promise<ProcessRequestResult> {
+    await this.beforeSpawn?.();
     const result = (await this.request({
       type: 'foreground',
       requestId: 0,

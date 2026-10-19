@@ -187,12 +187,42 @@ export interface DMLSessionOptions {
   autoLoadHarness?: boolean;
   /** Process execution mode: worker (L2, default) or inline (L1). */
   execution?: 'inline' | 'worker';
+  /**
+   * Awaited before an L2 process worker is created. The host uses it to flush
+   * the workspace so the worker hydrates the current tree.
+   */
+  beforeProcessStart?: () => Promise<void>;
+  /**
+   * Awaited before every spawn/foreground request, on both sides of the worker
+   * boundary. The parent publishes, the worker pulls, so the child starts from
+   * the workspace as it is at spawn time.
+   */
+  beforeProcessSpawn?: () => Promise<void>;
+  /**
+   * Run a process in a session controlled by the embedding (e.g. one Web
+   * Worker per process). The returned session must implement `executeGoal`
+   * and `dispose`; the process executor still owns the pid table and mailbox.
+   */
+  createProcessSession?: (pid: Pid) => Promise<{ session: ProcessSession; loadError?: string }>;
 }
 
 /** Binds a running process to the host primitives it may call (spec §4). */
 export interface ProcessBinding {
   pid: Pid;
   handle(request: ProcessRequestPayload, signal?: AbortSignal): Promise<ProcessRequestResult>;
+}
+
+/** The child-session surface a process executor needs. */
+export interface ProcessSession {
+  executeGoal(
+    goal: string,
+    limit?: number,
+    onEvent?: (event: import('../types.js').DMLEvent) => void,
+    signal?: AbortSignal,
+    bindingMode?: BindingMode,
+    process?: ProcessBinding,
+  ): Promise<HarnessExecuteResult>;
+  dispose(): Promise<void>;
 }
 
 export interface DMLQueryOptions {
@@ -496,6 +526,24 @@ export class DMLSession {
         }
       }
     }
+    // Creating a session (or loading a harness) can move SWI's cwd away from the
+    // workspace, so reassert it before any goal runs — with the **mounted** path.
+    // `mountWorkspace` puts every workspace at `/workspace` and points both
+    // Emscripten's cwd and SWI's there; the host path is not in the WASM filesystem,
+    // so asserting *that* throws (harmlessly in the main thread, but it means the
+    // reassert never happened where it was needed).
+    //
+    // `working_directory/2` is process-global, so this is only meaningful while a
+    // process has one mount — true for every session today, since the mount itself
+    // is process-global. Query with `.once()`: `prolog.call()` returns an
+    // unexecuted query and wedges the next one.
+    if (options.workspacePath) {
+      try {
+        swipl.prolog.query("working_directory(_, '/workspace').").once();
+      } catch {
+        /* non-fatal: absolute paths still resolve */
+      }
+    }
     return session;
   }
 
@@ -566,6 +614,8 @@ export class DMLSession {
         const host = new RemoteProcessHost(this, {
           onEvent,
           workerFactory: this.openOptions.processWorkerFactory,
+          beforeStart: this.openOptions.beforeProcessStart,
+          beforeSpawn: this.openOptions.beforeProcessSpawn,
         });
         await host.start();
         this.processBackend = host;
@@ -728,6 +778,22 @@ export class DMLSession {
   }
 
   /** Resolve a process primitive for this (non-process) foreground run. */
+  /** Handle a process primitive on behalf of a remote child session. */
+  async handleProcessRequest(
+    pid: Pid,
+    request: ProcessRequestPayload,
+    signal?: AbortSignal,
+  ): Promise<ProcessRequestResult> {
+    const backend = await this.ensureProcessBackend();
+    const candidate = backend as unknown as {
+      handleRequest?: (pid: Pid, request: ProcessRequestPayload, signal?: AbortSignal) => Promise<ProcessRequestResult>;
+    };
+    if (typeof candidate.handleRequest !== 'function') {
+      throw new Error('this process backend cannot service remote child requests');
+    }
+    return candidate.handleRequest(pid, request, signal);
+  }
+
   async handleForeground(request: ProcessRequestPayload, signal?: AbortSignal): Promise<ProcessRequestResult> {
     return (await this.ensureProcessBackend()).foregroundHandle(request, signal);
   }
@@ -826,7 +892,11 @@ export class DMLSession {
    * (a swarm item reports `failed`, say), whereas throwing would kill the process
    * before it can report and leave a waiting parent hanging.
    */
-  async createProcessSession(): Promise<{ session: DMLSession; loadError?: string }> {
+  async createProcessSession(pid?: Pid): Promise<{ session: ProcessSession; loadError?: string }> {
+    if (this.openOptions.createProcessSession) {
+      if (!pid) throw new Error('createProcessSession requires a pid');
+      return this.openOptions.createProcessSession(pid);
+    }
     const text = this.processSnapshotFor().text;
     const child = await DMLSession.open({
       ...this.openOptions,

@@ -435,10 +435,10 @@ question, write it in that final message.
 
 # Writing files and images
 
-- `write_file(path, content)` writes any workspace file (creating parent
-  directories). The content is an ordinary string, so use it for SVG, JSON, or
-  scripts instead of building them inside a shell command. Then
-  `show_image(path)` displays an image.
+- `write_file(path, content)` writes any workspace file. It does **not** create
+  parent directories; call `make_directory_path/1` first. The content is an
+  ordinary string, so use it for SVG, JSON, or scripts instead of building them
+  inside a shell command. Then `show_image(path)` displays an image.
 - From DML, `output(media("path.png"))` shows a workspace image and
   `output(media{svg: Svg})` shows inline SVG. `save_image(Media, "out.svg")`
   writes a reference to a file.

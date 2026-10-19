@@ -10,6 +10,15 @@ import type { ProcessEvent, ProcessInfo, Pid, SpawnOptions } from './processes.j
 import type { ProcessRequestPayload, ProcessRequestResult } from '../runner.js';
 import type { ToolPolicy } from '../types.js';
 
+/**
+ * Bumped whenever the worker's expectations of the main change (message shapes,
+ * init fields). The worker loads from `dist`, so editing `src` without
+ * `npm run build` runs old worker code against a new main; the symptom used to be
+ * silently empty child sessions rather than an error. The handshake in
+ * `startProcessWorker` turns that into a clear failure.
+ */
+export const WORKER_PROTOCOL_VERSION = 2;
+
 /** One tool descriptor sent to the worker so it can build a proxy. */
 export interface WorkerToolDescriptor {
   name: string;
@@ -18,6 +27,8 @@ export interface WorkerToolDescriptor {
 }
 
 export interface WorkerInitData {
+  /** Must equal `WORKER_PROTOCOL_VERSION`; a mismatch means a stale worker build. */
+  protocolVersion?: number;
   workspacePath?: string;
   sessionId: string;
   harnessText: string;

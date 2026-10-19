@@ -105,6 +105,21 @@
 
 ### Fixed
 
+- **A stale L2 worker bundle fails loudly.** Worker processes load
+  `dist/repl/process-worker.js`, so editing `src` without `npm run build` ran old
+  worker code against a new main. The symptom was a child session with *no
+  harness* (`existence_error` inside it), which reads like the snapshot was lost.
+  `WORKER_PROTOCOL_VERSION` is now sent in the init data and checked in the
+  worker: a mismatch fails the spawn with
+  `stale L2 process worker: protocol 2 vs 1 — run 'npm run build'`.
+- **The workspace cwd reassert uses the mounted path.** Creating a session (or
+  loading a harness) can move SWI's cwd away from `/workspace`, so it is
+  reasserted when a session opens — but with `/workspace` (where `mountWorkspace`
+  mounts it), not the host path, which is not in the WASM filesystem and made the
+  call throw for nothing. It also runs the query (`.once()`) instead of leaving
+  an unexecuted `prolog.call()` behind, which wedged the *next* query and
+  surfaced far away as `Failed to load code`.
+
 - **`end_turn` no longer lies about what it committed.** `committed` was
   hard-coded `true`, so a transaction whose *every* edit was refused reported
   `{committed: true, changed: []}` — which reads as "committed, nothing changed"

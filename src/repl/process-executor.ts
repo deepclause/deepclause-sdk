@@ -146,7 +146,7 @@ export class DmlProcessExecutor implements ProcessBackend {
   }
 
   private async run(goal: string, ctx: ProcessContext): Promise<unknown> {
-    const { session: child, loadError } = await this.parent.createProcessSession();
+    const { session: child, loadError } = await this.parent.createProcessSession(ctx.pid);
     if (loadError) {
       // Surface a broken snapshot instead of letting every call fail with a
       // puzzling existence error.

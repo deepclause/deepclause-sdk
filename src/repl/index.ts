@@ -70,6 +70,12 @@ export interface HarnessReplOptions {
   capabilityTool?: string;
   /** Factory for the L2 process worker (default: `worker_threads`; browser: a Web Worker). */
   processWorkerFactory?: import('./worker-host.js').WorkerFactory;
+  /** Awaited before the L2 process worker is created (e.g. flush the workspace). */
+  beforeProcessStart?: () => Promise<void>;
+  /** Awaited before every spawn/foreground request (parent publishes, worker pulls). */
+  beforeProcessSpawn?: () => Promise<void>;
+  /** Run processes in embedding-controlled sessions (e.g. one worker per process). */
+  createProcessSession?: import('./session.js').DMLSessionOptions['createProcessSession'];
   /** Human-in-the-loop channel for DML `input/2` / `exec(ask_user(...))`. */
   askUser?: (prompt: string, options?: string[]) => Promise<{ answer: string } | { cancelled: true }>;
   /** Called when a form opens (docs/DML_FORMS.md). */
@@ -257,6 +263,9 @@ export async function createHarnessRepl(options: HarnessReplOptions): Promise<Ha
     executionBackend: options.executionBackend,
     capabilityTool: options.capabilityTool,
     processWorkerFactory: options.processWorkerFactory,
+    beforeProcessStart: options.beforeProcessStart,
+    beforeProcessSpawn: options.beforeProcessSpawn,
+    createProcessSession: options.createProcessSession,
     askUser: options.askUser,
     history: options.history,
     harnessName: options.harness,

@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest';
 import { RemoteProcessHost, type WorkerLike } from '../src/repl/worker-host.js';
 import type { DMLSession } from '../src/repl/session.js';
 import type { ProcessInfo, Pid } from '../src/repl/processes.js';
-import type { MainToWorker, WorkerInitData, WorkerToMain } from '../src/repl/worker-protocol.js';
+import { WORKER_PROTOCOL_VERSION, type MainToWorker, type WorkerInitData, type WorkerToMain } from '../src/repl/worker-protocol.js';
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -121,11 +121,20 @@ function stubSession(log: { tools: string[]; models: number; inputs: string[] })
   } as unknown as DMLSession;
 }
 
-async function startHost(): Promise<{ host: RemoteProcessHost; worker: FakeWorker; log: { tools: string[]; models: number; inputs: string[] } }> {
+async function startHost(): Promise<{
+  host: RemoteProcessHost;
+  worker: FakeWorker;
+  log: { tools: string[]; models: number; inputs: string[]; init?: WorkerInitData };
+}> {
   const worker = new FakeWorker();
-  const log = { tools: [] as string[], models: 0, inputs: [] as string[] };
+  const log: { tools: string[]; models: number; inputs: string[]; init?: WorkerInitData } = {
+    tools: [], models: 0, inputs: [],
+  };
   const host = new RemoteProcessHost(stubSession(log), {
-    workerFactory: (_init: WorkerInitData) => worker,
+    workerFactory: (init: WorkerInitData) => {
+      log.init = init;
+      return worker;
+    },
     refreshMs: 20,
   });
   await host.start();
@@ -133,6 +142,15 @@ async function startHost(): Promise<{ host: RemoteProcessHost; worker: FakeWorke
 }
 
 describe('RemoteProcessHost', () => {
+  it('sends the protocol version, so a stale worker build fails loudly', async () => {
+    const { host, log } = await startHost();
+    await host.spawn('keeper', { name: 'keeper' });
+    // The worker checks this against its own compiled constant: a `src` edit
+    // without `npm run build` runs old worker code, which used to surface as an
+    // empty child session rather than an error.
+    expect(log.init?.protocolVersion).toBe(WORKER_PROTOCOL_VERSION);
+  });
+
   it('spawns through the worker and caches the process table', async () => {
     const { host, worker } = await startHost();
     const pid = await host.spawn('keeper', { name: 'keeper' });
@@ -146,6 +164,27 @@ describe('RemoteProcessHost', () => {
     expect(host.whereis('keeper')?.id).toBe('p1');
     await host.shutdown();
     expect(worker.sent.some((message) => message.type === 'dispose')).toBe(true);
+  });
+
+  it('awaits beforeSpawn before sending a spawn', async () => {
+    const worker = new FakeWorker();
+    const order: string[] = [];
+    const host = new RemoteProcessHost(stubSession({ tools: [], models: 0, inputs: [] }), {
+      workerFactory: () => worker,
+      refreshMs: 20,
+      beforeSpawn: async () => {
+        order.push('before');
+      },
+    });
+    await host.start();
+    const post = worker.postMessage.bind(worker);
+    worker.postMessage = (message: MainToWorker) => {
+      if (message.type === 'spawn') order.push('spawn');
+      post(message);
+    };
+    await host.spawn('probe');
+    expect(order).toEqual(['before', 'spawn']);
+    await host.shutdown();
   });
 
   it('forwards foreground primitives and calls', async () => {

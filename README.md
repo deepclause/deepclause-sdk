@@ -723,6 +723,13 @@ npm test          # vitest
 npm run repl      # deepclause repl via tsx
 ```
 
+**`npm run build` is required for the default process backend.** L2 (worker)
+processes run `dist/repl/process-worker.js`, so editing `src` without rebuilding
+runs old worker code against a new main — the symptom used to be child sessions
+that silently had no harness. `WORKER_PROTOCOL_VERSION` now fails that loudly
+(`stale L2 process worker: … run 'npm run build'`). The tests that need it
+(`repl-process-worker-child`) skip themselves when `dist` is absent.
+
 See [`docs/`](docs/): [`SUBAGENTS.md`](docs/SUBAGENTS.md) (subagents and
 concurrency), [`STATUS.md`](docs/STATUS.md) (current state),
 [`REPL.md`](docs/REPL.md),

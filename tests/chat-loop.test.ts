@@ -173,8 +173,9 @@ describe('next/1: one inbox for the person and a worker', () => {
         return reply('event handled');
       },
     };
-    // Nobody types: the inbox closes at once, and the closed-inbox poll still
-    // picks up the worker's message rather than swallowing it.
+    // The child must see the harness: this runs on the default backend (L2), so
+    // it also covers the worker snapshot. (`repl-process-spawn.test.ts` pins
+    // `execution: 'inline'`, so nothing else exercises a worker-spawned child.)
     repl = await createHarnessRepl({
       workspacePath: workspace,
       model: 'test-model',
