@@ -1641,9 +1641,13 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   // Extract assistant text responses from the conversation
   const assistantTextResponses: string[] = [];
   for (const m of messages) {
-    if (m.role === 'assistant' && typeof m.content === 'string' && m.content.trim()) {
-      assistantTextResponses.push(m.content);
-    }
+    // An AI-SDK assistant message carries its text as content *parts*
+    // (`[{type:'text', text:'…'}]`), not a string. Skipping those dropped every
+    // assistant reply from the memory a conversation hands to the next turn (and
+    // left `chat/2` binding an empty string).
+    if (m.role !== 'assistant') continue;
+    const text = messageText(m.content);
+    if (text.trim()) assistantTextResponses.push(text);
   }
   
   // Add result to persistent messages
@@ -1708,6 +1712,17 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     variables,
     messages: persistentMessages,
   };
+}
+
+/** An assistant message's text: a string, or its `{type: 'text'}` content parts. */
+function messageText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((part) => (part && typeof part === 'object' && (part as { type?: unknown }).type === 'text'
+      ? String((part as { text?: unknown }).text ?? '')
+      : ''))
+    .join('');
 }
 
 function getResponseMessages(response: unknown): ResponseMessage[] {
