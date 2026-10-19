@@ -361,6 +361,12 @@ export class LocalProcessHost {
 
   spawn(goal: string, options: SpawnOptions = {}, body?: ProcessBody): Pid {
     if (this.shutdownRequested) throw new Error('process host is shut down');
+    // A named process is unique. Reject the duplicate before creating a record;
+    // `serve/2` used to spawn first and fail in register/2, leaving a live,
+    // unreachable service behind.
+    if (options.name && this.names.has(options.name)) {
+      throw new Error(`name already registered: ${options.name}`);
+    }
     // The limit bounds *live* processes, not cumulative spawns: a finished
     // process must not consume a slot forever (a session that spawned 16 things
     // could otherwise never fan out again).
