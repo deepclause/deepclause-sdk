@@ -90,6 +90,37 @@ describe('suspend/1', () => {
     expect(events.find((event) => event.type === 'suspend')?.suspend?.continuation).toBe('loop(2)');
   });
 
+  it('records the turn memory, and resumes with it', async () => {
+    repl = await createHarnessRepl({
+      workspacePath: workspace, model: 'test-model', provider: 'openai', history: {},
+    });
+    await commit(repl, 'entry/0', 'entry :- system("Persona A."), user("first message"), suspend(entry).');
+    await run(repl, 'entry');
+
+    const sessionId = repl.session.getSessionId();
+    const record = JSON.parse(
+      await fs.readFile(
+        path.join(workspace, '.deepclause/repl/sessions', sessionId, 'suspend.json'),
+        'utf8',
+      ),
+    ) as { memory: string };
+
+    // Prolog term text the MI can load back — not `String(list)`.
+    expect(record.memory).toContain('message{role: system');
+    expect(record.memory).toContain('Persona A.');
+    expect(record.memory).toContain('first message');
+    expect(record.memory).not.toContain('[object Object]');
+
+    await repl.dispose();
+    repl = await createHarnessRepl({
+      workspacePath: workspace, model: 'test-model', provider: 'openai',
+      history: {}, sessionId, resume: true,
+    });
+    const memory = repl.session.harnessMemory().map((message) => `${message.role}:${message.content}`);
+    expect(memory.join('\n')).toContain('Persona A.');
+    expect(memory.join('\n')).toContain('first message');
+  });
+
   it('refuses to suspend while a stream is open', async () => {
     repl = await createHarnessRepl({
       workspacePath: workspace, model: 'test-model', provider: 'openai', history: {},

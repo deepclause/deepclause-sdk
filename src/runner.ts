@@ -639,7 +639,13 @@ export class DMLRunner {
         case 'suspend': {
           const payload = (step.payload ?? {}) as Record<string, unknown>;
           const continuation = String(toJsValue(payload.continuation) ?? '');
-          const memory = String(toJsValue(payload.memory) ?? '');
+          // The memory arrives as Prolog dicts; serialize it as Prolog text, the
+          // form the MI can load back. `String(list)` produced
+          // "[object Object],[object Object]", which then failed to load — so a
+          // suspended turn used to lose the whole conversation.
+          // Bracketed: the record is the *term text* a resume loads back
+          // (`repl_set_memory/3`), so it must be a list, not a bare sequence.
+          const memory = `[${this.serializeMemoryMessages(this.extractMemoryFromPayload(payload))}]`;
           if (options.onSuspend) await options.onSuspend({ continuation, memory });
           yield { type: 'suspend', suspend: { continuation, memory } };
           break;

@@ -22,6 +22,16 @@
   the interpreter's five control clauses so the continuation is data) — that part
   is not built.
 
+### Fixed
+
+- **A suspension no longer loses the conversation.** The record's `memory` was
+  `String(list)` of the decoded Prolog memory — `"[object Object],[object
+  Object]"` — which then failed to load when the host made it the session's
+  harness memory, so resuming a suspended turn dropped every `system/1`,
+  `user/1` and `task/N` message. The memory is now serialized as the Prolog term
+  text a resume loads back (`[message{role: …, content: …}]`), in the record and
+  in `harness.json`.
+
 ## 0.3.0 - 2026-10-19
 
 ### Changed
