@@ -676,6 +676,17 @@ export class ReplRenderer implements ReplEventRenderer {
       case 'answer':
         this.writeFrameText(prefix, event.content ?? '', ANSI.answer, false);
         break;
+      case 'suspend': {
+        // A clean stop, not a failure: say where it stopped and how to continue.
+        const continuation = event.suspend?.continuation ?? '';
+        this.writeFrameText(
+          prefix,
+          `⏸ suspended at a safe point — continue with: ${continuation || '(no continuation)'}`,
+          ANSI.answer,
+          false,
+        );
+        break;
+      }
       case 'model_call':
         this.renderModelCall(event, prefix);
         break;

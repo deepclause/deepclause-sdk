@@ -407,6 +407,7 @@ export class DMLSession {
   private static readonly PROCESS_LOG_LIMIT = 500;
   /** Service declarations replayed from the session record (resume only). */
   private recordedServices: Array<Record<string, unknown>> = [];
+  private pendingSuspensionValue?: { continuation: string; memory?: string; at?: string };
   /** Monotonic per-session turn counter used by history records. */
   private turnCounter = 0;
   private historyWarned = false;
@@ -484,6 +485,7 @@ export class DMLSession {
       );
       snapshot = await store.readSessionHarness();
       session.recordedServices = await store.readServiceRecords();
+      session.pendingSuspensionValue = (await store.readSuspendRecord()) ?? undefined;
       // A session can have a transcript but no harness snapshot (older builds,
       // or a turn interrupted before its first commit). Resume it from the
       // current harness instead of refusing to open it; the transcript reader
@@ -665,6 +667,50 @@ export class DMLSession {
   /** Service declarations replayed from the session record (resume only). */
   recordedProcesses(): Array<Record<string, unknown>> {
     return this.recordedServices;
+  }
+
+  /**
+   * A turn stopped by `suspend/1`: where it stopped and the goal that continues
+   * it. Set on resume, so a host can run the continuation once the harness and
+   * memory are back.
+   */
+  pendingSuspension(): { continuation: string; memory?: string; at?: string } | undefined {
+    return this.pendingSuspensionValue;
+  }
+
+  /** Forget the pending suspension (after resuming it, or deliberately dropping it). */
+  async clearSuspension(): Promise<void> {
+    this.pendingSuspensionValue = undefined;
+    await this.history?.clearSuspendRecord();
+  }
+
+  /**
+   * Persist a suspension: the continuation, the memory it stopped with, and the
+   * module version it was running. The harness snapshot is written too, so the
+   * resumed session starts from exactly this module + memory.
+   */
+  private async handleSuspend(payload: { continuation: string; memory?: string }): Promise<void> {
+    if (!this.history) return;
+    try {
+      if (payload.memory) {
+        // The turn's threaded memory is the authoritative one at the stop; make it
+        // the session's, so `harness.json` and the resumed state agree.
+        this.prologQuery(
+          `deepclause_mi:repl_set_memory('${this.sessionId}', harness, ${payload.memory})`
+        );
+      }
+      await this.history.writeSuspendRecord({
+        continuation: payload.continuation,
+        memory: payload.memory,
+        turn: this.turnCounter,
+        moduleVersion: this.history.currentVersion ? String(this.history.currentVersion) : undefined,
+        moduleHash: this.history.currentHash,
+      });
+      await this.persistSessionHarness(this.history.currentVersion);
+      this.pendingSuspensionValue = { continuation: payload.continuation, memory: payload.memory };
+    } catch (error) {
+      this.warnHistory(error);
+    }
   }
 
   /**
@@ -2383,6 +2429,9 @@ export class DMLSession {
         ? (prompt) => this.requireInput(prompt)
         : async () => undefined,
       onForm: this.formHandler,
+      // A turn that called suspend/1 stops here; the record is what --session
+      // resumes from (docs/DML_REPL_SUSPEND_RESUME.md).
+      onSuspend: (payload) => this.handleSuspend(payload),
       signal: options.signal,
       onModelCall: () => this.reserveModelCall(),
       // A run that is not itself a process resolves primitives through the

@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **A turn can suspend itself and be resumed.** `suspend(+Continuation)` stops a
+  turn at a safe point — the continuation is the goal that resumes it, e.g.
+  `suspend(loop(State))` — and the host records that goal, the turn's memory and
+  the module version in `sessions/<id>/suspend.json`. `deepclause repl --session
+  <id>` runs the continuation after restoring the harness and memory; the record
+  is cleared first, so suspending again writes a fresh position. The turn ends
+  cleanly (like `answer/1`), renders as `⏸ suspended at a safe point`, and a
+  suspended goal is no longer reported as `false.`
+- **A suspension never leaves a half-written file.** A per-session ledger tracks
+  open streams (`open/3,4` … `close/1`) and open forms (`form/2` … `close_form/1`),
+  and `suspend/1` refuses with `cannot suspend while holding …`. A suspension is
+  always *between* host calls, never inside a `task/N`, `exec/2` or form wait, and
+  a run closes whatever an aborted turn left open before it starts.
+- `docs/DML_REPL_SUSPEND_RESUME.md` documents what ships, the guard, what is
+  *not* carried, and the design for mid-execution suspension (defunctionalising
+  the interpreter's five control clauses so the continuation is data) — that part
+  is not built.
+
 ## 0.3.0 - 2026-10-19
 
 ### Changed

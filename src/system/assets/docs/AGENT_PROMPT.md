@@ -416,6 +416,12 @@ Patterns:
 - **Background a long goal** with `spawn(Goal)`. If you need the result, have the
   goal `send(Parent, result(...))` and `receive` it, or make it a service. A
   one-shot subagent's terminal result can also be read with `wait(Pid, ok(Text))`.
+- **A turn can suspend itself** at a safe point and be resumed later:
+  `suspend(loop(State))` stops the turn, the host records the continuation and the
+  memory, and `deepclause repl --session <id>` runs it again. It refuses while the
+  turn holds an open stream or form — close it first — and it is always between
+  host calls, never inside a `task/N`/`exec/2`. Use it for a long conversation or
+  service loop whose state is already the loop's argument.
 - **A service** is `serve(Name, Loop)` where `Loop` handles
   `request(From, Ref, Request)` by `send(From, reply(Ref, Reply))`, then recurses.
   Call it with `service_call(Name, Request, Reply)`.
@@ -2196,6 +2202,28 @@ fails if any item failed.
 swarm(summarise_file, Files, Results, 4),
 findall(S, member(ok(S), Results), Summaries).
 ```
+
+### `suspend(+Continuation)`
+
+Stop the turn at a **safe point** and let the host persist where to continue.
+`Continuation` is the goal that resumes — the entry point of the loop whose state
+is its argument:
+
+```prolog
+loop(N) :-
+    (   N >= 2
+    ->  suspend(loop(N))          % stop; a later --session resumes with loop(N)
+    ;   M is N + 1, loop(M)
+    ).
+```
+
+The turn ends cleanly (like `answer/1`), the host records the continuation and the
+memory, and `deepclause repl --session <id>` runs it. **A turn cannot suspend while
+holding something a snapshot cannot carry**: an open stream (`open/3,4` … `close/1`)
+or an open form (`form/2` … `close_form/1`) makes it fail with
+`cannot suspend while holding …`. A suspension is always *between* host calls —
+never inside a `task/N`, `exec/2` or form wait — and the program chooses the point.
+See [`docs/DML_REPL_SUSPEND_RESUME.md`](../../../../docs/DML_REPL_SUSPEND_RESUME.md).
 
 ### `wait(+Pid[, -Outcome])`
 

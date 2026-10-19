@@ -298,6 +298,14 @@ export interface FormEventPayload {
   source?: { name?: string; pid?: string };
 }
 
+/** A turn stopped at a safe point, with the goal that resumes it. */
+export interface SuspendEventPayload {
+  /** The goal to run to continue where the turn stopped, e.g. `loop(3)`. */
+  continuation: string;
+  /** Turn memory at the stop, so a resume continues the same conversation. */
+  memory?: string;
+}
+
 /** What a consumer sends back when the user acts on a form. */
 export interface FormSubmitPayload {
   action: string;
@@ -307,7 +315,7 @@ export interface FormSubmitPayload {
 }
 
 export interface DMLEvent extends FrameEventMeta {
-  type: 'output' | 'log' | 'diagnostic' | 'answer' | 'input_required' | 'error' | 'finished' | 'stream' | 'reasoning' | 'tool_call' | 'model_call' | 'usage' | 'memory_compaction' | 'task_activity' | 'solution' | 'meta_result' | 'media' | 'form';
+  type: 'output' | 'log' | 'diagnostic' | 'answer' | 'input_required' | 'error' | 'finished' | 'stream' | 'reasoning' | 'tool_call' | 'model_call' | 'usage' | 'memory_compaction' | 'task_activity' | 'solution' | 'meta_result' | 'media' | 'form' | 'suspend';
   content?: string;
   /**
    * Severity of a `log` event. Prolog's own stderr arrives this way; `warning`
@@ -321,6 +329,8 @@ export interface DMLEvent extends FrameEventMeta {
   media?: { path?: string; mimeType: string; data?: string; kind?: string };
   /** Form interaction (only for 'form' events). See docs/DML_FORMS.md. */
   form?: FormEventPayload;
+  /** A turn stopped at a safe point (only for 'suspend' events). */
+  suspend?: SuspendEventPayload;
   /** Model-call lifecycle (only for 'model_call' events). */
   modelCallState?: 'started' | 'completed' | 'failed';
   /** Model id for a 'model_call' event, when known. */

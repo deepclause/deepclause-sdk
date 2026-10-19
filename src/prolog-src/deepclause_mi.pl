@@ -165,6 +165,7 @@
 :- dynamic session_form_result/2.  % session_form_result(SessionId, Result) - forms primitive results
 :- dynamic session_builtin_tool/2. % session_builtin_tool(SessionId, ToolName) - runtime-installed tools
 :- dynamic session_next_result/2. % session_next_result(SessionId, Item) - conversation inbox item
+:- dynamic session_resource/2.     % session_resource(SessionId, Resource) - held stream/form (docs/DML_REPL_SUSPEND_RESUME.md)
 
 %% ============================================================
 %% DML Parsing
@@ -1046,6 +1047,7 @@ repl_unhandled_directives(SessionId, Directives) :-
 %% The engine is registered as the session's default `query` frame so that
 %% step_engine/4 keeps working as a thin wrapper over step_frame/4.
 create_engine(SessionId, _MemoryId, Args, Params, InitialMemory, Engine) :-
+    release_stale_resources(SessionId),
     assertz(session_params(SessionId, Params)),
     determine_agent_goal(SessionId, Args, Goal),
     % Check if tracing is enabled and store in session state
@@ -1318,7 +1320,8 @@ repl_initial_state(SessionId, FrameKind, InitialState) :-
 %% step_engine/4 and the runner can drive it.
 query_start(SessionId, Text, FrameKind, InitialState, Error) :-
     catch(
-        (   read_repl_goal(SessionId, Text, Goal, Names),
+        (   release_stale_resources(SessionId),
+            read_repl_goal(SessionId, Text, Goal, Names),
             create_frame_raw(SessionId, FrameKind, 0,
                 deepclause_mi:repl_solve(Goal, Names, SessionId, InitialState),
                 FrameId),
@@ -1398,8 +1401,16 @@ repl_solve(Goal, Names, SessionId, State) :-
     nb_setval(current_session_id, SessionId),
     catch(
         repl_solve_loop(Goal, Names, SessionId, State),
-        '$answer_commit',
-        true
+        Error,
+        % `answer/1` and `suspend/1` both stop enumeration, and both have already
+        % yielded to the host (the answer text, or the continuation). Anything else
+        % is a real error.
+        (   Error == '$answer_commit'
+        ->  true
+        ;   Error == '$suspend_commit'
+        ->  true
+        ;   throw(Error)
+        )
     ).
 
 repl_solve_loop(Goal, Names, SessionId, State) :-
@@ -3210,6 +3221,7 @@ step_engine(SessionId, Status, Content, Payload) :-
 process_engine_result(output(Text), output, Text, none) :- !.
 process_engine_result(media(Payload), media, '', Payload) :- is_dict(Payload), !.
 process_engine_result(log(Text), log, Text, none) :- !.
+process_engine_result(suspend(Continuation, Memory), suspend, '', payload{continuation: Continuation, memory: Memory}) :- !.
 process_engine_result(answer(Text), answer, Text, none) :- !.
 %% Current 8-arg format (with model spec from with_model/2)
 %% Conversation: the same loop with `mode: chat` (no finish, ends when the model stops).
@@ -3436,6 +3448,8 @@ mi(Goal, StateIn, SessionId) :-
         Error,
         (   Error == '$answer_commit'
         ->  true  % answer/1 threw to commit - success, no backtracking
+        ;   Error == '$suspend_commit'
+        ->  true  % suspend/1 threw to stop here; the host holds the continuation
         ;   Error == gas_exhausted
         ->  engine_yield(error("Gas exhausted: execution exceeded iteration limit")),
             fail
@@ -3798,6 +3812,9 @@ create_tool_engine(SessionId, ToolName, Args, ToolEngineId) :-
 
 %% handle_tool_engine_error(+Error, -Result)
 handle_tool_engine_error('$answer_commit', true) :- !.
+%% A tool body that suspends has already handed its continuation to the host; the
+%% tool engine stops with it rather than turning it into a tool failure.
+handle_tool_engine_error('$suspend_commit', suspended) :- !.
 handle_tool_engine_error(Error, error{message: ErrMsg}) :-
     format(atom(ErrMsg), '~w', [Error]).
 
@@ -5298,6 +5315,61 @@ mi_call(answer(Text), StateIn, StateIn) :-
     engine_yield(answer(InterpText)),
     throw('$answer_commit').
 
+%% mi_call(suspend(+Continuation), +StateIn, -StateOut)
+%% Stop the turn at a **safe point** and let the host persist a resumable
+%% continuation (docs/DML_REPL_SUSPEND_RESUME.md).
+%%
+%% `Continuation` is the goal that resumes where this left off — the entry point
+%% of the loop whose state is the argument, e.g.
+%%
+%%     loop(State) :- ..., checkpoint(State), suspend(loop(State)).
+%%
+%% A turn is suspended *between* host calls, never inside one: a model call, a
+%% shell command or a form wait has already handed control to the host by the time
+%% this runs. Non-serializable state it did not hand over — an open stream, an open
+%% form — makes it refuse, so a resumed session can never inherit a half-written
+%% file.
+mi_call(suspend(Continuation), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    (   session_resource(SessionId, Resource)
+    ->  format(atom(Message),
+            'cannot suspend while holding ~w: close it first', [Resource]),
+        throw(error(suspend_refused(Resource), Message))
+    ;   true
+    ),
+    term_string(Continuation, ContinuationText),
+    get_memory(StateIn, Memory),
+    engine_yield(suspend(ContinuationText, Memory)),
+    throw('$suspend_commit').
+
+%% release_stale_resources(+SessionId)
+%% A turn that was aborted while holding a stream leaves the handle open and the
+%% ledger non-empty, which would block every later `suspend/1`. Runs start clean:
+%% close whatever the previous turn left open and forget it. (A suspension is a
+%% clean stop, so it never leaves anything behind — `suspend/1` refuses while the
+%% ledger is non-empty.)
+release_stale_resources(SessionId) :-
+    forall(session_resource(SessionId, Resource),
+        (   Resource = file(_, Stream)
+        ->  catch(close(Stream), _, true)
+        ;   true
+        )),
+    retractall(session_resource(SessionId, _)).
+
+%% acquire_resource(+Resource) / release_resources(+Pattern)
+%% What a turn holds that a snapshot cannot: a stream or an open form.
+acquire_resource(Resource) :-
+    get_session_id(SessionId),
+    (   session_resource(SessionId, Resource)
+    ->  true
+    ;   assertz(session_resource(SessionId, Resource))
+    ).
+
+release_resources(Pattern) :-
+    get_session_id(SessionId),
+    retractall(session_resource(SessionId, Pattern)).
+
 %% mi_call(output(Media), +StateIn, -StateOut)
 %% Present an image instead of text: `output(media(Path, Mime))`, `output(media(Path))`,
 %% or a dict form (`media{svg: Svg}`, `media{data: Base64, mime: Mime}`). The host
@@ -5365,7 +5437,10 @@ mi_call(form(Spec, FormId), StateIn, StateIn) :-
     session_form_result(SessionId, Result),
     retract(session_form_result(SessionId, _)),
     (   Result = ok(Dict)
-    ->  get_dict(formId, Dict, FormId)
+    ->  get_dict(formId, Dict, FormId),
+        % An open form is host state a snapshot cannot carry, so `suspend/1`
+        % refuses until it is closed (docs/DML_REPL_SUSPEND_RESUME.md).
+        acquire_resource(form(FormId))
     ;   throw(error(form_open_failed(Result), form/2))
     ).
 
@@ -5390,6 +5465,7 @@ mi_call(form_errors(FormId, Issues), StateIn, StateIn) :-
 %% mi_call(close_form(+FormId), +StateIn, -StateOut)
 mi_call(close_form(FormId), StateIn, StateIn) :-
     !,
+    release_resources(form(FormId)),
     get_session_id(SessionId),
     engine_yield(request_form(close, FormId)),
     get_next_signal(SessionId, _),
@@ -6421,11 +6497,21 @@ mi_call(append_file(File, Content), StateIn, StateIn) :-
 %% Open a file for reading/writing
 mi_call(open(File, Mode, Stream), StateIn, StateIn) :-
     !,
-    open(File, Mode, Stream).
+    open(File, Mode, Stream),
+    % A stream is not serializable, so a suspended session must not be holding
+    % one. Track it here and `suspend/1` refuses while the ledger is non-empty.
+    acquire_resource(file(File, Stream)).
+
+%% mi_call(open(File, Mode, Stream, Options), +StateIn, -StateOut)
+mi_call(open(File, Mode, Stream, Options), StateIn, StateIn) :-
+    !,
+    open(File, Mode, Stream, Options),
+    acquire_resource(file(File, Stream)).
 
 %% mi_call(close(Stream), +StateIn, -StateOut)
 mi_call(close(Stream), StateIn, StateIn) :-
     !,
+    release_resources(file(_, Stream)),
     close(Stream).
 
 %% mi_call(write(Stream, Content), +StateIn, -StateOut)
@@ -6640,6 +6726,7 @@ is_mi_special_predicate(get_memory(_)).
 is_mi_special_predicate(format(_,_)).
 is_mi_special_predicate(writeln(_)).
 is_mi_special_predicate(write(_)).
+is_mi_special_predicate(suspend(_)).
 is_mi_special_predicate(input(_,_)).
 %% Conversation (docs/DML_CONVERSATION.md)
 is_mi_special_predicate(input(_)).

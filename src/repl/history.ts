@@ -45,7 +45,7 @@ export interface HistoryTurnRecord {
   turn: number;
   mode: 'goal' | 'prompt';
   request: string;
-  outcome: 'committed' | 'answered' | 'failed' | 'aborted' | 'query' | 'running';
+  outcome: 'committed' | 'answered' | 'failed' | 'aborted' | 'query' | 'running' | 'suspended';
   commitVersion?: number;
   durationMs: number;
   modelCalls: number;
@@ -587,6 +587,61 @@ export class HistoryStore {
 
   private sessionHarnessFile(sessionId: string): string {
     return path.join(this.sessionsDir(), sessionId, 'harness.json');
+  }
+
+  private sessionSuspendFile(sessionId: string): string {
+    return path.join(this.sessionsDir(), sessionId, 'suspend.json');
+  }
+
+  /**
+   * Persist a turn's suspension: the goal that resumes it, plus the memory to
+   * resume with. `--session` runs the continuation once the harness and memory are
+   * restored, then clears it (docs/DML_REPL_SUSPEND_RESUME.md).
+   */
+  async writeSuspendRecord(
+    record: {
+      continuation: string;
+      memory?: string;
+      turn?: number;
+      moduleVersion?: string;
+      moduleHash?: string;
+      reason?: string;
+    },
+    sessionId: string = this.sessionId,
+  ): Promise<void> {
+    await this.writeJson(this.sessionSuspendFile(sessionId), {
+      schemaVersion: 1,
+      sessionId,
+      at: nowIso(),
+      ...record,
+    });
+  }
+
+  /** The pending suspension for a session, or null. */
+  async readSuspendRecord(
+    sessionId: string = this.sessionId,
+  ): Promise<{ continuation: string; memory?: string; at?: string } | null> {
+    try {
+      const data = JSON.parse(await fs.readFile(this.sessionSuspendFile(sessionId), 'utf8')) as Record<string, unknown>;
+      const continuation = typeof data.continuation === 'string' ? data.continuation : '';
+      if (!continuation.trim()) return null;
+      return {
+        continuation,
+        memory: typeof data.memory === 'string' ? data.memory : undefined,
+        at: typeof data.at === 'string' ? data.at : undefined,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Drop the suspension once it has been resumed (or abandoned). */
+  async clearSuspendRecord(sessionId: string = this.sessionId): Promise<void> {
+    try {
+      await fs.rm(this.sessionSuspendFile(sessionId), { force: true });
+    } catch {
+      // best effort, like the rest of history
+    }
   }
 
   /** True when a session directory exists for `sessionId`. */

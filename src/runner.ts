@@ -14,6 +14,7 @@ import type {
   MemoryMessage,
   LLMBackend,
   ResolvedModel,
+  SuspendEventPayload,
   ToolDefinition,
   ToolPolicy,
   TypedVar,
@@ -279,6 +280,12 @@ export interface InternalRunOptions {
    * inside the step (like `onInputRequired`), so the run pauses until it returns.
    */
   onForm?: (form: FormEventPayload) => void | Promise<void>;
+  /**
+   * A turn called `suspend/1`. The host persists the continuation so `--session`
+   * can resume it (docs/DML_REPL_SUSPEND_RESUME.md); the run then finishes
+   * normally, exactly as `answer/1` does.
+   */
+  onSuspend?: (payload: SuspendEventPayload) => void | Promise<void>;
   /** Per-run default judgment backend name override. */
   judgeBackend?: string;
   /**
@@ -628,6 +635,15 @@ export class DMLRunner {
         case 'answer':
           yield { type: 'answer', content: step.content };
           break;
+
+        case 'suspend': {
+          const payload = (step.payload ?? {}) as Record<string, unknown>;
+          const continuation = String(toJsValue(payload.continuation) ?? '');
+          const memory = String(toJsValue(payload.memory) ?? '');
+          if (options.onSuspend) await options.onSuspend({ continuation, memory });
+          yield { type: 'suspend', suspend: { continuation, memory } };
+          break;
+        }
 
         case 'solution': {
           const payload = (step.payload ?? {}) as Record<string, unknown>;

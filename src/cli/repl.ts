@@ -353,6 +353,9 @@ export async function runGoalWithRenderer(
   let hadError = false;
   let printedAny = false;
   let answered = false;
+  // A turn that suspended *succeeded* — it stopped at a safe point and the host
+  // recorded where to continue. Reporting `false.` would read as a failure.
+  let suspended = false;
   for await (const event of repl.query(goal, { signal: options.signal })) {
     if (event.type === 'solution') {
       options.renderer.solution(event.solution?.bindings ?? []);
@@ -364,13 +367,16 @@ export async function runGoalWithRenderer(
     } else if (event.type === 'answer') {
       answered = true;
       options.renderer.render(event);
+    } else if (event.type === 'suspend') {
+      suspended = true;
+      options.renderer.render(event);
     } else if (event.type === 'finished') {
       // Nothing to print for finished.
     } else {
       options.renderer.render(event);
     }
   }
-  if (!printedAny && !hadError) {
+  if (!printedAny && !hadError && !suspended) {
     // A goal that committed with `answer/1` succeeded; one that produced neither
     // a solution nor an answer simply failed. (`goalTerminator`/`noSolution`
     // keep `--json` stdout pure, where a raw `false.` would corrupt the stream.)
@@ -957,6 +963,28 @@ async function printBanner(runtime: ReplRuntime, loaded: string[]): Promise<void
  * starting blank. Bounded, and skipped when the session was not resumed or
  * tracing was off.
  */
+
+/**
+ * Continue a session that was suspended with `suspend/1`.
+ *
+ * The turn stopped at a safe point and the host wrote the goal that resumes it
+ * (docs/DML_REPL_SUSPEND_RESUME.md). Resuming means running that goal once the
+ * harness and memory are restored — so `--session` picks the program up where it
+ * left off instead of dropping the user into a half-finished state. The record is
+ * cleared first: if the continuation suspends again it writes a fresh one.
+ */
+async function resumeSuspendedContinuation(runtime: ReplRuntime): Promise<void> {
+  const pending = runtime.repl.session.pendingSuspension?.();
+  if (!pending) return;
+  runtime.renderer.writeLine(`resuming the suspended continuation: ${pending.continuation}`);
+  await runtime.repl.session.clearSuspension?.();
+  try {
+    await runGoalWithRenderer(runtime.repl, pending.continuation, { renderer: runtime.renderer });
+  } catch (error) {
+    runtime.renderer.writeLine(`could not resume ${pending.continuation}: ${String((error as Error).message)}`);
+  }
+}
+
 async function renderResumedSession(runtime: ReplRuntime): Promise<void> {
   const events = await runtime.repl.resumedTranscript().catch(() => []);
   if (events.length === 0) return;
@@ -2058,6 +2086,7 @@ export async function runTui(
   await printBanner(runtime, loaded);
   await renderResumedSession(runtime);
   tui.requestRender();
+  await resumeSuspendedContinuation(runtime);
 
   try {
     while (true) {
@@ -2232,6 +2261,7 @@ export async function startRepl(options: ReplCliOptions): Promise<number> {
     }
     await printBanner(runtime, options.load ?? []);
     await renderResumedSession(runtime);
+    await resumeSuspendedContinuation(runtime);
     return await runInteractive(runtime, options, saveHarnessOnExit);
   } finally {
     await saveHarnessOnExit();

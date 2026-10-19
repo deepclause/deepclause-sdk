@@ -1217,6 +1217,28 @@ swarm(summarise_file, Files, Results, 4),
 findall(S, member(ok(S), Results), Summaries).
 ```
 
+### `suspend(+Continuation)`
+
+Stop the turn at a **safe point** and let the host persist where to continue.
+`Continuation` is the goal that resumes — the entry point of the loop whose state
+is its argument:
+
+```prolog
+loop(N) :-
+    (   N >= 2
+    ->  suspend(loop(N))          % stop; a later --session resumes with loop(N)
+    ;   M is N + 1, loop(M)
+    ).
+```
+
+The turn ends cleanly (like `answer/1`), the host records the continuation and the
+memory, and `deepclause repl --session <id>` runs it. **A turn cannot suspend while
+holding something a snapshot cannot carry**: an open stream (`open/3,4` … `close/1`)
+or an open form (`form/2` … `close_form/1`) makes it fail with
+`cannot suspend while holding …`. A suspension is always *between* host calls —
+never inside a `task/N`, `exec/2` or form wait — and the program chooses the point.
+See [`docs/DML_REPL_SUSPEND_RESUME.md`](../../../../docs/DML_REPL_SUSPEND_RESUME.md).
+
 ### `wait(+Pid[, -Outcome])`
 
 Block until a process terminates, then report what happened. `Outcome` is

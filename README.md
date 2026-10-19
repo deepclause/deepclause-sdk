@@ -329,6 +329,20 @@ deepclause repl --session last          # resume the most recent session
 deepclause repl --session repl_m9x1_1   # …or one by id
 ```
 
+A turn can also **suspend itself** at a safe point and be continued on resume —
+the continuation is a goal, so the program says where it is safe:
+
+```prolog
+loop(N) :-
+    (   N >= 2 -> suspend(loop(N))       % stop here; resume with loop(N)
+    ;   M is N + 1, loop(M)
+    ).
+```
+
+`suspend/1` refuses while the turn holds something a snapshot cannot carry — an
+open stream or an open form — so a resumed session never inherits a half-written
+file. See [`docs/DML_REPL_SUSPEND_RESUME.md`](docs/DML_REPL_SUSPEND_RESUME.md).
+
 ### Why Prolog/DML for a self-modifying harness
 
 An RLM-style harness works best when the harness *is* the program the model
