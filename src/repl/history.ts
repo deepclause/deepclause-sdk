@@ -45,7 +45,7 @@ export interface HistoryTurnRecord {
   turn: number;
   mode: 'goal' | 'prompt';
   request: string;
-  outcome: 'committed' | 'answered' | 'failed' | 'aborted' | 'query';
+  outcome: 'committed' | 'answered' | 'failed' | 'aborted' | 'query' | 'running';
   commitVersion?: number;
   durationMs: number;
   modelCalls: number;
@@ -161,6 +161,7 @@ export class HistoryStore {
   private readonly maxVersions: number;
   private readonly redactions: RegExp[];
   private eventBuffer: string[] = [];
+  private flushTimer?: ReturnType<typeof setTimeout>;
   /** Current HEAD version (0 = empty harness) and the highest ever issued. */
   private headVersion = 0;
   private maxVersion = 0;
@@ -360,17 +361,20 @@ export class HistoryStore {
     } catch {
       return [];
     }
-    const turns: HistoryTurnRecord[] = [];
+    const byTurn = new Map<number, HistoryTurnRecord>();
+    const untracked: HistoryTurnRecord[] = [];
     for (const line of text.split('\n')) {
       if (!line.trim()) continue;
       try {
         const parsed = JSON.parse(line) as HistoryTurnRecord;
-        if (typeof parsed?.request === 'string') turns.push(parsed);
+        if (typeof parsed?.request !== 'string') continue;
+        if (typeof parsed.turn === 'number') byTurn.set(parsed.turn, parsed);
+        else untracked.push(parsed);
       } catch {
         // skip malformed lines
       }
     }
-    return turns;
+    return [...byTurn.values()].sort((a, b) => a.turn - b.turn).concat(untracked);
   }
 
   async startSession(
@@ -704,15 +708,31 @@ export class HistoryStore {
       const line = this.serializeEvent(context, event);
       if (!line) return;
       this.eventBuffer.push(line);
-      if (this.eventBuffer.length >= 200) void this.flushEvents();
+      if (this.eventBuffer.length >= 200) {
+        void this.flushEvents().catch(() => undefined);
+      } else if (!this.flushTimer) {
+        // Write through during the turn, not only at turn end: a closed tab or
+        // a worker crash must not lose the whole transcript. Keep the batch
+        // small enough that an abrupt stop loses at most a fraction of a second.
+        this.flushTimer = setTimeout(() => {
+          this.flushTimer = undefined;
+          void this.flushEvents().catch(() => undefined);
+        }, 250);
+      }
     } catch {
       // never let tracing break the turn
     }
   }
 
   async flushEvents(): Promise<void> {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = undefined;
+    }
     if (this.eventBuffer.length === 0) return;
-    const payload = `${this.eventBuffer.join('\n')}\n`;
+    // Leading newline terminates a partial line left by an interrupted append,
+    // so the next complete record is still parseable on resume.
+    const payload = `\n${this.eventBuffer.join('\n')}\n`;
     this.eventBuffer = [];
     await this.appendRaw(path.join(this.sessionDirAbs, 'events.jsonl'), payload);
   }
@@ -746,6 +766,10 @@ export class HistoryStore {
         put('toolState', event.toolState);
         put('toolSummary', event.toolSummary);
         put('toolArgs', event.toolArgs);
+        put('toolResult', event.toolResult);
+        put('toolError', event.toolError);
+        put('toolDurationMs', event.toolDurationMs);
+        put('toolExitCode', event.toolExitCode);
         break;
       case 'solution':
         put('bindings', (event.solution as { bindings?: unknown } | undefined)?.bindings);
@@ -794,7 +818,7 @@ export class HistoryStore {
 
   private async appendJsonl(file: string, record: Record<string, unknown>): Promise<void> {
     if (this.trace === 'off' && file.endsWith('events.jsonl')) return;
-    await this.appendRaw(file, `${JSON.stringify(record)}\n`);
+    await this.appendRaw(file, `\n${JSON.stringify(record)}\n`);
   }
 
   /**

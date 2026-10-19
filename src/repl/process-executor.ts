@@ -225,7 +225,7 @@ export class DmlProcessExecutor implements ProcessBackend {
       case 'receive': {
         const timeout = Number(request.timeout ?? 0);
         if (pidKey(pid) === pidKey(this.host.hostPid)) {
-          const message = await this.hostReceive(timeout > 0 ? timeout : undefined);
+          const message = await this.hostReceive(timeout > 0 ? timeout : undefined, signal);
           return message === undefined
             ? { key: 'receive', term: 'timeout' }
             : { key: 'receive', term: `ok(${message})` };
@@ -357,22 +357,41 @@ export class DmlProcessExecutor implements ProcessBackend {
     });
   }
 
-  /** Pop a message addressed to the synthetic host pid, or wait. */
-  private hostReceive(timeoutMs?: number): Promise<string | undefined> {
+  /**
+   * Pop a message addressed to the synthetic host pid, or wait.
+   *
+   * The abort signal matters: an execute worker that times out while a
+   * `service_call` is waiting must remove its waiter. Otherwise the next
+   * service's reply is delivered to the dead worker and the new caller times
+   * out forever.
+   */
+  private hostReceive(timeoutMs?: number, signal?: AbortSignal): Promise<string | undefined> {
+    if (signal?.aborted) return Promise.resolve(undefined);
     if (this.hostMailbox.length > 0) return Promise.resolve(this.hostMailbox.shift());
     return new Promise<string | undefined>((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const waiter = (message: string | undefined): void => {
+      let settled = false;
+      const finish = (message: string | undefined): void => {
+        if (settled) return;
+        settled = true;
         if (timer) clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
         resolve(message);
+      };
+      const waiter = (message: string | undefined): void => finish(message);
+      const onAbort = (): void => {
+        const index = this.hostWaiters.indexOf(waiter);
+        if (index !== -1) this.hostWaiters.splice(index, 1);
+        finish(undefined);
       };
       if (timeoutMs && timeoutMs > 0) {
         timer = setTimeout(() => {
           const index = this.hostWaiters.indexOf(waiter);
           if (index !== -1) this.hostWaiters.splice(index, 1);
-          resolve(undefined);
+          finish(undefined);
         }, timeoutMs);
       }
+      signal?.addEventListener('abort', onAbort, { once: true });
       this.hostWaiters.push(waiter);
     });
   }
@@ -394,6 +413,11 @@ export class DmlProcessExecutor implements ProcessBackend {
   }
 
   // ---- ProcessBackend -----------------------------------------------------
+
+  /** The synthetic pid of the foreground host, used by remote execute workers. */
+  hostPid(): Pid {
+    return this.host.hostPid;
+  }
 
   spawn(goal: string, options: SpawnOptions = {}): Promise<Pid> {
     return Promise.resolve(this.host.spawn(goal, options));

@@ -63,6 +63,13 @@ describe('end_turn tool contract validation', () => {
     expect(warnings.join(' ')).toContain('ghost/2');
   });
 
+  it('does not flag host handlers such as service_call/3', async () => {
+    const warnings = await commit(
+      'tool(counter_request(Request, Reply), "Ask the counter.") :- service_call(counter, Request, Reply).',
+    );
+    expect(warnings).toEqual([]);
+  });
+
   it('flags a tool that delegates to a module-qualified skill', async () => {
     // Known limitation: a cross-module delegate is not a session predicate, so
     // it is reported. with_tools/2 is the supported route for those.

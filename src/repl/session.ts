@@ -270,6 +270,10 @@ function historyEventFromRecord(record: Record<string, unknown>): DMLEvent | und
         toolState: record.toolState as DMLEvent['toolState'],
         toolSummary: typeof record.toolSummary === 'string' ? record.toolSummary : undefined,
         toolArgs: record.toolArgs as Record<string, unknown> | undefined,
+        toolResult: record.toolResult,
+        toolError: typeof record.toolError === 'string' ? record.toolError : undefined,
+        toolDurationMs: typeof record.toolDurationMs === 'number' ? record.toolDurationMs : undefined,
+        toolExitCode: typeof record.toolExitCode === 'number' ? record.toolExitCode : undefined,
       };
     case 'solution':
       return {
@@ -480,9 +484,10 @@ export class DMLSession {
       );
       snapshot = await store.readSessionHarness();
       session.recordedServices = await store.readServiceRecords();
-      if (!snapshot) {
-        throw new Error(`session not found or has no saved harness: ${session.sessionId}`);
-      }
+      // A session can have a transcript but no harness snapshot (older builds,
+      // or a turn interrupted before its first commit). Resume it from the
+      // current harness instead of refusing to open it; the transcript reader
+      // still restores every turn and event it has.
     }
 
     const sessionParams: Record<string, unknown> = {
@@ -525,6 +530,7 @@ export class DMLSession {
           session.warnHistory(new Error(`could not load harness '${session.harnessName}': ${loaded.error}`));
         }
       }
+      if (options.resume) session.noteSessionResumed();
     }
     // Creating a session (or loading a harness) can move SWI's cwd away from the
     // workspace, so reassert it before any goal runs — with the **mounted** path.
@@ -674,7 +680,7 @@ export class DMLSession {
    * Events from the resumed session, to render it on load. Empty unless this
    * session was opened with `resume` and history is enabled.
    */
-  async resumedTranscript(limit = 400): Promise<DMLEvent[]> {
+  async resumedTranscript(limit = Number.POSITIVE_INFINITY): Promise<DMLEvent[]> {
     if (!this.resume || !this.history) return [];
     const records = await this.history.readEvents(this.sessionId, limit);
     return records
@@ -777,7 +783,14 @@ export class DMLSession {
     return String(plainValue(result?.Term) ?? text);
   }
 
-  /** Resolve a process primitive for this (non-process) foreground run. */
+  /** The synthetic pid shared by foreground/execute work in this session. */
+  async processHostPid(): Promise<Pid> {
+    const backend = await this.ensureProcessBackend();
+    const hostPid = (backend as unknown as { hostPid?: () => Pid }).hostPid?.();
+    if (!hostPid) throw new Error('this process backend has no host pid');
+    return hostPid;
+  }
+
   /** Handle a process primitive on behalf of a remote child session. */
   async handleProcessRequest(
     pid: Pid,
@@ -1221,6 +1234,28 @@ export class DMLSession {
     }
   }
 
+  /** Write the user turn immediately, so an interrupted turn keeps its request. */
+  private async recordHistoryTurnStart(
+    record: Pick<HistoryTurnRecord, 'turn' | 'mode' | 'request'>,
+  ): Promise<void> {
+    if (!this.history) return;
+    try {
+      this.assertHistoryFacts(
+        await this.history.recordTurn({
+          ...record,
+          outcome: 'running',
+          durationMs: 0,
+          modelCalls: 0,
+        }),
+      );
+      // Snapshot before the turn as well: an interrupted turn then still has a
+      // resumable harness and transcript, not just the previous turn's files.
+      await this.persistSessionHarness(this.history.currentVersion);
+    } catch (error) {
+      this.warnHistory(error);
+    }
+  }
+
   private async finishHistoryTurn(record: HistoryTurnRecord): Promise<void> {
     if (!this.history) return;
     try {
@@ -1311,6 +1346,7 @@ export class DMLSession {
     this.turnCounter += 1;
     const historyTurn = this.turnCounter;
     const historyStart = Date.now();
+    await this.recordHistoryTurnStart({ turn: historyTurn, mode: 'goal', request: goal });
 
     const frame = this.runner.registerDefaultFrame(frameKind);
     if (!frame) {
@@ -1347,6 +1383,7 @@ export class DMLSession {
       durationMs: Date.now() - historyStart,
       modelCalls: this.modelCallsThisTurn,
     });
+    await this.persistSessionHarness(this.history?.currentVersion ?? 0);
   }
 
   /** Load the bundled DML reference once, for inclusion in the meta prompt. */
@@ -1720,6 +1757,7 @@ export class DMLSession {
     this.turnCounter += 1;
     const turn = this.turnCounter;
     const historyStart = Date.now();
+    await this.recordHistoryTurnStart({ turn, mode: 'prompt', request });
     this.lastTurnCommitted = false;
     this.lastCommitVersion = undefined;
     // No automatic transaction: `define`/`assert`/… are refused until the agent
@@ -2377,6 +2415,11 @@ export class DMLSession {
   }
 
   // ---- TypeScript compaction (ported from pi) ----
+
+  /** Read the live harness memory (for disposable execute workers). */
+  harnessMemory(): MemoryMessage[] {
+    return this.getMemory('harness')
+  }
 
   /** Read a live memory slot as `MemoryMessage[]`. */
   private getMemory(slot: 'meta' | 'harness'): MemoryMessage[] {

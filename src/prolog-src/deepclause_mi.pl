@@ -2708,11 +2708,22 @@ tool_contract_violation(SessionId, Warning) :-
     ->  format(string(Warning),
             'tool ~w/~w declares a different arity than its body calls (~w/~w). A tool head and its delegate must match, with the output argument last.',
             [Name, Arity, Callee, CalleeArity])
-    ;   \+ ( SessionId:current_predicate(Callee/CalleeArity) )
+    ;   \+ ( SessionId:current_predicate(Callee/CalleeArity) ; tool_host_predicate(Callee, CalleeArity) )
     ->  format(string(Warning),
             'tool ~w/~w calls ~w/~w, which is not defined, so a nested agent gets "Tool not found". Define ~w/~w and delegate to it.',
             [Name, Arity, Callee, CalleeArity, Callee, CalleeArity])
     ).
+
+%% Host handlers (service_call/3, form/2, exec/2, …) are mi_call specials, not
+%% session clauses. A tool that wraps one is valid even though
+%% current_predicate/1 reports false.
+tool_host_predicate(Name, Arity) :-
+    atom(Name),
+    Name \== (:),
+    integer(Arity),
+    Arity >= 0,
+    functor(Goal, Name, Arity),
+    is_mi_special_predicate(Goal).
 
 %% tool_body_goal(+Body, -FirstCall): a tool body must reach a call, not be empty.
 tool_body_goal(Body, Call) :-

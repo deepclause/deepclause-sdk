@@ -143,7 +143,7 @@ export interface HarnessRepl {
   diagram(entry?: string, mode?: DiagramMode, options?: { signal?: AbortSignal }): Promise<DiagramResult>;
   /** Deliver a steering message into the running authoring turn. */
   steer(text: string): void;
-  /** Events from a resumed session, to render it on load (resumed sessions only). */
+  /** All persisted events from a resumed session, oldest first (resumed sessions only). */
   resumedTranscript(limit?: number): Promise<DMLEvent[]>;
   dispose(): Promise<void>;
   /** The underlying session (used by the CLI for session id / frame kind). */
