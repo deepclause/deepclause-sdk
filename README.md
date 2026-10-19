@@ -462,6 +462,66 @@ only for models that support it.
 Credentials live in pi's agent dir (`~/.pi/agent`) unless `backend.agentDir`
 overrides it. Existing pi installations stay untouched.
 
+### Local models (Ollama, llama.cpp, vLLM)
+
+The default `pi` backend reads pi's `models.json`, which can declare **custom
+OpenAI-compatible providers**, so a local server needs no SDK changes:
+
+```jsonc
+// ~/.pi/agent/models.json
+{
+  "providers": {
+    "loc": {
+      "name": "Local server",
+      "baseUrl": "http://localhost:11434/v1",   // Ollama; llama.cpp: http://127.0.0.1:8080/v1
+      "apiKey": "ollama",                        // any string; satisfies the auth check
+      "api": "openai-completions",               // not openai-responses
+      "models": [{
+        "id": "llama3.1",
+        "contextWindow": 131072,
+        "maxTokens": 8192,
+        "reasoning": false,
+        "input": ["text"],
+        "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+      }]
+    }
+  }
+}
+```
+
+```bash
+deepclause set-backend pi --list   # lists "loc (Local server) — configured [api-key]"
+                                   # and the model "loc/lecho"
+deepclause repl --model loc:llama3.1
+```
+
+`run` has no `--model` flag; set `backend.model` instead. DML can route a single
+step there as well — `with_model("loc:llama3.1", Goal)`.
+
+Point at a non-default file with `backend.modelsPath` in
+`.deepclause/config.json` (or `PI_CODING_AGENT_DIR` to move pi's whole agent
+dir), which keeps a project's catalog in the repository rather than the home
+directory:
+
+```json
+{ "backend": { "kind": "pi", "model": "loc:llama3.1", "modelsPath": "./agent/models.json" } }
+```
+
+- **`api` picks the wire protocol.** `openai-completions` is what Ollama,
+  llama.cpp, vLLM and SGLang serve; `openai-responses` is the newer OpenAI API.
+  Per-provider `compat` flags cover servers that differ
+  (`maxTokensField`, `supportsUsageInStreaming`, `requiresToolResultName`, …),
+  and a model's `samplingParams` forwards `top_p`/`top_k`/`repetition_penalty`.
+- **Tool calling is required for `task/N`**, which ends by calling
+  `set_result`/`finish`; a text-only model exhausts the turn instead. `chat/1`
+  needs no tools, so a small local model is usable there, or pick a model whose
+  chat template supports tools.
+- **`list-models` prints the bundled model database** and will not show custom
+  entries; `set-backend pi --list` prints pi's catalog, which does.
+- The `env` backend can also point at a local server
+  (`providers.openai.baseUrl` + `apiKey`), but it always speaks chat completions
+  and **`repl` ignores `providers.*.baseUrl`** today — prefer the `pi` backend.
+
 ## run
 
 `run` uses the **same engine as the REPL**: it opens a module, loads the
