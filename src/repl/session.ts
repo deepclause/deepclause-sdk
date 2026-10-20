@@ -144,6 +144,13 @@ export interface DMLSessionOptions {
   maxModelCalls?: number;
   /** Host tool catalog text injected into the meta prompt (M5). */
   hostToolsCatalog?: string;
+  /** Replace the bundled authoring prompt (e.g. a compact local-model profile). */
+  agentSystemPrompt?: string;
+  /**
+   * Restrict the authoring agent to these tool names. Used for small local
+   * models, where a long tool catalogue costs more prefill than it is worth.
+   */
+  authoringToolNames?: string[];
   /**
    * The effective shell backend for this session (`agentvm`, `bwrap`,
    * `sandbox-exec`, or `clean-room`). Injected into the Prolog session so the
@@ -1907,7 +1914,16 @@ export class DMLSession {
   private async getHarnessAgent(): Promise<HarnessAgent> {
     if (this.harnessAgent) return this.harnessAgent;
     const authoringTools = createHarnessTools(this);
+    const allowed = this.openOptions.authoringToolNames
+      ? new Set(this.openOptions.authoringToolNames)
+      : null;
+    if (allowed) {
+      for (const name of [...authoringTools.keys()]) {
+        if (!allowed.has(name)) authoringTools.delete(name);
+      }
+    }
     for (const [name, tool] of this.authoringTools) {
+      if (allowed && !allowed.has(name)) continue;
       if (!authoringTools.has(name)) authoringTools.set(name, tool);
     }
     this.harnessAgent = new HarnessAgent({
@@ -1929,6 +1945,7 @@ export class DMLSession {
       currentModel: `${this.provider}:${this.model}`,
       modelCatalog: this.modelResolver?.catalog(),
       knownMessages: this.agentMessages,
+      agentSystemPrompt: this.openOptions.agentSystemPrompt,
     });
     return this.harnessAgent;
   }

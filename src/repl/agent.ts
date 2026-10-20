@@ -54,6 +54,11 @@ export interface HarnessAgentOptions {
   modelCatalog?: ModelCatalogEntry[];
   /** Pre-loaded documentation for the `reference` tool (handled by the controller). */
   knownMessages?: MemoryMessage[];
+  /**
+   * Replace the bundled authoring prompt. Used by embeddings with a smaller
+   * model/context, where the full guide would exceed the context window.
+   */
+  agentSystemPrompt?: string;
 }
 
 export interface HarnessAgentRunOptions {
@@ -108,16 +113,24 @@ export async function buildAgentSystemPrompt(options: {
   capabilityTool?: string;
   /** Injectable clock, so tests do not depend on the wall calendar. */
   now?: Date;
+  /** Optional replacement for the bundled prompt (e.g. a local-model profile). */
+  systemPrompt?: string;
 } = {}): Promise<string> {
   let prompt = '';
-  try {
-    prompt = await readAgentPromptAsset({ workspacePath: options.workspacePath });
-  } catch {
-    prompt = 'You are an agent with access to a DML REPL.';
+  if (options.systemPrompt !== undefined) {
+    prompt = options.systemPrompt;
+  } else {
+    try {
+      prompt = await readAgentPromptAsset({ workspacePath: options.workspacePath });
+    } catch {
+      prompt = 'You are an agent with access to a DML REPL.';
+    }
   }
 
   // The models this session can switch to with `with_model/2`, with catalog prices.
-  const catalog = options.modelCatalog ?? [];
+  // A replacement prompt is already a deliberate, bounded profile; appending the
+  // full catalog to it defeats that budget.
+  const catalog = options.systemPrompt === undefined ? (options.modelCatalog ?? []) : [];
   if (options.currentModel || catalog.length > 0) {
     const shown = catalog.slice(0, 60).map(formatModelCatalogEntry);
     prompt += [
@@ -130,10 +143,14 @@ export async function buildAgentSystemPrompt(options: {
     ].filter(Boolean).join('\n') + '\n';
   }
 
-  // Append a workspace `AGENTS.md` so repo-specific rules always apply.
-  const project = await loadProjectContext(options.workspacePath);
-  if (project) {
-    prompt += `\n\nPROJECT INSTRUCTIONS (AGENTS.md)\n${project.content}\n`;
+  // Append a workspace `AGENTS.md` so repo-specific rules always apply. A
+  // replacement profile is self-contained: appending the project contract can
+  // double its size and push a local model over its context window.
+  if (options.systemPrompt === undefined) {
+    const project = await loadProjectContext(options.workspacePath);
+    if (project) {
+      prompt += `\n\nPROJECT INSTRUCTIONS (AGENTS.md)\n${project.content}\n`;
+    }
   }
 
   // Where we are running and what time it is, last: these change per turn, so
@@ -311,6 +328,7 @@ export class HarnessAgent {
       modelCatalog: this.options.modelCatalog,
       environment: this.options.environment,
       capabilityTool: this.options.capabilityTool,
+      systemPrompt: this.options.agentSystemPrompt,
     });
 
     this.messages.push({ role: 'user', content: request });

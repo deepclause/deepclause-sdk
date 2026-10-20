@@ -62,6 +62,10 @@ export interface HarnessReplOptions {
   maxModelCalls?: number;
   /** Host tool catalog text injected into the meta prompt (M5). */
   hostToolsCatalog?: string;
+  /** Replace the bundled authoring prompt (e.g. a compact local-model profile). */
+  agentSystemPrompt?: string;
+  /** Restrict the authoring agent to these tools (small local-model profile). */
+  authoringToolNames?: string[];
   /**
    * Effective shell backend (`agentvm`/`bwrap`/`sandbox-exec`/`clean-room`).
    * Pass `toolset.environment.kind` so the harness `require_sandbox` check and
@@ -263,6 +267,8 @@ export async function createHarnessRepl(options: HarnessReplOptions): Promise<Ha
     maxDepth: options.maxDepth,
     maxModelCalls: options.maxModelCalls,
     hostToolsCatalog: options.hostToolsCatalog,
+    agentSystemPrompt: options.agentSystemPrompt,
+    authoringToolNames: options.authoringToolNames,
     executionBackend: options.executionBackend,
     capabilityTool: options.capabilityTool,
     processWorkerFactory: options.processWorkerFactory,

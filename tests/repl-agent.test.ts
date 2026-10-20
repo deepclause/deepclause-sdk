@@ -205,6 +205,23 @@ describe('HarnessAgent', () => {
     }
   });
 
+  it('uses a replacement profile without appending the project contract', async () => {
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'dc-agent-profile-'));
+    try {
+      await fs.writeFile(path.join(workspace, 'AGENTS.md'), '# House rules\nAlways cite sources.', 'utf8');
+      const prompt = await buildAgentSystemPrompt({
+        workspacePath: workspace,
+        systemPrompt: 'LOCAL PROFILE',
+        modelCatalog: [{ provider: 'p', id: 'm', input: 1, output: 2 } as never],
+      });
+      expect(prompt).toContain('LOCAL PROFILE');
+      expect(prompt).not.toContain('PROJECT INSTRUCTIONS (AGENTS.md)');
+      expect(prompt).not.toContain('AVAILABLE MODELS');
+    } finally {
+      await fs.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   it('appends a workspace AGENTS.md to the system prompt', async () => {
     const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'dc-agent-agents-'));
     try {
