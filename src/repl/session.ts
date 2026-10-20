@@ -25,6 +25,7 @@ import {
 } from '../system/runtime/shell-manager.js';
 import { getWorkspaceDocAssetPath } from '../system/assets/index.js';
 import { DMLRunner, toJsValue, type Frame, type InternalRunOptions, type ProcessRequestPayload, type ProcessRequestResult, type RunnerOptions } from '../runner.js';
+import { resolveReplJudgeSelection, type JevJudgeOptions } from './judge.js';
 import { DmlProcessExecutor } from './process-executor.js';
 import type { ProcessBackend } from './process-backend.js';
 import type { Pid, ProcessEvent, ProcessInfo, ProcessLogEntry, SpawnOptions } from './processes.js';
@@ -144,6 +145,10 @@ export interface DMLSessionOptions {
   maxModelCalls?: number;
   /** Host tool catalog text injected into the meta prompt (M5). */
   hostToolsCatalog?: string;
+  /** Default judgment backend (`llm` unless Jev is configured). */
+  defaultJudge?: string;
+  /** Optional Jev (TypeSafe System One) judgment backend. */
+  jev?: JevJudgeOptions;
   /** Replace the bundled authoring prompt (e.g. a compact local-model profile). */
   agentSystemPrompt?: string;
   /**
@@ -472,8 +477,24 @@ export class DMLSession {
     this.modelResolver = options.runnerOptions.modelResolver;
     this.temperature = options.runnerOptions.temperature;
     this.maxTokens = options.runnerOptions.maxTokens;
+    // Direct DMLSession users (notably the browser child workers) do not go
+    // through createHarnessRepl's judge wiring. Without a default selection,
+    // judge/2 fails with "Unknown judgment backend: llm".
+    const judgeSelection = options.runnerOptions.judgeSelection
+      ?? resolveReplJudgeSelection({
+        llmBackend: options.runnerOptions.llmBackend,
+        model: options.runnerOptions.model,
+        provider: String(options.runnerOptions.provider),
+        temperature: options.runnerOptions.temperature,
+        maxTokens: options.runnerOptions.maxTokens,
+        baseUrl: options.runnerOptions.baseUrl,
+        providerOptions: options.runnerOptions.providerOptions,
+        defaultJudge: options.defaultJudge,
+        jev: options.jev,
+      }).selection;
     this.runner = new DMLRunner(swipl, {
       ...options.runnerOptions,
+      judgeSelection,
       environment: this.executionEnvironment,
       capabilityTool: options.capabilityTool,
       compactMessages: options.compaction

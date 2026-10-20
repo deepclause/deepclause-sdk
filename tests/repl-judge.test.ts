@@ -13,6 +13,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { createHarnessRepl, type HarnessRepl } from '../src/repl/index.js';
+import { DMLSession } from '../src/repl/session.js';
 import { resolveReplJudgeSelection } from '../src/repl/judge.js';
 import { createMockJudgeBackend } from '../src/judge/index.js';
 import type {
@@ -72,6 +73,31 @@ describe('repl judgment backends', () => {
     expect(events.some((event) => event.type === 'error')).toBe(false);
     expect(outputs(events)).toContain('yes');
     expect(backend.calls).toBe(1);
+  });
+
+  it('gives direct DMLSession users a default llm judge', async () => {
+    const backend = new JsonJudgeBackend();
+    const session = await DMLSession.open({
+      workspacePath: workspace,
+      tools: new Map(),
+      runnerOptions: {
+        model: 'test-model',
+        provider: 'openai',
+        streaming: false,
+        llmBackend: backend,
+      },
+    });
+    try {
+      const events: DMLEvent[] = [];
+      for await (const event of session.query('verify("the customer is angry", "Is this urgent?", T), output(T)')) {
+        events.push(event);
+      }
+      expect(events.some((event) => event.type === 'error')).toBe(false);
+      expect(outputs(events)).toContain('yes');
+      expect(backend.calls).toBe(1);
+    } finally {
+      await session.dispose();
+    }
   });
 
   it('accepts an explicit judgeSelection registry', async () => {
