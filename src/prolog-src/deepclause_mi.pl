@@ -89,6 +89,9 @@
     repl_commit/3,
     repl_last_commit_summary/2,
     repl_execute_frame/4,
+    read_workspace_file/3,
+    workspace_read_path/3,
+    read_workspace_chars/2,
     repl_record_meta/3,
     repl_memory_term/3,
     repl_get_memory/3,
@@ -827,7 +830,7 @@ process_directive(consult(File), SessionId) :-
     !,
     % Set session ID for get_session_id to find, then call our custom consult
     nb_setval(current_session_id, SessionId),
-    system:read_file_to_string(File, Code, []),
+    read_workspace_file(SessionId, File, Code),
     consult_string(Code, SessionId).
 %% Handle use_module directive
 process_directive(use_module(Module), SessionId) :-
@@ -6322,6 +6325,41 @@ pattern_normalise(Value, Normalised) :-
     split_string(Lower, " _-", "", Parts),
     atomic_list_concat(Parts, '', Normalised).
 
+%% read_workspace_file(+SessionId, +File, -Content)
+%%
+%% `read_file_to_string/3` goes through SWI's `absolute_file_name/2`, which
+%% resolves differently inside an `execute` frame and can turn
+%% `/workspace/foo` into `/home/foo` (or a basename under another cwd).  The
+%% mounted FS accepts the absolute path through open/4, so read it explicitly
+%% and join the lines.  Relative paths are anchored at the session workspace.
+read_workspace_file(SessionId, File, Content) :-
+    deepclause_mi:workspace_read_path(SessionId, File, Path),
+    setup_call_cleanup(
+        open(Path, read, Stream, [encoding(utf8)]),
+        deepclause_mi:read_workspace_chars(Stream, Chars),
+        close(Stream)
+    ),
+    string_chars(Content, Chars).
+
+workspace_read_path(_SessionId, File, Path) :-
+    (   string(File)
+    ->  Text = File
+    ;   atom(File)
+    ->  atom_string(File, Text)
+    ;   throw(error(type_error(file_name, File), context(read_workspace_file/3, _)))
+    ),
+    (   sub_string(Text, 0, 1, _, "/")
+    ->  Path = Text
+    ;   atomic_list_concat(['/workspace/', Text], '', Path)
+    ).
+
+read_workspace_chars(Stream, [Char|Chars]) :-
+    get_char(Stream, Char),
+    Char \== end_of_file,
+    !,
+    deepclause_mi:read_workspace_chars(Stream, Chars).
+read_workspace_chars(_, []).
+
 %% repl_inject_workspace_predicates(+SessionId)
 %% Idempotent: assertz/1 the same clauses twice is harmless (a duplicate clause
 %% yields the same solution once? no - it yields twice), so clear first.
@@ -6332,9 +6370,9 @@ repl_inject_workspace_predicates(SessionId) :-
         catch(assertz(Clause), _, true)).
 
 workspace_predicate_clause(S, (S:read_file(F, C) :-
-    system:read_file_to_string(F, C, []))).
-workspace_predicate_clause(S, (S:read_file_to_string(F, C, O) :-
-    system:read_file_to_string(F, C, O))).
+    deepclause_mi:read_workspace_file(S, F, C))).
+workspace_predicate_clause(S, (S:read_file_to_string(F, C, _O) :-
+    deepclause_mi:read_workspace_file(S, F, C))).
 workspace_predicate_clause(S, (S:write_file(F, C) :-
     system:open(F, write, St), system:write(St, C), system:close(St))).
 workspace_predicate_clause(S, (S:append_file(F, C) :-
@@ -6388,7 +6426,7 @@ mi_call(consult(File), StateIn, StateIn) :-
     !,
     get_session_id(SessionId),
     guard_not_frozen(SessionId),
-    system:read_file_to_string(File, Code, []),
+    read_workspace_file(SessionId, File, Code),
     consult_string(Code, SessionId).
 
 mi_call(use_module(Module), StateIn, StateIn) :-
@@ -6484,15 +6522,17 @@ consult_process_term(Head, SessionId) :-
     assertz(SessionId:Head).
 
 %% mi_call(read_file_to_string(File, Content, Options), +StateIn, -StateOut)
-mi_call(read_file_to_string(File, Content, Options), StateIn, StateIn) :-
+mi_call(read_file_to_string(File, Content, _Options), StateIn, StateIn) :-
     !,
-    system:read_file_to_string(File, Content, Options).
+    get_session_id(SessionId),
+    read_workspace_file(SessionId, File, Content).
 
 %% mi_call(read_file(File, Content), +StateIn, -StateOut)
 %% Simplified version without options
 mi_call(read_file(File, Content), StateIn, StateIn) :-
     !,
-    system:read_file_to_string(File, Content, []).
+    get_session_id(SessionId),
+    read_workspace_file(SessionId, File, Content).
 
 %% mi_call(write_file(File, Content), +StateIn, -StateOut)
 %% Write string content to a file
