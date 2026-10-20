@@ -884,6 +884,37 @@ workspace** pointing outside it; avoid committing those.
 
 ### Output Predicates
 
+#### `output(html(+Path))`
+
+Display a workspace HTML file as an interactive miniapp:
+
+```prolog
+agent_main :-
+    output(html("miniapp/index.html")).
+```
+
+The path is workspace-relative. The web host loads the file, inlines relative
+images, CSS and scripts from the same directory tree, and renders it in a
+sandboxed iframe. The miniapp runs without same-origin access to the app.
+
+Inside the miniapp, `window.dc.call(Goal)` runs a DML goal in the session or run
+that rendered it and returns a promise:
+
+```html
+<script>
+window.dc.call('double(21, X).').then((result) => {
+  console.log(result.bindings[0].value); // 42
+});
+</script>
+```
+
+The result contains `{ ok, output, bindings, error? }`. Calls are scoped to the
+rendering owner; the iframe cannot access the app DOM, OPFS, cookies or other
+sessions. Keep miniapp calls bounded and deterministic.
+
+The same rendering is available through an `html-file` fenced block in an
+answer. `output(html(Path))` is the DML-level form.
+
 #### `output(+Text)`
 
 Emit an output event to the caller. Does NOT affect the LLM conversation. Useful for progress updates:

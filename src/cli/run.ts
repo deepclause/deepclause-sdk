@@ -237,6 +237,9 @@ export async function run(
         case 'answer':
           result.answer = event.content;
           break;
+        case 'html':
+          if (event.html?.path) result.output.push(`[html: ${event.html.path}]`);
+          break;
         case 'error':
           result.error = event.content;
           if (event.trace) result.trace = event.trace;

@@ -3220,6 +3220,7 @@ step_engine(SessionId, Status, Content, Payload) :-
 %% process_engine_result(+Result, -Status, -Content, -Payload)
 process_engine_result(output(Text), output, Text, none) :- !.
 process_engine_result(media(Payload), media, '', Payload) :- is_dict(Payload), !.
+process_engine_result(html(Payload), html, '', Payload) :- is_dict(Payload), !.
 process_engine_result(log(Text), log, Text, none) :- !.
 process_engine_result(suspend(Continuation, Memory), suspend, '', payload{continuation: Continuation, memory: Memory}) :- !.
 process_engine_result(answer(Text), answer, Text, none) :- !.
@@ -5392,6 +5393,22 @@ mi_call(output(Media), StateIn, StateIn) :-
     get_depth(StateIn, Depth),
     add_trace_entry(SessionId, media, media, [Path], Depth),
     engine_yield(media(media{path: Path, mimeType: Mime, kind: Kind, data: Data})).
+
+%% mi_call(output(html(Path)), +StateIn, -StateOut)
+%% Present a workspace HTML file as an interactive miniapp.
+mi_call(output(html(Path)), StateIn, StateIn) :-
+    nonvar(Path),
+    (   string(Path)
+    ->  HtmlPath = Path
+    ;   atom(Path)
+    ->  atom_string(Path, HtmlPath)
+    ;   fail
+    ),
+    get_session_id(SessionId),
+    get_depth(StateIn, Depth),
+    add_trace_entry(SessionId, html, html, [HtmlPath], Depth),
+    !,
+    engine_yield(html(html{path: HtmlPath})).
 
 %% mi_call(output(Text), +StateIn, -StateOut)
 mi_call(output(Text), StateIn, StateIn) :-

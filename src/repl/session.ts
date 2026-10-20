@@ -265,6 +265,16 @@ function historyEventFromRecord(record: Record<string, unknown>): DMLEvent | und
     case 'answer':
     case 'error':
       return { type, frameKind, content };
+    case 'html':
+      return {
+        type,
+        frameKind,
+        html: {
+          path: typeof (record.html as { path?: unknown } | undefined)?.path === 'string'
+            ? (record.html as { path: string }).path
+            : '',
+        },
+      };
     case 'log':
       return { type, frameKind, content, level: record.level as DMLEvent['level'] };
     case 'tool_call':

@@ -626,6 +626,15 @@ export class DMLRunner {
           break;
         }
 
+        case 'html': {
+          const payload = (step.payload ?? {}) as Record<string, unknown>;
+          yield {
+            type: 'html',
+            html: { path: typeof payload.path === 'string' ? payload.path : '' },
+          };
+          break;
+        }
+
         case 'log':
           if (step.content) {
             yield { type: 'log', content: step.content };

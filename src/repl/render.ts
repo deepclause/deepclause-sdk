@@ -624,6 +624,11 @@ export class ReplRenderer implements ReplEventRenderer {
       return;
     }
 
+    if (event.type === 'html') {
+      this.writeLine(this.paint(`▣ ${event.html?.path ?? ''}`, ANSI.cyan));
+      return;
+    }
+
     if (event.type === 'media') {
       this.renderMedia(event);
       return;
