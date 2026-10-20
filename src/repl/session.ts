@@ -122,6 +122,11 @@ export interface DMLSessionOptions {
   /** Runner configuration (model/provider/temperature/backend). */
   runnerOptions: RunnerOptions;
   tools?: Map<string, ToolDefinition>;
+  /**
+   * Extra host tools offered to the TypeScript authoring agent (in addition to
+   * the harness tools). DML `task/N` still uses `tools`.
+   */
+  authoringTools?: Map<string, ToolDefinition>;
   toolPolicy?: ToolPolicy | null;
   /** Legacy harness-only input handler (prefer onInput). */
   onInputRequired?: (prompt: string) => Promise<string>;
@@ -337,6 +342,7 @@ export class DMLSession {
   private model: string;
   private provider: string;
   private tools: Map<string, ToolDefinition>;
+  private authoringTools: Map<string, ToolDefinition>;
   private toolPolicy: ToolPolicy | null;
   private inputHandler?: (prompt: string, options?: string[]) => Promise<string | undefined>;
   /** Host-side interaction for an opened form (docs/DML_FORMS.md). */
@@ -420,6 +426,7 @@ export class DMLSession {
     this.model = options.runnerOptions.model;
     this.provider = String(options.runnerOptions.provider);
     this.tools = options.tools ?? new Map();
+    this.authoringTools = options.authoringTools ?? new Map();
     this.toolPolicy = options.toolPolicy ?? null;
     this.inputHandler = options.onInput
       ?? (options.askUser ? (prompt, choices) => options.askUser!(prompt, choices).then((r) => ('cancelled' in r ? undefined : r.answer)) : undefined)
@@ -1889,8 +1896,12 @@ export class DMLSession {
 
   private async getHarnessAgent(): Promise<HarnessAgent> {
     if (this.harnessAgent) return this.harnessAgent;
+    const authoringTools = createHarnessTools(this);
+    for (const [name, tool] of this.authoringTools) {
+      if (!authoringTools.has(name)) authoringTools.set(name, tool);
+    }
     this.harnessAgent = new HarnessAgent({
-      tools: createHarnessTools(this),
+      tools: authoringTools,
       llmBackend: this.llmBackend!,
       model: this.model,
       temperature: this.temperature,

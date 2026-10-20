@@ -48,6 +48,8 @@ export interface HarnessReplOptions {
   streaming?: boolean;
   llmBackend?: LLMBackend;
   tools?: Map<string, ToolDefinition>;
+  /** Extra host tools offered to the authoring agent (not DML task/N). */
+  authoringTools?: Map<string, ToolDefinition>;
   toolPolicy?: ToolPolicy | null;
   /** Legacy harness-only input handler (prefer onInput). */
   onInputRequired?: (prompt: string) => Promise<string>;
@@ -253,6 +255,7 @@ export async function createHarnessRepl(options: HarnessReplOptions): Promise<Ha
     gasLimit: options.gasLimit,
     initialHarnessMemory: options.initialHarnessMemory,
     tools: options.tools,
+    authoringTools: options.authoringTools,
     toolPolicy: options.toolPolicy,
     onInputRequired: options.onInputRequired,
     onInput: options.onInput,
