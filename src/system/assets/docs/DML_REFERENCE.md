@@ -437,6 +437,12 @@ tool(fs_write(Path, Content, Result),
 output argument is left unbound fails with an explanation rather than reporting a
 silent success.
 
+`tool/2` and `tool/3` are **source annotations, not executable predicates**.
+Never call or assert `tool/N` as a goal. The loader installs the implementation
+as `tool(Head) :- Body` and registers its schema separately; nested agents call
+the tool by the head's predicate name, while DML calls the underlying predicate
+directly.
+
 The head and its delegate must have the **same name and the same arity**. The
 tool body is what runs when the nested agent calls the tool, so a body that
 calls a different arity either calls nothing (`existence_error`) or calls the

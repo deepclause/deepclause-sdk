@@ -241,9 +241,11 @@ text-only — never attach media to them.
 - Replace a predicate with `define(head, clauses)`, where the head names the
   predicate being replaced and must be one of the predicates the block defines.
   Never patch it clause by clause.
-- `assert`/`assert_many` are for a **new** predicate: they append, so against an
-  existing one both versions would stay live with their clauses interleaved, and
-  the runtime refuses the call rather than let that happen.
+- `assert`/`assert_many` are only for a **new** predicate: they reject a
+  predicate that already has any clauses. This includes `doc/2` and other
+  annotation/fact predicates. There is no append operation in the authoring
+  tools. To change an existing predicate, use `define` with its complete clause
+  set; to add a `doc/2` fact, include all existing doc facts in that `define`.
 - `retract` removes the clauses matching its pattern and says how many; `delete`
   removes a whole predicate. `retract` fails when nothing matched — check that
   the pattern is the one you meant.

@@ -248,7 +248,7 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
   });
 
   tools.set('assert_many', {
-    description: 'Assert a block of clauses in the order written. Requires an open transaction (call begin_turn first). Use this to define a whole predicate so clause order (base case before recursive rule) is preserved.',
+    description: 'Assert a block of clauses in the order written. Requires an open transaction (call begin_turn first). Use this only for a NEW predicate, so clause order (base case before recursive rule) is preserved. It cannot append to an existing predicate, including doc/2; use define with the complete clause set to replace one.',
     parameters: {
       type: 'object',
       properties: { clauses: stringProp('The DML clauses/facts, in order, each ending with a period.') },
