@@ -241,6 +241,8 @@ text-only — never attach media to them.
 - Replace a predicate with `define(head, clauses)`, where the head names the
   predicate being replaced and must be one of the predicates the block defines.
   Never patch it clause by clause.
+- Open the transaction once with `begin_turn`; it is idempotent and returns a
+  reminder if it is already open. Do not call it again before every edit.
 - `assert`/`assert_many` are only for a **new** predicate: they reject a
   predicate that already has any clauses. This includes `doc/2` and other
   annotation/fact predicates. There is no append operation in the authoring

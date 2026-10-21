@@ -62,7 +62,7 @@ export interface HarnessToolController {
   /** Concise harness manifest for the system prompt. */
   manifest(): Promise<string>;
   /** Snapshot the harness and open a transaction. */
-  beginTurn(): Promise<{ ok: boolean; error?: string }>;
+  beginTurn(): Promise<{ ok: boolean; error?: string; message?: string }>;
   /** Validate and commit the open transaction; records a history version. */
   endTurn(): Promise<HarnessCommitResult>;
   /** Restore the last snapshot and discard edits. */
@@ -189,7 +189,7 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
   });
 
   tools.set('begin_turn', {
-    description: 'Open an edit transaction (snapshot the harness). You MUST call this before the first edit; `define`/`assert`/`assert_many`/`retract`/`delete` are refused while no transaction is open. `end_turn` commits it, `rollback` discards it.',
+    description: 'Open the edit transaction (snapshot the harness). Call this once before the first edit; it is a no-op if the transaction is already open. `define`/`assert`/`assert_many`/`retract`/`delete` are refused while no transaction is open. `end_turn` commits it, `rollback` discards it.',
     parameters: { type: 'object', properties: {}, required: [] },
     execute: async () => {
       return controller.beginTurn();

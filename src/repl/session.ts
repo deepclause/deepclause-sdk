@@ -2107,14 +2107,15 @@ export class DMLSession {
     return undefined;
   }
 
-  async beginTurn(): Promise<{ ok: boolean; error?: string }> {
-    // A second begin_turn would re-snapshot the *mid-transaction* state, so
+  async beginTurn(): Promise<{ ok: boolean; error?: string; message?: string }> {
+    // A second begin_turn must not re-snapshot the *mid-transaction* state:
     // `rollback` would stop meaning "the last committed harness" and the
-    // recorded diff would lose the edits made before it.
+    // recorded diff would lose edits made before it. Treat it as an idempotent
+    // reminder instead of an error so agents do not get stuck retrying it.
     if (this.transactionBefore !== null) {
       return {
-        ok: false,
-        error: 'a transaction is already open; call end_turn to commit it, or rollback to discard it',
+        ok: true,
+        message: 'transaction is already open; continue editing, then call end_turn to commit or rollback to discard',
       };
     }
     this.prologQuery(`deepclause_mi:repl_snapshot_save('${this.sessionId}')`);
