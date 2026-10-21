@@ -1,9 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-10-21
 
 ### Added
 
+- **`authoringTools`**: extra host tools offered to the TypeScript authoring agent
+  without changing the DML host-tool map, so an embedding can expose a capability
+  to the agent that a harness's `task/N` must not see.
+- **Workspace HTML artifacts**: `output(html(Path))` presents a workspace HTML file
+  as an interactive miniapp, carried as its own `html` event (so a web host can
+  render it, and history and the CLI keep it).
+- **Bounded authoring prompts**: `agentSystemPrompt` replaces the bundled authoring
+  guide (a compact profile for a small local model — it skips the project
+  `AGENTS.md` and the model catalogue), and `authoringToolNames` restricts the
+  authoring agent's tool list to fit a small context window.
 - **A turn can suspend itself and be resumed.** `suspend(+Continuation)` stops a
   turn at a safe point — the continuation is the goal that resumes it, e.g.
   `suspend(loop(State))` — and the host records that goal, the turn's memory and
@@ -24,6 +34,22 @@
 
 ### Fixed
 
+- **Nested `task/N` and `prompt/N` now run inside tools.** The tool engine was
+  missing the 8-argument (and 6-argument `prompt`) agent-loop request shapes, so a
+  tool body that called `task/N` failed to start a loop; nested loops also resolve
+  their `with_model/2` scope through the session resolver now instead of falling
+  back to the session default. `tool/3` participates in the indicator and
+  reserved-name bookkeeping like `tool/2`.
+- **Workspace files are read through the mounted workspace.** `read_file` and the
+  `consult` directive used `read_file_to_string/3`, whose `absolute_file_name/2`
+  resolves differently inside an `execute` frame (`/workspace/x` could become
+  `/home/x`); they now open the workspace-anchored path through `open/4`.
+- **A direct `DMLSession` gets the default `llm` judge.** Sessions created outside
+  `createHarnessRepl` — notably the browser child workers — had no judge
+  selection, so `judge/2` failed with `Unknown judgment backend: llm`.
+- **`begin_turn` is idempotent** and says so, instead of opening a second
+  transaction over the first (which silently re-snapshotted mid-transaction and
+  made `rollback` restore the wrong state).
 - **A suspension no longer loses the conversation.** The record's `memory` was
   `String(list)` of the decoded Prolog memory — `"[object Object],[object
   Object]"` — which then failed to load when the host made it the session's
