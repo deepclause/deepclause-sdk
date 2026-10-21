@@ -2069,6 +2069,7 @@ repl_assert_many(SessionId, ClausesText, Result) :-
 %% have no plain indicator here (process_clause owns them).
 repl_term_indicator((:- _), _) :- !, fail.
 repl_term_indicator((tool(_, _) :- _), _) :- !, fail.
+repl_term_indicator((tool(_, _, _) :- _), _) :- !, fail.
 repl_term_indicator((tool(_) :- _), _) :- !, fail.
 repl_term_indicator(Term, Name/Arity) :-
     repl_head_of(Term, Head),
@@ -3860,6 +3861,12 @@ process_tool_engine_result(request_llm(Messages), request_llm, '',
 process_tool_engine_result(request_judgment(Payload), request_judgment, '', Payload) :- !.
 process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ReasoningEffort, RecipeContext, ModelSpec, Mode), request_agent_loop, '',
     payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: ReasoningEffort, recipeContext: RecipeContext, modelSpec: ModelSpec, mode: Mode}) :- !.
+%% task/N from inside a tool: includes the model spec.
+process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ReasoningEffort, RecipeContext, ModelSpec), request_agent_loop, '',
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: ReasoningEffort, recipeContext: RecipeContext, modelSpec: ModelSpec}) :- !.
+%% prompt/N from inside a tool: no tools and no memory, but carries the model spec.
+process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ModelSpec), request_agent_loop, '',
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: none, recipeContext: "", modelSpec: ModelSpec}) :- !.
 process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ReasoningEffort, RecipeContext), request_agent_loop, '',
     payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: ReasoningEffort, recipeContext: RecipeContext}) :- !.
 %% Legacy 5-arg format (no reasoning/recipe)
@@ -5741,6 +5748,10 @@ repl_reserved_clause(repl_delete(_)) :-
     !,
     fail.
 repl_reserved_clause((tool(ToolHead, _) :- _)) :-
+    !,
+    functor(ToolHead, Name, _),
+    repl_reserved_name(Name).
+repl_reserved_clause((tool(ToolHead, _, _) :- _)) :-
     !,
     functor(ToolHead, Name, _),
     repl_reserved_name(Name).

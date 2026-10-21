@@ -2427,6 +2427,11 @@ export class DMLRunner {
             const preparedMemory = memory;
 
             const nestedConversational = String(toJsValue((payload as Record<string, unknown>)?.mode) ?? '') === 'chat';
+            // Nested tasks/prompts carry the same with_model scope as top-level
+            // ones; resolve it through the session resolver.
+            const nestedScopedModel = await this.resolveScope(
+              (payload as Record<string, unknown>)?.modelSpec,
+            );
             // Extract reasoning effort and recipe context for nested loops
             const nestedReasoningEffort = String(toJsValue((payload as Record<string, unknown>)?.reasoningEffort) ?? 'none');
             const nestedRecipeContext = String(toJsValue((payload as Record<string, unknown>)?.recipeContext) ?? '');
@@ -2501,12 +2506,13 @@ export class DMLRunner {
                 excludedTools: nestedExcludedTools,
                 capabilityTool: this.options.capabilityTool,
                 modelOptions: {
-                  model: this.options.model,
-                  provider: this.options.provider,
-                  temperature: this.options.temperature,
-                  maxOutputTokens: this.options.maxTokens,
+                  model: nestedScopedModel?.id ?? this.options.model,
+                  provider: nestedScopedModel?.provider ?? this.options.provider,
+                  temperature: nestedScopedModel?.temperature ?? this.options.temperature,
+                  maxOutputTokens: nestedScopedModel?.maxTokens ?? this.options.maxTokens,
                   baseUrl: this.options.baseUrl,
                   providerOptions: nestedProviderOptions,
+                  target: nestedScopedModel,
                 },
                 streaming: this.options.streaming,
                 debug: this.options.debug,
