@@ -36,6 +36,14 @@ CLI commands: `init`, `login`, `logout`, `set-backend`, `set-model`, `show-model
   `delete`/`execute`/`reference`/`models`/`write_file`/`show_image`/
   `generate_image`/`visualize`), and can run several
   committed turns in one request.
+- **Suspend and resume**: a turn can stop at a safe point and be continued from
+  disk. `suspend(loop(State))` records the continuation, the turn's memory and the
+  module version in `sessions/<id>/suspend.json`; `--session` runs it after
+  restoring the harness and memory. A per-session ledger of held streams/forms
+  makes a suspension refuse while a file or form is open, so a resumed session can
+  never inherit a half-written file. Host-triggered suspension, resumable
+  `task/N` loops and crash recovery are designed in
+  [`DML_REPL_SUSPEND_RESUME.md`](./DML_REPL_SUSPEND_RESUME.md) §7–§10.
 - **Forms**: a harness asks the human a **structured question** and acts on the
   answer. Always available — no directive, no `use_module`. `form/2` renders,
   `await_form/2` blocks until the user acts (`submit`/`cancel`/`invalid`), the

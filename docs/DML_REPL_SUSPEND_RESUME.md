@@ -4,9 +4,20 @@ A turn can **stop at a safe point** and write down the goal that continues it, s
 `--session` picks the program up where it left off instead of dropping the user
 into a half-finished state.
 
-Status: **implemented** (cooperative suspension). Mid-execution suspension — a
-continuation reified by the meta-interpreter — is designed but *not built*; §7
-records the shape and why it is a separate step.
+Status: **cooperative suspension is implemented**; the rest of this document is
+design, marked per section. What exists, what is designed, and what needs a
+different mechanism:
+
+| Capability | State | Where |
+|---|---|---|
+| `suspend/1` written by the program, resumed by `--session` | **shipped** | §1–§5 |
+| never suspending while holding a stream or form | **shipped** | §3 |
+| the turn's memory in the record and in `harness.json` | **shipped** (was broken, see §4) | §4 |
+| *host*-triggered suspension (`/suspend`, SIGINT) at the program's next checkpoint | **designed** — needs atomic record writes first | §8 |
+| suspending across a `task/N`/`chat/N` turn boundary | **shipped for `chat`** (a `chat` is already one turn of a DML loop); **needs a primitive for `task`** | §9 |
+| suspending *inside* a `task/N` or mid-goal | **needs the CPS machine** | §7, §9 |
+| `kill -9` / power loss | **up to the last *persisted* checkpoint** — needs eager checkpoints + atomic writes | §10 |
+
 
 Related: [`DML_REPL_SESSION_HISTORY.md`](./DML_REPL_SESSION_HISTORY.md) §10
 (resume of a session's harness and memory), [`SUBAGENTS.md`](./SUBAGENTS.md)
@@ -180,7 +191,95 @@ An exact alternative — snapshotting the whole SWI-WASM instance inside
 `agentvm` — is much cheaper to build, but pins the runtime and still cannot
 capture the host half (model calls, forms).
 
-## 8. Follow-ups
+## 8. Host-triggered suspension (designed, not built)
+
+Today the *program* decides where it stops. The other direction — the host says
+"suspend now" (a `/suspend` command, SIGINT, a pool reaper) — needs two pieces,
+and only one of them is missing.
+
+**The trigger point already exists.** Every goal that is not control structure
+runs through the `mi_call/3` catch-all, which is the atomic-step boundary (control
+structure recurses through `mi_call`; host leaves have their own clauses and skip
+it). A flag checked there fires at the next step that is not inside a host call.
+
+**The continuation is the missing half.** At that point the rest of the body is on
+the native Prolog stack, so the cheap, correct mechanism is a *program-supplied
+anchor*:
+
+```prolog
+checkpoint(+Continuation)          % records where to resume, and persists it
+    ...
+    suspend(Continuation)          % the host-flag case takes this at the next step
+```
+
+with the machine checking, at each step:
+
+```prolog
+    host_suspend_requested(SessionId),
+    \+ session_resource(SessionId, _),          % the §3 guard defers it
+    session_checkpoint(SessionId, Depth, Cont) % scoped to this frame
+```
+
+What that buys: the host decides *when*, the program decides *where*, at most one
+iteration away; the ledger defers a request that arrives mid-file; and the
+guarantee is **at-least-once since the checkpoint**, so the rule is *checkpoint
+after the effect* (`task(…)` then `checkpoint(agent(Memory))`, never the reverse).
+Scope the checkpoint by frame depth, or an `execute` child's checkpoint will
+hijack the parent's suspension.
+
+*Prerequisite:* `HistoryStore.writeJson` is `fs.writeFile`, not temp-file +
+`rename`. A crash mid-write truncates `suspend.json`/`harness.json`, which is the
+one failure mode that turns "resume" into "lose the session".
+
+## 9. Agent loops inside `task/N` and `chat/N` (partly designed)
+
+An agent loop's own state is small and already state-shaped: `messages` (system,
+user/assistant, tool results), the tool scope, `variables`, `outputs`, usage.
+
+- **`chat/N` needs nothing.** `loop :- input(A), chat(A), loop` runs one `chat/N`
+  per message, so a suspension between turns loses nothing: the conversation *is*
+  `state.memory`, which the record already carries (§4).
+- **Between `task/N` iterations** is the only seam (a model call is a leaf, so it
+  can never be interrupted). Reaching it needs a primitive whose `State` *is* the
+  inner history, because a `task/N` is a single goal and its continuation is the
+  rest of the body:
+
+  ```prolog
+  agent_loop(State) :-
+      agent_step(State, Next),              % one model call + its tool calls
+      (   Next == done(Reply) -> answer(Reply)
+      ;   checkpoint(agent_loop(Next)),     % ← the suspension anchor
+          agent_loop(Next)
+      ).
+  ```
+
+  with `runAgentLoop` gaining a `resumeMessages` entry (today it rebuilds
+  `[system, …history, {user: "Subtask: …"}]`). Then a suspension saves *only the
+  inner messages* — which is what §8's checkpoint mechanism needs, and much
+  smaller than a Prolog frame.
+- **Inside a `task/N`** — mid-thinking, mid-tool — remains out of reach without
+  the CPS machine (§7): the DML continuation is the rest of the body.
+
+## 10. Sudden interruptions (designed, not built)
+
+| Interruption | Reachable? | How |
+|---|---|---|
+| SIGINT / SIGTERM | yes, fully | set the §8 flag, take the suspension at the next checkpoint (bounded grace, then abort as today); a second Ctrl-C kills |
+| `kill -9`, power loss | up to the **last persisted checkpoint** | nothing in-process runs, so `checkpoint/1` must write its record when taken (one small atomic file write), not at suspend time |
+| an L2 worker crash | yes | the main host survives, the dead worker's mailbox waiter is dropped (already fixed), the process shows `crashed`; the same checkpoint resume applies |
+
+Already in place and helping: the transcript is written through every 250 ms, and
+the turn record is written at *start* with `outcome: "running"`, so an interrupted
+turn is detectable. Still needed: **atomic record writes** (see §8) and a
+**heartbeat + lock**, so a cron waker and a human cannot resume the same agent
+twice and a stale lock is taken over safely.
+
+The honest guarantee is **at-least-once**: work between the last persisted
+checkpoint and the crash is repeated on resume, never skipped. Exactly-once would
+require the effect and the checkpoint to be one transaction, which a Prolog goal
+and a file write are not.
+
+## 11. Follow-ups
 
 - **Re-spawn services on resume.** `services.jsonl` already records each `serve`
   declaration (name, goal, priority, code version); `recordedProcesses()` reads it
@@ -189,8 +288,7 @@ capture the host half (model calls, forms).
   that keep their state in the goal argument.
 - **`hibernate/1`** for processes: a process may suspend returning its
   continuation goal, which is what makes a service's suspension exact.
-- **Host-initiated suspend**: a `/suspend` request that takes effect at the
-  program's next `suspend/1` (or throws a clear "the program has no safe point").
+- **Host-initiated suspend** (§8), which starts with atomic record writes.
 - **Resume a turn interrupted by a crash** (the `running` outcome in
   `turns.jsonl`): replay to the last recorded tool result and continue, never
   re-running a leaf that already has a result.
