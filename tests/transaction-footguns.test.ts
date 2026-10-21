@@ -166,17 +166,17 @@ describe('retract removes what it was told to', () => {
 });
 
 describe('one transaction at a time', () => {
-  it('refuses a nested begin_turn, so rollback still means the last commit', async () => {
+  it('treats a nested begin_turn as a reminder without re-snapshotting', async () => {
     await install('delta/1', 'delta(1).');
 
     expect((await repl.session.beginTurn()).ok).toBe(true);
     await repl.session.define('delta/1', 'delta(2).');
     const nested = await repl.session.beginTurn();
-    expect(nested.ok).toBe(false);
-    expect(String(nested.error)).toMatch(/already open/);
+    expect(nested.ok).toBe(true);
+    expect(String(nested.message)).toMatch(/already open/);
 
-    // Without the refusal this re-snapshot restored delta(2) — the state the
-    // agent was trying to discard.
+    // The idempotent call must not re-snapshot delta(2); rollback still
+    // restores the last committed delta(1).
     await repl.session.rollbackTurn();
     expect(clausesOf('delta(X)')).toEqual([1]);
   });
