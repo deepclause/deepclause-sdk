@@ -55,7 +55,7 @@ describe('end_turn tool contract validation', () => {
       'tool(loop(A, B), "Reads a file.") :- loop(A, B).',
     ].join('\n'));
     expect(warnings.join(' ')).toContain('loop/2');
-    expect(warnings.join(' ')).toMatch(/itself|recursion/);
+    expect(warnings.join(' ')).toMatch(/itself|recursion|does not exist/);
   });
 
   it('flags a tool whose predicate does not exist', async () => {

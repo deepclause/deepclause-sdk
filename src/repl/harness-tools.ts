@@ -179,7 +179,7 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
     controller.isFrozen() ? { ok: false, error: `harness is frozen; ${name} is disabled` } : undefined;
 
   tools.set('listing', {
-    description: 'Read the harness: all predicates (filter "all"), one predicate ("Name/Arity"), "tools", "scripts", or a name prefix. Call this before editing.',
+    description: 'Read the harness: all predicates (filter "all"), one predicate ("Name/Arity"), "tools", "tools:all", "scripts", or a name prefix. Tool annotations are shown under their predicate. Call this before editing.',
     parameters: {
       type: 'object',
       properties: { filter: stringProp('all (default), a Name/Arity, tools, scripts, or a name prefix.') },
@@ -258,7 +258,7 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
   });
 
   tools.set('retract', {
-    description: 'Remove the clauses matching a pattern, e.g. retract("f(1)") or retract("f(X) :- g(X)"). Reports how many were removed. Requires an open transaction (call begin_turn first). Reserved names are protected.',
+    description: 'Remove the clauses matching a pattern, e.g. retract("f(1)") or retract("f(X) :- g(X)"). A tool annotation pattern such as retract("tool(f(_, X), _)") removes that tool. Reports how many were removed. Requires an open transaction (call begin_turn first). Reserved names are protected.',
     parameters: {
       type: 'object',
       properties: { clause: stringProp('The clause pattern to retract (no trailing period required).') },
@@ -268,7 +268,7 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
   });
 
   tools.set('delete', {
-    description: 'Delete a predicate entirely (abolishes all its clauses), e.g. delete("describe_image/2"). Requires an open transaction (call begin_turn first).',
+    description: 'Delete a predicate entirely (abolishes all its clauses), e.g. delete("describe_image/2"), or one tool annotation with delete("tool:describe_image/2"). Requires an open transaction (call begin_turn first).',
     parameters: {
       type: 'object',
       properties: { predicate: stringProp('The predicate indicator to delete, e.g. "describe_image/2".') },

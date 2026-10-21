@@ -533,6 +533,10 @@ export type FrameKind = 'query' | 'nested' | 'object';
 export interface SchemaField {
   name: string;
   type: string;
+  /** For `list(T)` fields: the element type. */
+  itemType?: string;
+  /** For a nested `schema(Name)` (or a list of one): its fields. */
+  fields?: SchemaField[];
   required: boolean;
   /** Absent when the field declares no default. */
   default?: unknown;

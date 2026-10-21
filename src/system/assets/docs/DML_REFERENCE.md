@@ -290,7 +290,18 @@ extract_authors(Text, Authors) :-
 - An absent `required` field **fails the step** with a message naming the field, so
   the agent can correct it in the same turn.
 - A field of the wrong type fails the same way. Types are `string`, `integer`,
-  `number`, `boolean`, `object`, `array`.
+  `number`, `boolean`, `object`, `array`, `list(Type)`, or `schema(Name)` /
+  `schema(Name, _)` for a nested object. Nested schemas are validated and filled
+  recursively, including a list of them:
+
+  ```prolog
+  schema(note, [field(pitch, string, required), field(beats, number, required)]).
+  schema(part, [field(name,  string, required),
+                field(notes, list(schema(note, _)), required)]).
+  schema(score, [field(title, string, required),
+                 field(parts, list(schema(part, _)), required),
+                 field(bpm,   integer, default(90))]).
+  ```
 - An **undeclared** field is kept, not dropped: a model mistake stays visible
 - The field list is **described to the model** in the step's own instructions, and a
   missing required or wrong-typed field is reported by name inside the same turn,
@@ -341,6 +352,24 @@ task("Extract user details", object(User)).
 **Note:** The LLM during `task()` can only call tools defined in DML (see [Tool Definitions](#tool-definitions)). Registered TypeScript tools are not automatically available - this gives you control over what the LLM can do.
 
 ---
+
+### `run_script(+Name, +Args, -Value)`
+
+Run the script linked by `script_file(Name, Path)`. `Args` is a list; numbers and
+atoms are converted to the strings `argv` expects. The result is parsed as JSON
+when stdout is JSON, otherwise returned as the stdout string. A non-zero exit
+throws the script's stderr, so a failed fetch cannot become an empty list.
+
+```prolog
+script_file(count_words, "scripts/count_words.py").
+
+count_words(File, Count) :-
+    run_script(count_words, [File], Stats),
+    get_dict(words, Stats, Count).
+```
+
+This replaces the repeated `script_file`, `exec`, `get_dict(exitCode)`,
+`get_dict(stdout)` and `atom_json_dict` sequence in every script-backed skill.
 
 ### `exec(+ToolCall, -Output)`
 
@@ -402,12 +431,12 @@ harness predicate to the nested agent that runs inside `task/N`. Define the
 predicate normally, then add a `tool/2` clause that delegates to it:
 
 ```prolog
-% 1. The capability: a normal predicate, callable from `execute` and `/goal`.
+% 1. The capability: a normal predicate, callable from `execute` and as a goal.
+script_file(count_words, "scripts/count_words.py").
+
 count_words(File, Count) :-
-    script_file(count_words, Script),
-    format(atom(Cmd), "python3 '~w' '~w'", [Script, File]),
-    exec(bash(command: Cmd), Result),
-    get_dict(stdout, Result, Count).
+    run_script(count_words, [File], Stats),   % resolves the link, checks exitCode, parses JSON
+    get_dict(words, Stats, Count).
 
 % 2. The annotation: exposes it to the nested agent. Thin body only.
 tool(count_words(File, Count), "Count words in a workspace file.") :-
@@ -453,10 +482,14 @@ tool again and recurses forever:
 tool(bibliography(Query, Max), "…") :-
     bibliography(Query, Max, Entries).
 
-% WRONG: calls itself; a nested agent recurses until the budget is gone.
+% WRONG: the body does the work instead of delegating, so the capability is not a
+% predicate `execute` or another skill can call.
 tool(citations(Text, Citations), "…") :-
-    citations(Text, Citations).
+    task("Extract citations from {Text}", list(string(Citations))).
 ```
+
+Same-name delegation — `tool(citations(T, C), "…") :- citations(T, C).` — is the
+*correct* shape, provided `citations/2` exists.
 
 Nothing is checked when the clause is loaded, so both mistakes look fine until a
 nested agent calls the tool. `end_turn` reports them as contract warnings; treat
@@ -467,7 +500,7 @@ A predicate defined *only* inside a `tool/2` clause is invisible to
 the two so one implementation is reachable from both surfaces:
 
 ```prolog
-/goal count_words("report.txt", C).          % authoring agent
+count_words("report.txt", C).                % from execute, a goal, or another skill
 task("Count the words in report.txt.", N).   % nested agent calls the tool
 ```
 
@@ -489,7 +522,7 @@ safe_divide(A, B, Result) :-
     ;   Result is A / B
     ).
 
-tool(safe_divide(A, B, Result), "Safely divide two numbers.") :-
+tool(safe_divide(A, B, Result), "Safely divide two numbers.", [number, number]) :-
     safe_divide(A, B, Result).
 ```
 

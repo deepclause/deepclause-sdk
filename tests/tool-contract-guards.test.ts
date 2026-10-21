@@ -66,12 +66,15 @@ describe('a tool that returns no result', () => {
 });
 
 describe('a tool/3 type list that does not match its inputs', () => {
-  it('warns at load time', async () => {
+  it('warns at end_turn', async () => {
     workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'dc-tool-types-'));
     repl = await createHarnessRepl({ workspacePath: workspace, model: 'test-model', provider: 'openai' });
+    await repl.session.beginTurn();
     // Two types declared, but the head has one input and one output.
-    const loaded = await repl.session.loadCode('tool(bad(A, B), "Two inputs, no output.", [string, string]) :- A = B.');
-    expect(loaded.error).toBeUndefined();
-    expect((loaded.warnings ?? []).join('\n')).toContain('input argument');
+    const added = await repl.session.assertMany('tool(bad(A, B), "Two inputs, no output.", [string, string]) :- A = B.');
+    expect(added.error).toBeUndefined();
+    // Reported where the author still sees the change: end_turn, not stderr.
+    const committed = await repl.session.endTurn();
+    expect((committed.warnings ?? []).join('\n')).toContain('input argument');
   });
 });

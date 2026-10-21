@@ -14,6 +14,7 @@ import type {
   MemoryMessage,
   LLMBackend,
   ResolvedModel,
+  SchemaField,
   SuspendEventPayload,
   ToolDefinition,
   ToolPolicy,
@@ -137,6 +138,33 @@ export function decodeSolutionBindings(raw: unknown): DMLBinding[] {
   return bindings;
 }
 
+/** Decode schema field descriptors, including nested `fields` and `itemType`. */
+function decodeSchemaFields(rawFields: unknown[]): SchemaField[] {
+  return rawFields
+    .map((raw) => {
+      const field = toJsValue(raw);
+      if (!field || typeof field !== 'object') return undefined;
+      const f = field as Record<string, unknown>;
+      const name = f.name === undefined ? undefined : String(toJsValue(f.name));
+      if (!name) return undefined;
+      const required = Number(toJsValue(f.required)) === 1;
+      const rawDefault = toJsValue(f.default);
+      const hasDefault = rawDefault !== undefined && rawDefault !== 'no_default';
+      const rawItemType = f.itemType === undefined ? undefined : String(toJsValue(f.itemType));
+      const itemType = rawItemType && rawItemType !== 'none' ? rawItemType : undefined;
+      const nested = Array.isArray(f.fields) ? decodeSchemaFields(f.fields) : undefined;
+      return {
+        name,
+        type: String(toJsValue(f.type) ?? 'string'),
+        required,
+        ...(itemType ? { itemType } : {}),
+        ...(nested && nested.length > 0 ? { fields: nested } : {}),
+        ...(hasDefault ? { default: rawDefault } : {}),
+      };
+    })
+    .filter((field): field is SchemaField => field !== undefined);
+}
+
 export function decodeAgentOutputVars(rawOutputVars: unknown): (string | TypedVar)[] {
   const normalized = toJsValue(rawOutputVars);
   if (!Array.isArray(normalized)) {
@@ -155,19 +183,7 @@ export function decodeAgentOutputVars(rawOutputVars: unknown): (string | TypedVa
       const record = value as Record<string, unknown>;
       const typed = value as TypedVar;
       if (Array.isArray(record.fields)) {
-        typed.fields = record.fields
-          .map((raw) => {
-            const field = toJsValue(raw);
-            if (!field || typeof field !== 'object') return undefined;
-            const f = field as Record<string, unknown>;
-            const name = f.name === undefined ? undefined : String(toJsValue(f.name));
-            if (!name) return undefined;
-            const required = Number(toJsValue(f.required)) === 1;
-            const rawDefault = toJsValue(f.default);
-            const hasDefault = rawDefault !== undefined && rawDefault !== 'no_default';
-            return { name, type: String(toJsValue(f.type) ?? 'string'), required, ...(hasDefault ? { default: rawDefault } : {}) };
-          })
-          .filter((field): field is NonNullable<typeof field> => field !== undefined);
+        typed.fields = decodeSchemaFields(record.fields);
       }
       return typed;
     }
@@ -338,6 +354,8 @@ interface ParsedJudgment {
 interface ToolParamInfo {
   name: string;
   type: string;
+  /** Human label: the tool head's variable name (`Path`, `Question`). */
+  description?: string;
 }
 
 /**
@@ -1943,6 +1961,9 @@ export class DMLRunner {
           inputs.push({
             name: String(toJsValue(inputObj.name) ?? ''),
             type: String(toJsValue(inputObj.type) ?? 'string'),
+            description: typeof toJsValue(inputObj.description) === 'string'
+              ? String(toJsValue(inputObj.description))
+              : undefined,
           });
         }
       }
@@ -1954,6 +1975,9 @@ export class DMLRunner {
           outputs.push({
             name: String(toJsValue(outputObj.name) ?? ''),
             type: String(toJsValue(outputObj.type) ?? 'string'),
+            description: typeof toJsValue(outputObj.description) === 'string'
+              ? String(toJsValue(outputObj.description))
+              : undefined,
           });
         }
       }
@@ -1994,20 +2018,27 @@ export class DMLRunner {
       // A withheld tool keeps its place in the list (so a call gets the reason),
       // but carries no schema and a refusing implementation.
       if (excludedTools.includes(tool.name)) continue;
-      // Build JSON Schema properties from inputs
+      // Build JSON Schema properties from inputs. The wire name stays `argN`,
+      // and the head's variable name (`Path`, `Question`) is the description, so
+      // the model knows what an argument means.
       const properties: Record<string, { type: string; description?: string }> = {};
       const required: string[] = [];
-      
+
       for (const input of tool.inputs) {
         properties[input.name] = {
           type: prologTypeToJsonType(input.type),
-          description: `Input parameter (${input.type})`,
+          description: input.description ?? `Input (${input.type})`,
         };
         required.push(input.name);
       }
 
-      // Build description (without Prolog source - keep prompts clean)
-      const description = tool.description || `Tool: ${tool.name}`;
+      // Build description (without Prolog source - keep prompts clean). Name the
+      // output too: the last argument is the result, not another input.
+      const output = tool.outputs?.[0];
+      const description = [
+        tool.description || `Tool: ${tool.name}`,
+        output ? `Returns ${output.description ?? output.name}.` : '',
+      ].filter(Boolean).join(' ');
 
       // Capture tool name for closure
       const toolName = tool.name;

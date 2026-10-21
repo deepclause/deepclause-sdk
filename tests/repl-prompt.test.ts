@@ -167,9 +167,10 @@ describe('prompt mode', () => {
     expect(listing).not.toContain('task_named');
     expect(listing).not.toContain('prompt_named');
     expect(listing).not.toContain('typed_var');
-    expect(listing).toContain('task("Answer: {A}"');
-    expect(listing).toContain('prompt("Summarise: {A}"');
-    expect(listing).toMatch(/integer\([A-Z]/);
+    // Listing now prints the block as written, so the author's names survive.
+    expect(listing).toContain('task("Answer: {Question}"');
+    expect(listing).toContain('prompt("Summarise: {Topic}"');
+    expect(listing).toContain('integer(Count)');
 
     const exported = await repl.export('clauses.dml');
     const exportedPath = path.isAbsolute(exported.path) ? exported.path : path.join(workspace, exported.path);

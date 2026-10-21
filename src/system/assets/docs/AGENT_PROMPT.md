@@ -44,7 +44,7 @@ end at the invariants listed at the end of this section.
    calls `task/N`, `exec/2`, or writes a file must yield exactly one solution
    (`once/1`, `->`, or `!`).
 8. **Stop and show the user**: what works, what it does not do yet, how to run it
-   (`deepclause run <file>`, or `/dc-run <skill>` under pi), and what you would add
+   (the Run panel, or the `run` command), and what you would add
    next. Extend when they ask for the next piece.
 9. **Only then the production details** — typed or `schema/2` outputs, a
    `script_file/2` for mechanical work, `tool/2` to expose the predicate, and
@@ -104,7 +104,8 @@ A module is a set of Prolog clauses plus annotations:
 - `tool(Head, "desc") :- Goal.` — annotations that expose an existing predicate
   to the nested agent that runs inside `task/N` (see below).
 - `script_file(Name, Path)` — links a workspace file to the module (bundled on
-  export). It has no runtime semantics of its own; run the file with `bash`.
+  export). It has no runtime semantics of its own; run the file with
+  `run_script(Name, Args, Value)` (or the host's `exec` tool).
 
 # Inputs are arguments
 
@@ -116,16 +117,9 @@ research(Question, Answer) :-
     task("Answer this research question: {Question}", Answer).
 ```
 
-```text
-/goal research("Why is the sky blue?", A).
-```
-
-For a `deepclause run` entry point, define `agent_main/1` (or `/2`) and pass the
-arguments on the command line:
-
-```bash
-deepclause run research.dml "why is the sky blue?"
-```
+Call it as a goal (`research("Why is the sky blue?", A)`), or define
+`agent_main/1` (or `/2`) and pass the same values as positional arguments when the
+harness is run — the Run panel, the `run` command, or a skill command.
 
 Never invent an input of the form `question = "…"`, and never read an undeclared
 variable: a predicate's arguments are how a caller supplies values.
@@ -156,6 +150,43 @@ Call `listing` at the start of a session and again after every change.
   that outlive the call (and run the module as it was then). Testing a service
   therefore leaves it running: `ps` shows it, and you can talk to it from a later
   turn, or `/stop` it.
+
+# Your own run log
+
+`execute` returns only the bindings, the `output/1`/`answer/1` text (up to 4 000
+characters) and the last error. Everything else that happened — a nested task's
+streamed answer, each tool call it made, warnings, model calls — is in the
+session log, which you can read:
+
+```
+.deepclause/repl/sessions/<session-id>/events.jsonl   one JSON object per line
+.deepclause/repl/sessions/<session-id>/turns.jsonl    one line per turn
+.deepclause/repl/harnesses/<name>/changes.jsonl       versions and changed predicates
+```
+
+Each event has `ts`, `turn` and `type` (`task_activity`, `model_call`, `stream`,
+`tool_call`, `log`, `error`, `solution`, `output`, `finished`), and `frame:
+"nested"` when it came from an `execute` child (the agent's own events carry no
+frame). A failed `task/N` is usually a nested `error` plus the `tool_call` just
+before it.
+
+Find the session by listing `sessions/` (newest first by `startedAt` in
+`session.json`), then read the **tail**: the file is capped (1 MB in the web
+build) and reading it whole floods the context. From DML:
+
+```prolog
+exec(python(code: "
+import json, pathlib
+p = pathlib.Path('.deepclause/repl/sessions/<session-id>/events.jsonl')
+for line in p.read_text().splitlines()[-60:]:
+    e = json.loads(line)
+    if e.get('frame') == 'nested' and e['type'] in ('task_activity','tool_call','stream','log','error'):
+        print(e['type'], e.get('toolName') or e.get('content') or e.get('taskDescription') or '')
+"), R), get_dict(stdout, R, Tail).
+```
+
+Only an authoring REPL session writes these files; a one-shot runner does not.
+The log contains prompts and tool arguments, so treat it as workspace data.
 
 # Modify the module
 
@@ -204,7 +235,7 @@ from the transaction's tracked set: the nondeterminism probe skips them, and a
 directive that fails inside the file only warns. They still show up in the next
 commit's diff, so the change lands with no record of where it came from — which is
 exactly what makes it hard to review or undo. If you want code from another file,
-read it (`bash`, `read_file`) and add it with `assert_many`/`define`. Loading a
+read it (`read_file`, or a script) and add it with `assert_many`/`define`. Loading a
 harness (`-l`, `/load`) is a user action; if that is what is wanted, say so rather
 than performing it as an edit.
 
@@ -239,7 +270,7 @@ from your description, waits for the user, and reports what they entered:
 ```prolog
 agent_main :-
     system("You collect support tickets. Ask for whatever the case needs."),
-    with_tools([render_form, wait_for_form_change, close_form, set_result, finish],
+    with_tools([render_form, wait_for_form_change, close_form],
         task("Ask for the details this ticket needs, then report exactly what the user entered.",
              string(Summary))),
     answer(Summary).
@@ -366,14 +397,13 @@ loop :-
   first stays queued. Use it when a subagent or service should be able to wake the
   conversation (a mail check, a finished job) — one turn at a time, and the turn
   appears in the transcript like any other.
-- Use it as the **foreground goal** (`/goal agent_main`, `-g agent_main`), not
-  inside `execute` or a subagent: those would wait on a prompt nobody can answer.
+- Use it as the **foreground goal** (run `agent_main`), not inside `execute` or a
+  subagent: those would wait on a prompt nobody can answer.
 
 Do not reach for `task/N` for a conversation (it insists on a result and nags the
 model), and do not reach for `chat/1` when a single turn must return a value —
 that is `task/N`, with a **form** if the value comes from the person. A turn may
-open a form: the person fills it in and the turn continues. Full guide:
-[`docs/DML_CONVERSATION.md`](../../../../docs/DML_CONVERSATION.md).
+open a form: the person fills it in and the turn continues. Full guide: `reference("authoring")`.
 
 # Concurrency and subagents
 
@@ -444,16 +474,16 @@ question, write it in that final message.
 - `write_file(path, content)` writes any workspace file. It does **not** create
   parent directories; call `make_directory_path/1` first. The content is an
   ordinary string, so use it for SVG, JSON, or scripts instead of building them
-  inside a shell command. Then `show_image(path)` displays an image.
+  inside a quoted string. Then `show_image(path)` displays an image.
 - From DML, `output(media("path.png"))` shows a workspace image and
   `output(media{svg: Svg})` shows inline SVG. `save_image(Media, "out.svg")`
   writes a reference to a file.
 - `task("a red fox in snow", media(X))` generates an image and binds `X` to its
   workspace path; display it with `output(media(X))`.
-- Avoid multi-line literals inside `exec(bash(command: "…"))` (heredocs): `\n`
-  and `"` must be escaped for DML and again for the shell, and it breaks easily.
-  Use `write_file` for content; if you must use the shell, write the file with a
-  single-line `printf '%s' '…' > path`, not a heredoc.
+- Avoid multi-line literals inside `exec(...)`: `\n` and `"` must be escaped for
+  DML and again for the target language, and it breaks easily. Write the file with
+  `write_file/2`, or keep the program in `scripts/` and link it with
+  `script_file/2`.
 
 # Choosing models
 
@@ -515,29 +545,8 @@ Facts persist across turns and sessions, appear in `listing`, and travel with
 `export`. Prefer a fact for stable knowledge the user will ask about again; keep
 large datasets in a file or a linked script.
 
-The module also records its own **history**, queryable from DML (system-owned:
-excluded from `listing`/`export`, but callable):
-
-- `harness_change(Version, Timestamp, Kind, SessionId, Turn)` — every commit,
-  load, or reset (`Kind` is `commit` | `load` | `reset`).
-- `harness_changed(Version, Name, Arity, Action)` — predicates a version
-  added/removed/replaced.
-- `harness_head(Version, Timestamp, SessionId, Turn)` — the current version.
-- `harness_rollback(From, To, Timestamp, SessionId, Turn)` — a rollback.
-- `harness_session(SessionId, StartedAt, Model, Backend, TraceDir)`,
-  `harness_session_end/2`.
-- `harness_turn(SessionId, Turn, Timestamp, Mode, Outcome)`,
-  `harness_trace(SessionId, Turn, TracePath)`.
-
-Use them to answer questions about the harness itself — "what changed?", "when
-did we add `research/2`?", "what is the current version?":
-
-```prolog
-recent_changes(N, Cs) :-
-    findall(V-Ts, harness_change(V, Ts, commit, _, _), All),
-    last_n(All, N, Cs).
-```
-
+Keep large datasets in a file or a linked script; the module is for the small
+facts a later turn will ask about.
 # Start small, then improve
 
 Build the smallest thing that answers the request end to end — often one predicate
@@ -570,18 +579,18 @@ accumulator is the easiest way to write DML that looks right and is quietly wron
 Do not build one. Decide what the work is and put it where it belongs:
 
 - **Mechanical** — pull a field, change a format, count, filter, join: write a
-  **helper script** (`script_file/2`, run with `exec(bash(argv: [...]))`). It is a
-  real file you can test on its own, in a language built for text. Have it emit
-  **JSON** and read it with `json_get/3` / `json_gets/3` / `json_text/2`, rather
-  than splitting its stdout by hand.
+  **helper script** (`script_file/2`, called with `run_script(Name, Args, Value)` or
+  `exec(python(script: Path, argv: [...]))`). It is a real file you can test on its
+  own, in a language built for text. Have it emit **JSON** and read it with
+  `json_get/3` / `json_gets/3` / `json_text/2` (or let `run_script` parse it),
+  rather than splitting its stdout by hand.
 - **Meaning** — find the field named X, classify, summarise, decide: make it a
   **model call** with a typed output: `task("…", list(string(Items)))`, `schema/2`,
   or `choose`/`rate`/`verify` for a bounded judgment.
 
-`exec(bash(...))` takes `command` or `argv` (plus `timeoutMs`) — there is **no
-`stdin`**. Pass data as an `argv` element or through a workspace file. `argv` is
-quoted by the runtime, so an argument can contain quotes, spaces, `$` or newlines
-safely; `command` is for pipelines and redirection.
+`exec(...)` passes arguments as an `argv` list; there is no shell and no standard input.
+Pass data as an `argv` element or through a workspace file, never by editing the
+program.
 
 # Keep DML simple: orchestration, not algorithms
 
@@ -598,7 +607,8 @@ decision-making; use Prolog to *route*, *sequence*, and *verify*.
   `==`) between them.
 - Avoid "algorithmic" Prolog — deep recursion, hand-rolled list algorithms,
   sorting, accumulators, `assert`/`retract` in a loop. Write those in a script
-  and call it with `bash`, or express them as a model call.
+  and call it with `run_script/3` (or the host's `exec` tool), or express them as
+  a model call.
 - Reach for CLP(FD)/CLP(Q) only for a genuine, small constraint problem; bound
   every domain before `label/1`.
 - For a one-off computation, run it with `execute` instead of committing it as a
@@ -630,6 +640,59 @@ The host exposes exactly these capability tools, called from DML with
 There are no other host tools. Do not invent `fetch_url`, `web_search`,
 `calculator`, etc. — if the module needs one, write a script and run it with
 `bash`.
+
+# Typed outputs
+
+`task/N` and `prompt/N` can declare the type of every output. The runtime checks
+the model's answer against it and fails the step, naming the field, instead of
+binding a string where a number or a dict belongs.
+
+| Output argument | Value |
+|---|---|
+| `X` (bare) | string |
+| `string(X)` | string |
+| `number(X)` | number |
+| `integer(X)` | integer |
+| `boolean(X)` | boolean |
+| `list(string(Xs))` | list of strings |
+| `object(D)` | dict of unknown shape |
+| `schema(name, D)` | dict with the fields declared by `schema/2` |
+| `list(schema(name, Ds))` | list of those dicts |
+
+Declare the shape once with `schema/2`, then name it:
+
+```prolog
+schema(person, [
+    field(name, string, required),
+    field(age,  integer, default(0))
+]).
+
+people(Text, People) :-
+    task("Extract every person from: {Text}", list(schema(person, People))).
+```
+
+The nested agent is told each output's name and declared shape, and sets it with
+`set_result` using that same name. Keep one output per variable; when a step
+returns several values, return one dict (schema) rather than several output
+arguments.
+
+A field's type is a primitive from the table, `list(Type)`, or `schema(Name)` /
+`schema(Name, _)` for a nested object. Nested schemas are validated and filled
+recursively, including a list of them:
+
+```prolog
+schema(note, [field(pitch, string, required), field(beats, number, required)]).
+schema(part, [field(name,  string, required),
+              field(notes, list(schema(note, _)), required)]).
+schema(score, [field(title, string, required),
+               field(parts, list(schema(part, _)), required),
+               field(bpm,   integer, default(90))]).
+```
+
+`listing` prints the clause as you wrote it, with your variable names and the
+`schema(...)` wrapper; `listing("scripts")` lists `script_file/2` links.
+`doc/2`, `schema/2` and `script_file/2` are keyed annotations, not skills — they
+are not shown as predicates and cannot be deleted whole.
 
 # Declared output shapes
 
@@ -702,55 +765,107 @@ explain(Paper, Report) :-
 Long task chains grow the context and cost; pass values as explicit arguments
 rather than relying on the model to remember them.
 
-# The `tool/2` annotation
+# Tools: one canonical shape
 
-`tool/2` is **only an annotation**: it exposes an existing predicate to the
-nested agent inside `task/N`. Define the predicate normally and delegate:
+A **tool** is a capability a nested agent may call: read a file, run a script,
+query an index. It is an annotation over an existing predicate, never a second
+implementation and never an LLM step. Five rules, and no others:
+
+1. **Same name and arity, and the body is one delegation.**
+
+   ```prolog
+   count_words(File, Count) :- ... .
+
+   tool(count_words(File, Count), "Count the words in a workspace file.") :-
+       count_words(File, Count).
+   ```
+
+2. **Exactly one output, and it is the last argument.** A tool head's leading
+   arguments are inputs; the last is the result. When a capability produces
+   several values, return a dict or a JSON string in that one argument — not
+   `count_words(Path, Words, Lines)`, whose `Words` is then offered to the model as
+   a *second input*.
+
+3. **Declare a type for every input that is not a string.** The third argument is
+   the list of *input* types, in order; a missing entry defaults to `string`, and a
+   `string` argument cannot be used by `is/2`:
+
+   ```prolog
+   tool(scale(N, Result), "Multiply N by 2.", [integer]) :- Result is N * 2.
+   tool(inspect(Spec, Name), "Read the name field.", [object]) :- get_dict(name, Spec, Name).
+   ```
+
+   The declared type list labels the inputs only; a mismatch is reported at
+   `end_turn`.
+
+4. **Give every tool-using task `with_tools([...])`.** It narrows what the nested
+   agent may call (and hides the built-in form tools, which otherwise appear in
+   every task and invite a form where none was asked for):
+
+   ```prolog
+   answer_about_file(Path, Question, Answer) :-
+       with_tools([count_words],
+           task("The file is {Path}. Use count_words, then answer: {Question}", string(Answer))).
+   ```
+
+5. **Annotate capabilities, not LLM steps.** A tool whose delegate is a `task/N`
+   that does the same job is offered to the agent inside that very task: it is
+   invited to call itself, the runtime refuses the re-entrant call, and the turn is
+   wasted. Keep `task/N`-backed predicates as skills. If one must stay reachable,
+   scope the nested task with `without_tools([...], Goal)`.
+
+One tool per name. Put the predicate **and** its `tool(...)` clause in the same
+`define` block: `define` replaces the pair together, and the annotation survives a
+later `define` of the predicate alone. `delete("tool:count_words/2")` removes the
+annotation and keeps the delegate; `delete("count_words/2")` removes both.
+
+A tool written as a fact (`tool(f(A, B), "…").`) is refused: it has no body, so it
+would never run. `listing` shows the annotation under the predicate, and
+`listing("tools")` lists user tools (`"tools:all"` adds the built-in form tools).
+
+# Compose small skills
+
+The target is many **small, composable skills**, joined with as little code as
+possible. A skill is one predicate that does one thing and returns a plain value.
+
+**Exchange plain values.** A skill's inputs and outputs should be a string, a
+number, an atom, a list of strings, or a dict declared with `schema/2`. Never a
+bespoke term: `title(T, S)`, `K-V` pairs and nested `f(g(h(...)))` force the next
+skill (and the model) to unpick them.
 
 ```prolog
-count_words(File, Count) :- ... .
-
-tool(count_words(File, Count), "Count words in a file.") :-
-    count_words(File, Count).
+% Good: each step is one call, and the data is a list or a dict.
+titles(Titles) :- run_script(hn_top, [5], Titles).
+trend(Titles, Summary) :- prompt("What is trending? {Titles}", string(Summary)).
+main :- titles(T), trend(T, S), answer(S).
 ```
 
-The head and its delegate must have the **same name and arity**; the output is
-the last argument. The tool body is what runs when a nested agent calls the tool,
-so `tool(bibliography(Q, N), "…") :- bibliography(Q, N, E)` (different arity) or
-`tool(citations(T, C), "…") :- citations(T, C)` (calls itself) fails only at call
-time. `end_turn` reports both as tool-contract warnings — fix them, don't ship
-them. The only tools a nested agent can call are the harness's `tool/2`
-predicates; a host tool like `bash` is reachable from DML through `exec/2`, so a
-task description may only name a tool the module itself defines and annotates.
+- **Compose with `maplist/3`, `swarm/3` and `json_gets/3`.** Do not write
+  recursion, accumulators or a sorting routine in DML. `maplist(skill, In, Out)`
+  runs a model-calling skill over a list; `swarm` does it in parallel.
+- **Mechanical work belongs in a script.** Write it to `scripts/`, link it with
+  `script_file/2`, and call it with `run_script(Name, Args, Value)`, which resolves
+  the link, stringifies the arguments, checks the exit code, and parses JSON:
 
-**Do not annotate an LLM step with a `tool/2` that advertises the same job.** The
-tool is declared to the agent inside that same `task/N`, so the description invites
-it to call the tool to do what it was already asked. The runtime refuses the
-re-entrant call, but the agent wastes a turn, is told the tool failed, and does the
-work by hand:
+  ```prolog
+  script_file(count, "scripts/count.py").
+  count(Path, Stats) :- run_script(count, [Path], Stats).
+  ```
 
-```prolog
-% BAD: extract_authors is offered to the agent inside extract_authors's task/N.
-extract_authors(Text, Authors) :- task("Extract every author from: {Text}", list(object(Authors))).
-tool(extract_authors(Text, Authors), "Extract every author.") :- extract_authors(Text, Authors).
-```
-
-`tool/2` is for **capabilities** a nested agent should use — reading a PDF,
-searching an index, shelling out — not for the LLM steps themselves. Keep a
-`task/N`-backed predicate a skill (call it with `/goal`, `execute`, or from another
-predicate). If the tool must stay, scope the nested task:
-
-```prolog
-extract_authors(Text, Authors) :-
-    without_tools([extract_authors],
-        task("Extract every author from: {Text}", list(object(Authors)))).
-```
-
-`with_tools([…], Goal)` narrows to a list; `without_tools([…], Goal)` removes one.
-They apply to the `task/N` they wrap, however it was reached.
-
-Logic placed only inside `tool/2` is **not** reachable from `execute`/`listing`;
-keep the `tool/2` body a one-line delegation.
+  `run_script` throws when the script exits non-zero, so a failed fetch cannot
+  quietly become an empty list that the model then fills in from imagination.
+- **Semantic work belongs in one model call with a typed output.** `task/N` for a
+  result, `prompt/N` for an isolated one, `choose` for one of a fixed set. Prefer
+  `list(string(X))` or `schema(Name, X)` over free text.
+- **`choose` returns an atom; `prompt` returns a string.** Compare with the right
+  literal (`Sentiment == negative`, not `== "negative"`); keep one spelling through
+  the whole harness.
+- **Guard what you fetched.** A `task/N` with an empty list in the description
+  answers from its own prior, which reads like a successful result. Fail before the
+  model call: `Titles \== []`, `get_dict(exitCode, R, 0)`, or `run_script`'s own
+  check.
+- **If a step needs more than a handful of goals, it is two skills.** Split it and
+  name both; the next turn (and the next model) can then reuse them.
 
 # Dictionaries and JSON from model output
 
@@ -777,11 +892,11 @@ first — passing a string raises `type_error(list, …)`.
 
 # File I/O
 
-Prefer `bash` (`exec(bash(command: ...), Result)`) for reading, writing, copying,
-and converting files. Use the DML file predicates (`read_file/2`, `write_file/2`,
-`make_directory_path/1`, `directory_files/2`, ...) only when the content must be
-bound and reasoned over inside Prolog. Every path is workspace-relative and
-confined to the workspace.
+Prefer a script (`exec(python(script: ...))`, or `run_script/3`) for reading,
+writing, copying, and converting files. Use the DML file predicates (`read_file/2`,
+`write_file/2`, `make_directory_path/1`, `directory_files/2`, ...) only when the
+content must be bound and reasoned over inside Prolog. Every path is
+workspace-relative and confined to the workspace.
 
 These predicates are real session clauses, so they resolve identically from DML
 and from a host query. `open/3`, `close/1`, `read_string/3` and `write/2` cannot
@@ -888,7 +1003,7 @@ run_extract(Input, Output) :-
 ## Deep research
 
 Gather with a nested agent that holds the search/fetch tools, then write, then
-verify the citations. `task/N` starts with fresh memory, so pass the notes
+verify the citations. `prompt/N` starts with fresh memory, so pass the notes
 explicitly between steps.
 
 ```prolog
@@ -975,8 +1090,8 @@ More patterns: `reference("patterns")`; shapes: `reference("examples")`.
 - Add a `doc/2` for every predicate you add or change, and keep `module_doc/1`
   current — it is the skill description.
 - Test with `execute` before `end_turn`.
-- Do not parse text in DML: shell out to a helper script for mechanical work, or
-  ask the model with a typed output. There is no `stdin` on `exec(bash(...))`.
+- Do not parse text in DML: call a helper script for mechanical work, or ask the
+  model with a typed output.
 - Ship the smallest working version first and show the user; add the next piece when
   the next request asks for it. Do not build for cases nobody has raised.
 - After finishing, if the work revealed a reusable capability, say so and offer
@@ -1276,7 +1391,18 @@ extract_authors(Text, Authors) :-
 - An absent `required` field **fails the step** with a message naming the field, so
   the agent can correct it in the same turn.
 - A field of the wrong type fails the same way. Types are `string`, `integer`,
-  `number`, `boolean`, `object`, `array`.
+  `number`, `boolean`, `object`, `array`, `list(Type)`, or `schema(Name)` /
+  `schema(Name, _)` for a nested object. Nested schemas are validated and filled
+  recursively, including a list of them:
+
+  ```prolog
+  schema(note, [field(pitch, string, required), field(beats, number, required)]).
+  schema(part, [field(name,  string, required),
+                field(notes, list(schema(note, _)), required)]).
+  schema(score, [field(title, string, required),
+                 field(parts, list(schema(part, _)), required),
+                 field(bpm,   integer, default(90))]).
+  ```
 - An **undeclared** field is kept, not dropped: a model mistake stays visible
 - The field list is **described to the model** in the step's own instructions, and a
   missing required or wrong-typed field is reported by name inside the same turn,
@@ -1327,6 +1453,24 @@ task("Extract user details", object(User)).
 **Note:** The LLM during `task()` can only call tools defined in DML (see [Tool Definitions](#tool-definitions)). Registered TypeScript tools are not automatically available - this gives you control over what the LLM can do.
 
 ---
+
+### `run_script(+Name, +Args, -Value)`
+
+Run the script linked by `script_file(Name, Path)`. `Args` is a list; numbers and
+atoms are converted to the strings `argv` expects. The result is parsed as JSON
+when stdout is JSON, otherwise returned as the stdout string. A non-zero exit
+throws the script's stderr, so a failed fetch cannot become an empty list.
+
+```prolog
+script_file(count_words, "scripts/count_words.py").
+
+count_words(File, Count) :-
+    run_script(count_words, [File], Stats),
+    get_dict(words, Stats, Count).
+```
+
+This replaces the repeated `script_file`, `exec`, `get_dict(exitCode)`,
+`get_dict(stdout)` and `atom_json_dict` sequence in every script-backed skill.
 
 ### `exec(+ToolCall, -Output)`
 
@@ -1388,12 +1532,12 @@ harness predicate to the nested agent that runs inside `task/N`. Define the
 predicate normally, then add a `tool/2` clause that delegates to it:
 
 ```prolog
-% 1. The capability: a normal predicate, callable from `execute` and `/goal`.
+% 1. The capability: a normal predicate, callable from `execute` and as a goal.
+script_file(count_words, "scripts/count_words.py").
+
 count_words(File, Count) :-
-    script_file(count_words, Script),
-    format(atom(Cmd), "python3 '~w' '~w'", [Script, File]),
-    exec(bash(command: Cmd), Result),
-    get_dict(stdout, Result, Count).
+    run_script(count_words, [File], Stats),   % resolves the link, checks exitCode, parses JSON
+    get_dict(words, Stats, Count).
 
 % 2. The annotation: exposes it to the nested agent. Thin body only.
 tool(count_words(File, Count), "Count words in a workspace file.") :-
@@ -1439,10 +1583,14 @@ tool again and recurses forever:
 tool(bibliography(Query, Max), "…") :-
     bibliography(Query, Max, Entries).
 
-% WRONG: calls itself; a nested agent recurses until the budget is gone.
+% WRONG: the body does the work instead of delegating, so the capability is not a
+% predicate `execute` or another skill can call.
 tool(citations(Text, Citations), "…") :-
-    citations(Text, Citations).
+    task("Extract citations from {Text}", list(string(Citations))).
 ```
+
+Same-name delegation — `tool(citations(T, C), "…") :- citations(T, C).` — is the
+*correct* shape, provided `citations/2` exists.
 
 Nothing is checked when the clause is loaded, so both mistakes look fine until a
 nested agent calls the tool. `end_turn` reports them as contract warnings; treat
@@ -1453,7 +1601,7 @@ A predicate defined *only* inside a `tool/2` clause is invisible to
 the two so one implementation is reachable from both surfaces:
 
 ```prolog
-/goal count_words("report.txt", C).          % authoring agent
+count_words("report.txt", C).                % from execute, a goal, or another skill
 task("Count the words in report.txt.", N).   % nested agent calls the tool
 ```
 
@@ -1475,7 +1623,7 @@ safe_divide(A, B, Result) :-
     ;   Result is A / B
     ).
 
-tool(safe_divide(A, B, Result), "Safely divide two numbers.") :-
+tool(safe_divide(A, B, Result), "Safely divide two numbers.", [number, number]) :-
     safe_divide(A, B, Result).
 ```
 

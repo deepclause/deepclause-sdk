@@ -67,7 +67,7 @@ describe('the reference tool serves forms', () => {
   it('offers the built-in form tools through listing(tools)', async () => {
     // `listing` is a tool the agent can call, so this is the surface it actually
     // reads — the manifest is recorded in history, not injected into the prompt.
-    const listing = await repl.session.listing('tools');
+    const listing = await repl.session.listing('tools:all');
     expect(listing).toContain('render_form');
     expect(listing).toContain('wait_for_form_change');
 

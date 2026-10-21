@@ -7,8 +7,11 @@
 
 :- module(deepclause_strings, [
     interpolate_string/3,
-    dml_string_expand/3
+    dml_string_expand/3,
+    dc_interp_value/2
 ]).
+
+:- use_module(library(http/json)).
 
 %% interpolate_string(+Template, +Bindings, -Result)
 %% Replace {VariableName} patterns in Template with values from Bindings
@@ -43,8 +46,8 @@ interpolate_codes([0'{|Rest], Bindings, Result) :-
     !,
     atom_codes(VarName, VarNameCodes),
     (   find_binding(VarName, Bindings, Value)
-    ->  format(atom(ValueAtom), '~w', [Value]),
-        atom_codes(ValueAtom, ValueCodes),
+    ->  dc_interp_value(Value, ValueString),
+        string_codes(ValueString, ValueCodes),
         interpolate_codes(AfterVar, Bindings, RestResult),
         append(ValueCodes, RestResult, Result)
     ;   % Variable not found - keep as is
@@ -82,6 +85,36 @@ valid_placeholder_start(Code) :-
 valid_placeholder_char(Code) :-
     code_type(Code, alnum)
     ; Code =:= 0'_.
+
+%% dc_interp_value(+Value, -Text)
+%% How `{Var}` renders inside a prompt or an answer.
+%%
+%% Scalars keep their old `~w` spelling (`Ada`, `30`, `positive`). Lists and
+%% dicts render as compact JSON instead of Prolog syntax, because the old output
+%% (`[_42{score:3,title:A}]`, `[x,y]`) is not what a model reads well — agents
+%% wrote `findall`/`format`/`atomic_list_concat` glue just to fix it up.
+dc_interp_value(Value, Text) :-
+    (   string(Value)
+    ->  Text = Value
+    ;   number(Value)
+    ->  number_string(Value, Text)
+    ;   atom(Value)
+    ->  atom_string(Value, Text)
+    ;   ( is_dict(Value) ; is_list(Value) )
+    ->  interp_json(Value, Text)
+    ;   format(string(Text), '~w', [Value])
+    ).
+
+%% interp_json(+Value, -Text): compact JSON, falling back to `~w` when the term
+%% has no JSON form (an unbound variable, a compound such as foo(a)).
+%% The JSON writer is called through its library module: this predicate runs
+%% inside the meta-interpreter's module too, where an unqualified imported
+%% predicate is not visible.
+interp_json(Value, Text) :-
+    catch(with_output_to(string(Text), json:json_write_dict(current_output, Value, [])), _, fail),
+    !.
+interp_json(Value, Text) :-
+    format(string(Text), '~w', [Value]).
 
 %% find_binding(+VarName, +Bindings, -Value)
 %% Look up a variable in the bindings list

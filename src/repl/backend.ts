@@ -313,9 +313,15 @@ export function createPiAdapter(  registry: PiRegistryLike,
           parameters: tool.parameters,
         })),
       };
+      const requestedTokens = request.maxTokens ?? defaultMaxTokens;
+      // The catalog's maximum output is a hard provider limit: sending more is a
+      // 400 (github-copilot/claude-haiku-4.5 rejects 65536, its cap is 64000).
+      const maxTokensForModel = typeof activeModel.maxTokens === 'number' && activeModel.maxTokens > 0
+        ? Math.min(requestedTokens, activeModel.maxTokens)
+        : requestedTokens;
       const options: Record<string, unknown> = {
         signal: request.signal,
-        maxTokens: request.maxTokens ?? defaultMaxTokens,
+        maxTokens: maxTokensForModel,
         cacheRetention: 'none',
       };
       // Model defaults the caller's temperature only when a scope explicitly set

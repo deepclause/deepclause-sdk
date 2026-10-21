@@ -463,10 +463,17 @@ export class DMLSession {
     this.resume = options.resume ?? false;
     this.harnessName = options.harnessName ?? 'main';
     this.executionBackend = options.executionBackend ?? 'clean-room';
-    this.executionEnvironment = describeShellExecutionBackend(
-      this.executionBackend === 'agentvm',
-      this.executionBackend === 'agentvm' ? {} : { wrapper: this.executionBackend },
-    );
+    this.executionEnvironment = this.executionBackend === 'wasm'
+      ? {
+          kind: 'wasm',
+          backendLabel: 'wasm',
+          description: 'WebAssembly sandbox in the browser',
+          sandboxed: true,
+        }
+      : describeShellExecutionBackend(
+          this.executionBackend === 'agentvm',
+          this.executionBackend === 'agentvm' ? {} : { wrapper: this.executionBackend },
+        );
     this.autoLoadHarness = options.autoLoadHarness ?? true;
     this.openOptions = options;
     this.compactionSettings = options.compaction?.settings;
@@ -1255,7 +1262,10 @@ export class DMLSession {
   }
 
   private moduleSource(): string {
-    const result = this.prologQuery(`deepclause_mi:export_harness('${this.sessionId}', none, Text)`);
+    // Persisted `harness.dml` and the editor use the human view, so variable
+    // names and schema wrappers survive. `export()` keeps the canonical A/B
+    // export for byte-stable round-trips.
+    const result = this.prologQuery(`deepclause_mi:repl_display_harness('${this.sessionId}', Text)`);
     return String(plainValue(result?.Text) ?? '');
   }
 
@@ -2154,6 +2164,7 @@ export class DMLSession {
       warnings = await this.probeNondeterminism([...candidates]);
       warnings.push(...this.probeToolContracts());
       warnings.push(...this.probeDocContracts());
+      warnings.push(...this.probeComplexity());
     }
     // `committed` means a version was recorded. It used to be hard-coded `true`,
     // so a turn whose every edit was refused reported `{committed: true,
@@ -2169,7 +2180,7 @@ export class DMLSession {
    */
   async harnessSource(): Promise<string> {
     const result = this.prologQuery(
-      `deepclause_mi:export_harness('${this.sessionId}', none, Text)`,
+      `deepclause_mi:repl_display_harness('${this.sessionId}', Text)`,
     );
     return String(plainValue(result?.Text) ?? '');
   }
@@ -2259,13 +2270,32 @@ export class DMLSession {
   }
 
   /**
+   * Advisory checks for the shapes that turn a small skill into a page of
+   * Prolog: a long clause, inline Python, and an `agent_main` that returns a
+   * value instead of calling `answer/1`.
+   */
+  private probeComplexity(): string[] {
+    try {
+      const result = this.prologQuery(
+        `deepclause_mi:repl_validate_complexity('${this.sessionId}', Warnings)`,
+      );
+      const raw = plainValue(result?.Warnings);
+      if (!Array.isArray(raw)) return [];
+      return raw.map((entry) => String(entry)).filter(Boolean);
+    } catch {
+      // A validation failure must never fail the commit.
+      return [];
+    }
+  }
+
+  /**
    * Probe changed predicates for accidental nondeterminism: a pure predicate
    * that yields more than `threshold` solutions on fresh variables is very likely
    * missing an `once/1`/`!` and would flood an `execute`. Fact tables and
    * side-effecting predicates are skipped by the Prolog probe.
    */
   private async probeNondeterminism(indicators: string[]): Promise<string[]> {
-    const reserved = new Set(['doc', 'module_doc', 'tool']);
+    const reserved = new Set(['doc', 'module_doc', 'tool', 'schema', 'script_file']);
     const warnings: string[] = [];
     const threshold = 100;
     const bound = 200000;
@@ -2394,9 +2424,18 @@ export class DMLSession {
   async deletePredicate(nameArity: string): Promise<{ ok: boolean; error?: string }> {
     const closed = this.requireTransaction();
     if (closed) return closed;
+    // `tool:name` (optionally `tool:name/arity`) removes one tool annotation and
+    // its implementation, and leaves the delegate predicate in place.
+    const toolMatch = /^\s*tool\s*:\s*([a-z][A-Za-z0-9_]*)\s*(?:\/\s*\d+\s*)?$/.exec(nameArity);
+    if (toolMatch) {
+      const result = this.prologQuery(
+        `deepclause_mi:repl_delete_tool('${this.sessionId}', ${toolMatch[1]}, Result)`
+      );
+      return this.editResult(plainValue(result?.Result));
+    }
     const match = /^\s*([^\s/]+)\s*\/\s*(\d+)\s*$/.exec(nameArity);
     if (!match) {
-      return { ok: false, error: `expected Name/Arity, got '${nameArity}'` };
+      return { ok: false, error: `expected Name/Arity or tool:Name, got '${nameArity}'` };
     }
     const [, name, arityText] = match;
     const atom = /^[a-z][A-Za-z0-9_]*$/.test(name) ? name : `'${name.replace(/'/g, "''")}'`;

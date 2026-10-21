@@ -20,6 +20,7 @@ import type {
   ToolDefinition,
   MemoryMessage,
   TypedVar,
+  SchemaField,
 } from './types.js';
 import { createModelProvider, type RawProviderResponseSnapshot } from './prolog/bridge.js';
 import { readSystemPromptAsset } from './system/assets/index.js';
@@ -478,14 +479,43 @@ async function resolveResponseMessagesWithTimeout(
 function describeSchemaFields(typedVar: TypedVar): string | undefined {
   const fields = typedVar.fields;
   if (!fields || fields.length === 0) return undefined;
-  return fields
-    .map((field) => {
-      const notes = [field.type];
-      if (field.required) notes.push('required');
-      else if (field.default !== undefined) notes.push(`default ${JSON.stringify(field.default)}`);
-      return `${field.name} (${notes.join(', ')})`;
-    })
-    .join(', ');
+  return fields.map(describeSchemaField).join(', ');
+}
+
+/** One field, including a nested schema's own fields. */
+function describeSchemaField(field: SchemaField): string {
+  const type = field.itemType ? `array<${field.itemType}>` : field.type;
+  const notes = [type];
+  if (field.required) notes.push('required');
+  else if (field.default !== undefined) notes.push(`default ${JSON.stringify(field.default)}`);
+  const head = `${field.name} (${notes.join(', ')})`;
+  return field.fields && field.fields.length > 0
+    ? `${head} {${field.fields.map(describeSchemaField).join(', ')}}`
+    : head;
+}
+
+/** The type text shown to the nested agent, including a declared schema's fields. */
+function describeOutputType(variable: TypedVar): string {
+  const base = variable.type === 'array' && variable.itemType
+    ? `array<${variable.itemType}>`
+    : variable.type;
+  const fields = describeSchemaFields(variable);
+  return fields ? `${base} {${fields}}` : base;
+}
+
+/**
+ * Match the `variable` argument of `set_result` to a requested output.
+ *
+ * Models occasionally omit it (providers differ in how they serialise an enum),
+ * and an empty name used to abort the whole task with `Unknown variable: `.
+ * With a single requested output the intent is unambiguous, so infer it; names
+ * are trimmed and compared case-insensitively, as `dict_field/3` does.
+ */
+function matchOutputVar(vars: TypedVar[], raw: unknown): TypedVar | undefined {
+  const wanted = typeof raw === 'string' ? raw.trim() : '';
+  if (!wanted) return vars.length === 1 ? vars[0] : undefined;
+  return vars.find((variable) => variable.name === wanted)
+    ?? vars.find((variable) => variable.name.toLowerCase() === wanted.toLowerCase());
 }
 
 /**
@@ -498,19 +528,49 @@ function validateSchemaFields(typedVar: TypedVar, value: unknown): string | null
   const fields = typedVar.fields;
   if (!fields || fields.length === 0) return null;
   if (!isPlainObject(value)) return 'Expected an object value';
+  return validateFields(fields, value, '');
+}
+
+/** Validate a value against a field list, naming the nested path in the error. */
+function validateFields(fields: SchemaField[], value: unknown, prefix: string): string | null {
+  if (!isPlainObject(value)) {
+    return prefix ? `Field "${prefix}" should be an object` : 'Expected an object value';
+  }
   const record = value as Record<string, unknown>;
   for (const field of fields) {
     const present = Object.prototype.hasOwnProperty.call(record, field.name)
       || Object.keys(record).some((key) => normaliseFieldKey(key) === normaliseFieldKey(field.name));
+    const path = prefix ? `${prefix}.${field.name}` : field.name;
     if (!present) {
-      if (field.required) return `Missing required field "${field.name}"`;
+      if (field.required) return `Missing required field "${path}"`;
       continue;
     }
     const found = record[field.name] ?? Object.entries(record)
       .find(([key]) => normaliseFieldKey(key) === normaliseFieldKey(field.name))?.[1];
-    if (!fieldTypeAccepts(field.type, found)) {
-      return `Field "${field.name}" should be ${field.type}`;
+    const error = validateFieldValue(field, found, path);
+    if (error) return error;
+  }
+  return null;
+}
+
+/** Validate one field value, recursing into a list element or nested schema. */
+function validateFieldValue(field: SchemaField, value: unknown, path: string): string | null {
+  if (field.itemType) {
+    if (!Array.isArray(value)) return `Field "${path}" should be array<${field.itemType}>`;
+    for (let index = 0; index < value.length; index += 1) {
+      const item = value[index];
+      if (field.fields && field.fields.length > 0) {
+        const nested = validateFields(field.fields, item, `${path}[${index}]`);
+        if (nested) return nested;
+      } else if (!fieldTypeAccepts(field.itemType, item)) {
+        return `Field "${path}[${index}]" should be ${field.itemType}`;
+      }
     }
+    return null;
+  }
+  if (!fieldTypeAccepts(field.type, value)) return `Field "${path}" should be ${field.type}`;
+  if (field.fields && field.fields.length > 0) {
+    return validateFields(field.fields, value, path);
   }
   return null;
 }
@@ -712,15 +772,21 @@ async function runInjectedAgentLoop(
 
   if (normalizedOutputVars.length > 0) {
     const resultTypes = normalizedOutputVars
-      .map((variable) => `${variable.name}: ${variable.type}${variable.itemType ? `<${variable.itemType}>` : ''}`)
+      .map((variable) => `${variable.name}: ${describeOutputType(variable)}`)
       .join(', ');
     backendTools.push({
       name: 'set_result',
-      description: `Set one requested output variable before calling finish. Required results: ${resultTypes}.`,
+      description: `Set one requested output variable before calling finish. Required results: ${resultTypes}. Call it once per variable; the value must match the declared type.`,
       parameters: {
         type: 'object',
         properties: {
-          variable: { type: 'string', enum: requiredVarNames },
+          variable: {
+            type: 'string',
+            enum: requiredVarNames,
+            description: normalizedOutputVars.length === 1
+              ? `The output variable name: ${requiredVarNames[0]}.`
+              : `One of: ${requiredVarNames.join(', ')}.`,
+          },
           value: {
             anyOf: [
               { type: 'string' },
@@ -729,6 +795,7 @@ async function runInjectedAgentLoop(
               { type: 'array' },
               { type: 'object' },
             ],
+            description: `The value. Expected: ${resultTypes}.`,
           },
         },
         required: ['variable', 'value'],
@@ -767,6 +834,15 @@ async function runInjectedAgentLoop(
     { role: 'user', content: options.conversational ? options.taskDescription : `Subtask: ${options.taskDescription}` },
   ];
   const maxIterations = Math.max(1, Number(process.env.DC_MAX_ITERATIONS) || 1000);
+
+  // A nested agent that cannot satisfy `set_result`/`finish` used to retry until
+  // the whole turn's model-call budget was gone (100 calls in one observed run).
+  // The validation message is the useful part; repeating it does not help, so
+  // after a few rejected attempts the task fails with it.
+  let rejectedAttempts = 0;
+  const maxRejectedAttempts = 4;
+  let lastRejection: string | undefined;
+  let lastSetResultError: string | undefined;
 
   for (let iteration = 0; iteration < maxIterations && !state.finished; iteration++) {
     if (options.signal?.aborted) break;
@@ -843,11 +919,40 @@ async function runInjectedAgentLoop(
           result = { finished: true, success: requestedSuccess };
         }
       } else if (call.name === 'set_result') {
-        const variableName = String(call.arguments.variable ?? '');
-        const typedVar = normalizedOutputVars.find((variable) => variable.name === variableName);
+        // A provider can deliver a truncated tool call as `arguments: {}`. That
+        // is not a type error in the user's data: the value never arrived. Say
+        // so, and name the size problem, which is usually the cause.
+        const hasValue = Object.prototype.hasOwnProperty.call(call.arguments, 'value');
+        if (!hasValue) {
+          const typedVarNames = normalizedOutputVars.map((variable) => variable.name).join(', ') || 'none';
+          result = {
+            success: false,
+            error: `set_result received no "value" (the call arrived with no arguments). `
+              + `Expected outputs: ${typedVarNames}. The value may be too large for one tool call — `
+              + 'return a smaller object, or set the result in a script and return a path.',
+          };
+          messages.push({ role: 'tool', content: JSON.stringify(result), toolCallId: call.id, toolName: call.name });
+          rejectedAttempts += 1;
+          lastRejection = JSON.stringify(result);
+          lastSetResultError = lastRejection;
+          if (rejectedAttempts >= maxRejectedAttempts) {
+            throw new Error(`task protocol failed after ${maxRejectedAttempts} attempts: ${lastRejection}`);
+          }
+          continue;
+        }
+        const typedVar = matchOutputVar(normalizedOutputVars, call.arguments.variable);
+        const requested = typeof call.arguments.variable === 'string'
+          ? call.arguments.variable.trim()
+          : '';
         if (!typedVar) {
-          result = { success: false, error: `Unknown variable: ${variableName}` };
+          result = {
+            success: false,
+            error: requested
+              ? `Unknown result variable "${requested}"; expected one of: ${requiredVarNames.join(', ')}.`
+              : `Missing "variable"; expected one of: ${requiredVarNames.join(', ')}.`,
+          };
         } else {
+          const variableName = typedVar.name;
           const value = coerceTypedResultValue(typedVar, call.arguments.value);
           const validationError = validateTypedResultValue(typedVar, value);
           if (validationError) {
@@ -891,6 +996,34 @@ async function runInjectedAgentLoop(
         toolCallId: call.id,
         toolName: call.name,
       });
+
+      // Count only rejections of the task protocol itself. A user tool that
+      // fails is the task's business and may be retried with a fixed argument.
+      const rejected = call.name === 'finish'
+        ? (result as { finished?: boolean }).finished === false
+        : call.name === 'set_result'
+          ? (result as { success?: boolean }).success === false
+          : false;
+      if (rejected) {
+        rejectedAttempts += 1;
+        lastRejection = JSON.stringify(result);
+        if (call.name === 'set_result') lastSetResultError = lastRejection;
+      } else {
+        rejectedAttempts = 0;
+      }
+      if (rejectedAttempts >= maxRejectedAttempts) {
+        // `finish` is usually the last call, so quoting only it hides the
+        // `set_result` mistake that caused the loop. Report both and name the
+        // expected outputs.
+        const detail = [lastRejection, lastSetResultError && lastSetResultError !== lastRejection
+          ? `last set_result: ${lastSetResultError}`
+          : undefined].filter(Boolean).join('; ');
+        throw new Error(
+          `task protocol failed after ${maxRejectedAttempts} attempts: ${detail}. `
+          + `Expected outputs: ${requiredVarNames.join(', ') || 'none'}. `
+          + 'Return them with `set_result` using the declared type, or explain what is missing.',
+        );
+      }
     }
 
     if (toolCalls.length === 0 && !state.finished) {
@@ -997,11 +1130,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   // Add set_result tool for output variables
   if (normalizedOutputVars.length > 0) {
     const varNames = normalizedOutputVars.map(v => v.name);
-    const typeSummary = normalizedOutputVars.map(v => {
-      const renderedType = v.type === 'array' && v.itemType ? `array<${v.itemType}>` : v.type;
-      const fields = describeSchemaFields(v);
-      return fields ? `${v.name}: array of objects, each ${fields}` : `${v.name}: ${renderedType}`;
-    }).join(', ');
+    const typeSummary = normalizedOutputVars
+      .map((variable) => `${variable.name}: ${describeOutputType(variable)}`)
+      .join(', ');
     const variableSchema = varNames.length === 1
       ? z.literal(varNames[0])
       : z.enum(varNames as [string, ...string[]]);
@@ -1785,10 +1916,7 @@ async function buildSystemPrompt(options: {
   const resultSection = normalizedOutputVars.length > 0
     ? [
         'You must set all named results before finishing successfully.',
-        ...normalizedOutputVars.map((variable) => {
-          const typeStr = variable.type === 'array' && variable.itemType ? `array<${variable.itemType}>` : variable.type;
-          return `- ${variable.name}: ${typeStr}`;
-        }),
+        ...normalizedOutputVars.map((variable) => `- ${variable.name}: ${describeOutputType(variable)}`),
       ].join('\n')
     : 'No named result variables are required. Call finish(true) as soon as the subtask is complete.';
 

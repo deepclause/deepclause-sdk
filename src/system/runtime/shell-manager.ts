@@ -358,7 +358,7 @@ export function createShellManager(options: CreateShellManagerOptions): ShellMan
  * is the absence of a wrapper; it runs the command as the user, so it does not
  * qualify as a sandbox.
  */
-export type ExecutionBackendKind = 'agentvm' | HostShellWrapperKind;
+export type ExecutionBackendKind = 'agentvm' | 'wasm' | HostShellWrapperKind;
 
 export interface ExecutionEnvironment {
   kind: ExecutionBackendKind;

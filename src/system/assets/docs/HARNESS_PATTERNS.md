@@ -146,13 +146,13 @@ skills/coding.dml          # the harness
 ```prolog
 module_doc("Coding assistant: read, search, edit a repository and run its tests.").
 
-% --- capabilities: normal predicates, callable from execute and /goal AND task/N ---
+% --- capabilities: normal predicates, callable from execute AND task/N ---
 run_shell(Command, Output) :-
     exec(bash(command: Command), Result),
     ( get_dict(stdout, Result, Out) -> Output = Out ; Output = "" ).
 
 fs_read(Path, Text) :- read_file(Path, Text).
-fs_write(Path, Content) :- write_file(Path, Content).
+fs_write(Path, Content, ok) :- write_file(Path, Content).
 
 fs_grep(Pattern, Path, Matches) :-
     format(atom(Cmd), "grep -rn -- ~w ~w", [Pattern, Path]),
@@ -162,7 +162,7 @@ fs_grep(Pattern, Path, Matches) :-
 % --- annotations: expose the predicates above to the nested agent ---
 tool(run_shell(Command, Output), "Run a shell command in the workspace. Returns stdout.") :- run_shell(Command, Output).
 tool(fs_read(Path, Text), "Read a workspace-relative text file.") :- fs_read(Path, Text).
-tool(fs_write(Path, Content), "Write a workspace-relative file (overwrites).") :- fs_write(Path, Content).
+tool(fs_write(Path, Content, ok), "Write a workspace-relative file (overwrites).", [string, string]) :- fs_write(Path, Content, ok).
 tool(fs_grep(Pattern, Path, Matches), "Search a path for a pattern; returns matching lines.") :- fs_grep(Pattern, Path, Matches).
 
 % --- skills ---

@@ -63,6 +63,7 @@
     repl_edit_touched_clear/1,
     repl_validate_tools/2,
     repl_validate_docs/2,
+    repl_validate_complexity/2,
     schema_fill_fields/3,
     schema_fields_of/3,
     repl_unhandled_directives/2,
@@ -71,6 +72,7 @@
     repl_set_dml_reference/2,
     repl_set_authoring_examples/2,
     repl_manifest/2,
+    repl_display_harness/2,
     repl_history_load/2,
     repl_history_record/2,
     repl_history_summary/2,
@@ -153,6 +155,7 @@
 :- dynamic session_params/2.       % session_params(SessionId, ParamsDict)
 :- dynamic session_user_tools/2.   % session_user_tools(SessionId, ToolName)
 :- dynamic session_user_tool_schema/3. % session_user_tool_schema(SessionId, ToolName, Schema)
+:- dynamic session_source_view/3.      % session_source_view(SessionId, Name/Arity, SourceText)
 :- dynamic session_pending_input/2. % session_pending_input(SessionId, Input)
 :- dynamic session_agent_result/2. % session_agent_result(SessionId, Result)
 :- dynamic session_exec_result/2.  % session_exec_result(SessionId, Result)
@@ -207,7 +210,9 @@ assert_params(SessionId, Params) :-
 parse_dml_string(Code, SessionId) :-
     open_string(Code, Stream),
     parse_clauses(Stream, SessionId),
-    close(Stream).
+    close(Stream),
+    repl_source_views(SessionId, Code, Views),
+    repl_store_source_views(SessionId, Views, append).
 
 %% parse_clauses(+Stream, +SessionId)
 %% Read and process all clauses from a stream
@@ -229,7 +234,29 @@ parse_clauses(Stream, SessionId) :-
 preprocess_loaded_term(Term, Bindings, PreparedTerms) :-
     transform_task_calls(Term, Bindings, TransformedTerm),
     expand_interpolations(TransformedTerm, Bindings, InterpolatedTerm),
-    expand_loaded_term(InterpolatedTerm, PreparedTerms).
+    expand_loaded_term(InterpolatedTerm, ExpandedTerms),
+    annotate_tool_names_list(ExpandedTerms, Bindings, PreparedTerms).
+
+%% annotate_tool_names(+Term, +Bindings, -Annotated)
+%% A `tool(...)` clause is wrapped with the source names of its head variables.
+%% Asserting the clause loses them (the listing prints A, B, C), and the schema
+%% is what the nested agent reads: `arg1` says nothing, `Path` does.
+annotate_tool_names(Term, Bindings, '$dc_tool'(Term, Names)) :-
+    tool_clause_head(Term, Head),
+    !,
+    term_variables(Head, HeadVars),
+    findall(Name, (member(Var, HeadVars), member(Name=Var, Bindings)), Names0),
+    list_to_set(Names0, Names).
+annotate_tool_names(Term, _Bindings, Term).
+
+annotate_tool_names_list([], _, []).
+annotate_tool_names_list([Term|Terms], Bindings, [Annotated|Annotateds]) :-
+    annotate_tool_names(Term, Bindings, Annotated),
+    annotate_tool_names_list(Terms, Bindings, Annotateds).
+
+tool_clause_head((tool(Head, _) :- _), Head).
+tool_clause_head((tool(Head, _, _) :- _), Head).
+tool_clause_head((tool(Head) :- _), Head).
 
 %% expand_loaded_term(+Term, -ExpandedTerms)
 %% Runs SWI term expansion and normalizes the result to a list of terms.
@@ -397,11 +424,43 @@ wrapper_type(dict, object).
 %% clean_clause_body(+Body, -CleanBody)
 clean_clause_body(Body, Clean) :-
     conj_list(Body, Goals),
-    clean_goal_list(Goals, CleanGoals),
+    % `{Var}` interpolation is rewritten to a render goal plus a `~s` format; put
+    % the original variables back so the source reads `task("…{X}…")` again.
+    fold_interp_renders(Goals, FoldedGoals),
+    clean_goal_list(FoldedGoals, CleanGoals),
     (   CleanGoals = [Single]
     ->  Clean = Single
     ;   list_to_conjunction(CleanGoals, Clean)
     ).
+
+%% fold_interp_renders(+Goals, -Folded)
+%% Drop `dc_interp_value(Original, Rendered)` goals and put `Original` back into
+%% the argument list of the `format/3` they feed.
+fold_interp_renders(Goals, Folded) :-
+    fold_interp_renders(Goals, [], Folded).
+
+fold_interp_renders([], _, []).
+fold_interp_renders([Goal|Rest], Map, Out) :-
+    (   interp_render_goal(Goal, Original, Rendered)
+    ->  fold_interp_renders(Rest, [Rendered-Original|Map], Out)
+    ;   (   Goal = format(string(TextVar), Template, Args),
+            is_list(Args)
+        ->  swap_interp_vars(Args, Map, Args2),
+            Out = [format(string(TextVar), Template, Args2)|Out2]
+        ;   Out = [Goal|Out2]
+        ),
+        fold_interp_renders(Rest, Map, Out2)
+    ).
+
+interp_render_goal(deepclause_strings:dc_interp_value(Original, Rendered), Original, Rendered).
+
+swap_interp_vars([], _, []).
+swap_interp_vars([Arg|Args], Map, [Swapped|SwappedArgs]) :-
+    (   member(Arg-Original, Map)
+    ->  Swapped = Original
+    ;   Swapped = Arg
+    ),
+    swap_interp_vars(Args, Map, SwappedArgs).
 
 conj_list((A, B), List) :-
     !,
@@ -525,14 +584,25 @@ typed_arg_type(string, Var, _, Var) :- !.
 typed_arg_type(integer, Var, _, integer(Var)) :- !.
 typed_arg_type(number, Var, _, number(Var)) :- !.
 typed_arg_type(boolean, Var, _, boolean(Var)) :- !.
-typed_arg_type(object, Var, _, object(Var)) :- !.
+typed_arg_type(object, Var, Info, Wrapped) :-
+    !,
+    % `schema(name, X)` is an object with a declared shape. Dropping the name
+    % here made listing and export show `object(X)`, so an edit made from the
+    % listing silently lost the schema.
+    (   get_dict(schema, Info, SchemaName)
+    ->  Wrapped = schema(SchemaName, Var)
+    ;   Wrapped = object(Var)
+    ).
 typed_arg_type(array, Var, Info, list(Wrapped)) :-
     !,
     (   get_dict(itemType, Info, ItemType)
     ->  true
     ;   ItemType = string
     ),
-    Wrapped =.. [ItemType, Var].
+    (   get_dict(schema, Info, SchemaName)
+    ->  Wrapped = schema(SchemaName, Var)
+    ;   Wrapped =.. [ItemType, Var]
+    ).
 typed_arg_type(_, Var, _, Var).
 
 %% interpolate_template(+Template, +Args, -Description)
@@ -547,7 +617,8 @@ interpolate_template(Template, Args, Description) :-
 interpolate_codes([], [], []) :- !.
 %% A {Var} placeholder consumes one argument; require Args to be exhausted
 %% exactly (the []/[] base case above fails if either side has leftovers).
-interpolate_codes([0'~, 0'w | Rest], [Arg | Args], Out) :-
+interpolate_codes([0'~, Directive | Rest], [Arg | Args], Out) :-
+    ( Directive =:= 0'w ; Directive =:= 0's ),
     !,
     named_var(Arg),
     term_string(Arg, Name, [numbervars(true)]),
@@ -592,39 +663,82 @@ process_clause((:- Directive), SessionId) :-
 %% The leading args are inputs (typed from the list); the last arg is the output.
 process_clause((tool(ToolHead, Description, Types) :- Body), SessionId) :-
     !,
-    (catch(expand_dict_dots(Body, ExpandedBody), _, fail) -> true ; ExpandedBody = Body),
-    extract_tool_schema(ToolHead, Description, Types, ToolName, Schema),
-    assertz(session_user_tools(SessionId, ToolName)),
-    assertz(session_user_tool_schema(SessionId, ToolName, Schema)),
-    format_tool_source(ToolHead, Description, Types, Body, SourceCode),
-    assertz(SessionId:tool_source(ToolName, SourceCode)),
-    assertz(SessionId:(tool(ToolHead) :- ExpandedBody)).
+    repl_register_tool(SessionId, ToolHead, Description, Types, Body, []).
 
 %% Handle tool/2 with description: tool(Head, Description) :- Body
 process_clause((tool(ToolHead, Description) :- Body), SessionId) :-
     !,
-    (catch(expand_dict_dots(Body, ExpandedBody), _, fail) -> true ; ExpandedBody = Body),
-    extract_tool_schema(ToolHead, Description, ToolName, Schema),
-    assertz(session_user_tools(SessionId, ToolName)),
-    assertz(session_user_tool_schema(SessionId, ToolName, Schema)),
-    % Store the source code for the tool description. Reverses the load-time
-    % task/prompt rewrites and normalizes variables for deterministic export.
-    format_tool_source(ToolHead, Description, Body, SourceCode),
-    assertz(SessionId:tool_source(ToolName, SourceCode)),
-    % Assert the tool implementation (use just ToolHead for execution)
-    assertz(SessionId:(tool(ToolHead) :- ExpandedBody)).
+    repl_register_tool(SessionId, ToolHead, Description, none, Body, []).
 
 %% Handle tool/1 without description: tool(Head) :- Body
 process_clause((tool(ToolHead) :- Body), SessionId) :-
     !,
+    repl_register_tool(SessionId, ToolHead, none, none, Body, []).
+
+%% A tool clause annotated with the source variable names of its head, so the
+%% schema tells the model `Path` rather than `arg1`. `preprocess_loaded_term/3`
+%% wraps tool clauses because the names are lost once the clause is asserted.
+process_clause('$dc_tool'(Term, Names), SessionId) :-
+    !,
+    (   Term = (tool(Head, Description, Types) :- Body)
+    ->  repl_register_tool(SessionId, Head, Description, Types, Body, Names)
+    ;   Term = (tool(Head, Description) :- Body)
+    ->  repl_register_tool(SessionId, Head, Description, none, Body, Names)
+    ;   Term = (tool(Head) :- Body)
+    ->  repl_register_tool(SessionId, Head, none, none, Body, Names)
+    ;   true
+    ).
+
+%% A tool written as a *fact* is not an annotation. It used to be asserted as a
+%% plain `tool/2` (or `tool/3`) fact that nothing reads: the model got no tool,
+%% no error at edit time, and "Tool not found" only when a nested agent called
+%% it. Refuse it and name the shape that works.
+process_clause(tool(_, _), _SessionId) :-
+    !,
+    throw(error(domain_error(tool_clause, tool/2),
+                context(process_clause/2,
+                    'a tool needs a body: tool(Head, "what it does") :- Delegate.'))).
+process_clause(tool(_, _, _), _SessionId) :-
+    !,
+    throw(error(domain_error(tool_clause, tool/3),
+                context(process_clause/2,
+                    'a tool needs a body: tool(Head, "what it does", [InputTypes]) :- Delegate.'))).
+
+%% repl_register_tool(+SessionId, +Head, +Description, +TypesOrNone, +Body, +Names)
+%%
+%% One tool per name. A second registration used to be accepted silently, so the
+%% same tool appeared twice to the model and an old implementation could stay
+%% live while the export carried the new one. Replacing is `define`'s job, whose
+%% block may carry the tool clause next to the predicate.
+repl_register_tool(SessionId, ToolHead, Description, Types, Body, Names) :-
+    ToolHead =.. [ToolName|ToolArgs],
+    length(ToolArgs, Arity),
+    (   session_user_tools(SessionId, ToolName)
+    ->  format(atom(Message),
+            'tool ~w is already registered. Replace it with define, putting the predicate and its tool(...) clause in the same block.',
+            [ToolName]),
+        throw(error(permission_error(modify, existing_tool, ToolName),
+                    context(process_clause/2, Message)))
+    ;   true
+    ),
     (catch(expand_dict_dots(Body, ExpandedBody), _, fail) -> true ; ExpandedBody = Body),
-    extract_tool_schema(ToolHead, none, ToolName, Schema),
+    extract_tool_schema(ToolHead, Description, Types, Names, ToolName, Schema),
     assertz(session_user_tools(SessionId, ToolName)),
     assertz(session_user_tool_schema(SessionId, ToolName, Schema)),
-    % Store the source code for the tool description (reverses task rewrites).
-    format_tool_source(ToolHead, none, Body, SourceCode),
+    assertz(session_user_tool_arity(SessionId, ToolName, Arity)),
+    assertz(session_user_tool_head(SessionId, ToolName, ToolHead)),
+    assertz(session_user_tool_desc(SessionId, ToolName, Description)),
+    assertz(session_user_tool_names(SessionId, ToolName, Names)),
+    (   is_list(Types) -> assertz(session_user_tool_types(SessionId, ToolName, Types)) ; true ),
+    assertz(session_user_tool_body(SessionId, ToolName, ExpandedBody)),
+    % The export source reverses the load-time task/prompt rewrites and
+    % normalizes variables, so an export round-trips deterministically.
+    (   Types == none
+    ->  format_tool_source(ToolHead, Description, Body, SourceCode)
+    ;   format_tool_source(ToolHead, Description, Types, Body, SourceCode)
+    ),
     assertz(SessionId:tool_source(ToolName, SourceCode)),
-    % Assert the tool implementation
+    % Assert the tool implementation (just the head; the body is the delegate).
     assertz(SessionId:(tool(ToolHead) :- ExpandedBody)).
 
 process_clause((Head :- Body), SessionId) :-
@@ -720,63 +834,63 @@ expand_dict_expr(Expr, Expr).
 
 %% extract_tool_schema(+ToolHead, +Description, -ToolName, -Schema)
 extract_tool_schema(ToolHead, Description, ToolName, Schema) :-
-    extract_tool_schema(ToolHead, Description, [], ToolName, Schema).
+    extract_tool_schema(ToolHead, Description, [], [], ToolName, Schema).
 
-%% extract_tool_schema(+Head, +Description, +Types, -ToolName, -Schema)
+%% extract_tool_schema(+Head, +Description, +Types, +Names, -ToolName, -Schema)
 %% `Types` is an optional list giving the type of each input (the leading args,
 %% in order); a missing entry defaults to `string`. This is what lets a tool take
-%% an object, an array or a number rather than only a string.
-extract_tool_schema(ToolHead, Description, Types, ToolName, Schema) :-
+%% an object, an array or a number rather than only a string. `Names` are the
+%% head's source variable names (`Path`, `Question`), so the model sees what an
+%% argument means instead of `arg1`.
+extract_tool_schema(ToolHead, Description, Types, Names, ToolName, Schema) :-
     ToolHead =.. [ToolName|Args],
     length(Args, Arity),
-    tool_type_warning(ToolName, Arity, Types),
-    extract_params(Args, 1, Arity, Types, Inputs, Outputs),
+    extract_params(Args, Names, 1, Arity, Types, Inputs, Outputs),
     (Description == none -> Desc = "" ; Desc = Description),
     Schema = schema{
         name: ToolName,
+        arity: Arity,
         description: Desc,
         inputs: Inputs,
         outputs: Outputs
     }.
 
-%% extract_params(+Args, +Index, +Arity, +Types, -Inputs, -Outputs)
+%% extract_params(+Args, +Names, +Index, +Arity, +Types, -Inputs, -Outputs)
 %% The last argument is the output; the rest are inputs, typed from `Types`.
-extract_params([], _, _, _, [], []) :- !.
-extract_params([_Arg|Rest], Index, Arity, Types, Inputs, Outputs) :-
-    format(atom(Name), 'arg~w', [Index]),
+extract_params([], _, _, _, _, [], []) :- !.
+extract_params([Arg|Rest], Names, Index, Arity, Types, Inputs, Outputs) :-
+    param_name(Arg, Names, Index, Name, Label),
     NextIndex is Index + 1,
-    extract_params(Rest, NextIndex, Arity, Types, RestInputs, RestOutputs),
+    extract_params(Rest, Names, NextIndex, Arity, Types, RestInputs, RestOutputs),
     (   Index == Arity
     ->  IsOutput = true, Type = string
     ;   IsOutput = false, input_type(Index, Types, Type)
     ),
-    Param = param{name: Name, type: Type},
+    Param = param{name: Name, type: Type, description: Label},
     (   IsOutput == true
     ->  Inputs = RestInputs, Outputs = [Param|RestOutputs]
     ;   Inputs = [Param|RestInputs], Outputs = RestOutputs
     ).
 
+%% param_name(+HeadArg, +Names, +Index, -Name, -Label)
+%% The wire name stays `argN` (a model bridge and existing harnesses use it);
+%% the head's variable name becomes the parameter description, so the model
+%% reads `Path` and `Question` instead of an unexplained `arg1`.
+param_name(_Arg, Names, Index, Name, Label) :-
+    format(atom(Name), 'arg~w', [Index]),
+    (   nth1(Index, Names, Candidate),
+        atom(Candidate)
+    ->  Label = Candidate
+    ;   Label = Name
+    ).
+
 %% input_type(+Index, +Types, -Type): the Index-th input's declared type.
+input_type(_, Types, string) :-
+    \+ is_list(Types),
+    !.
 input_type(1, [T|_], T) :- !.
 input_type(N, [_|Rest], T) :- N > 1, N1 is N - 1, input_type(N1, Rest, T).
 input_type(_, [], string).
-
-%% tool_type_warning(+Name, +Arity, +Types)
-%% The last argument of a tool head is the output, so a type list should label
-%% the other (Arity - 1) inputs. When it does not, the author has almost
-%% certainly written a tool whose second input was taken for its output — the
-%% `tool(fs_write(Path, Content), …)` shape, which silently writes nothing.
-tool_type_warning(ToolName, Arity, Types) :-
-    is_list(Types),
-    Types \== [],
-    length(Types, Declared),
-    Inputs is Arity - 1,
-    Declared =\= Inputs,
-    !,
-    format(user_error,
-        'Warning: tool ~w/~w declares ~w input type(s) but has ~w input argument(s). The last argument of a tool head is the output; a tool with another input needs a result argument (e.g. fs_write(Path, Content, ok)).~n',
-        [ToolName, Arity, Declared, Inputs]).
-tool_type_warning(_, _, _).
 
 module_reference_string(Module, ModuleStr) :-
     atom(Module),
@@ -1244,6 +1358,7 @@ clear_session(SessionId) :-
     retractall(repl_snapshot(SessionId, _)),
     retractall(session_user_tools(SessionId, _)),
     retractall(session_user_tool_schema(SessionId, _, _)),
+    retractall(session_source_view(SessionId, _, _)),
     retractall(session_builtin_tool(SessionId, _)),
     repl_abolish_user_predicates(SessionId),
     install_builtin_tools(SessionId).
@@ -1375,6 +1490,14 @@ trim_trailing_ws(Str, Len0, Len) :-
 %% Names is the read_term variable_names list (Name=Var), used to render
 %% bindings for solution events.
 read_repl_goal(SessionId, Text, Goal, Names) :-
+    catch(read_repl_goal_once(SessionId, Text, Goal, Names), ReadError,
+        (   repl_clp_operator_error(ReadError),
+            repl_install_clp_operators(SessionId)
+        ->  read_repl_goal_once(SessionId, Text, Goal, Names)
+        ;   throw(ReadError)
+        )).
+
+read_repl_goal_once(SessionId, Text, Goal, Names) :-
     % read_term/3 requires a full stop; REPL callers may omit it (`-g "p(X)"`).
     ensure_full_stop(Text, Text1),
     open_string(Text1, Stream),
@@ -1392,8 +1515,32 @@ read_repl_goal(SessionId, Text, Goal, Names) :-
     % hoisted into a goal *before* the goal that uses it. expand_term_interp
     % embeds the interpolation term in the argument position instead, which is
     % wrong for a raw goal such as verify(X, "Is {X} > 0?", V).
-    expand_body_interp(Transformed, Names0, Goal),
+    expand_body_interp(Transformed, Names0, Interpolated),
+    % `Dict.key` is expanded when a clause is asserted, but an `execute` goal is
+    % read and called directly, so it used to reach `'.'/2` and silently return
+    % the term `_{a:1}.a` instead of 1.
+    (   catch(expand_dict_dots(Interpolated, Expanded), _, fail)
+    ->  Goal = Expanded
+    ;   Goal = Interpolated
+    ),
     Names = Names0.
+
+%% repl_clp_operator_error(+Error)
+%% `X #> 3` in a goal is a *syntax* error until the CLP operators are declared
+%% in the session module: the docs tell the agent to run CLP with `execute`, and
+%% without this it got `syntax_error(operator_expected)` and no hint.
+repl_clp_operator_error(error(syntax_error(operator_expected), _)).
+
+repl_install_clp_operators(SessionId) :-
+    % Import predicates *and* operators, into the session module and the
+    % meta-interpreter's module: the goal is read against the session and run
+    % through `deepclause_mi`.
+    forall(member(Library, [clpfd, clpr, clpq]),
+        catch(repl_load_clp_library(SessionId, Library), _, true)).
+
+repl_load_clp_library(SessionId, Library) :-
+    catch(SessionId:use_module(library(Library)), _, true),
+    catch(import_library_into_mi(library(Library)), _, true).
 
 %% repl_solve(+Goal, +Names, +SessionId, +State)
 %% Enumerating goal-mode solver. Yields one solution(Bindings, Deterministic)
@@ -1464,12 +1611,11 @@ repl_listing(Filter, Text) :-
 
 repl_listing_output(SessionId, Filter) :-
     (   Filter == tools
-    ->  forall(session_user_tool_schema(SessionId, Name, Schema),
-            (   SessionId:tool_source(Name, Source)
-            ->  format("~w - ~w~n~w~n~n", [Name, Schema, Source])
-            ;   format("~w - ~w~n~n", [Name, Schema])
-            )
-        )
+    ->  repl_listing_tools(SessionId, false)
+    ;   Filter == 'tools:all'
+    ->  repl_listing_tools(SessionId, true)
+    ;   Filter == scripts
+    ->  repl_listing_scripts(SessionId)
     ;   Filter == history
     ->  repl_history_listing(SessionId)
     ;   (   current_predicate(SessionId:module_doc/1),
@@ -1484,18 +1630,107 @@ repl_listing_output(SessionId, Filter) :-
             Preds0),
         sort(Preds0, Preds),
         forall(member(Name/Arity, Preds),
-            (   repl_listing_match(Filter, Name, Arity)
+            (   repl_listing_match(Filter, Name, Arity),
+                \+ repl_annotation_predicate(Name, Arity)
             ->  format("~w/~w~n", [Name, Arity]),
                 (   current_predicate(SessionId:doc/2),
                     SessionId:doc(Name/Arity, DocText)
                 ->  format("  % ~w~n", [DocText])
                 ;   true
                 ),
-                functor(Head, Name, Arity),
-                forall(clause(SessionId:Head, ClauseBody), print_user_clause(Head, ClauseBody))
+                repl_listing_tool_line(SessionId, Name, Arity),
+                (   session_source_view(SessionId, Name/Arity, SourceView)
+                ->  format("~w", [SourceView])
+                ;   functor(Head, Name, Arity),
+                    forall(clause(SessionId:Head, ClauseBody), print_user_clause(Head, ClauseBody))
+                )
             ;   true
             )
+        ),
+        repl_listing_tool_summary(SessionId)
+    ).
+
+%% repl_listing_scripts(+SessionId): the linked script files, which are
+%% annotations rather than predicates.
+repl_listing_scripts(SessionId) :-
+    (   current_predicate(SessionId:script_file/2)
+    ->  findall(Name-Path,
+            (   SessionId:script_file(Name, Path),
+                ( atom(Path) ; string(Path) )
+            ),
+            Links0),
+        sort(Links0, Links),
+        (   Links == []
+        ->  format("no script_file/2 links.~n")
+        ;   forall(member(Name-Path, Links), format("~w -> ~w~n", [Name, Path]))
         )
+    ;   format("no script_file/2 links.~n")
+    ).
+
+%% repl_listing_tool_line(+SessionId, +Name, +Arity)
+%% A tool annotation is stored outside the clause database, so `listing` used to
+%% show a predicate with no hint that a nested agent can call it — an agent that
+%% had just added a tool could not confirm it from the listing, and added it
+%% again.
+repl_listing_tool_line(SessionId, Name, Arity) :-
+    session_user_tools(SessionId, Name),
+    session_user_tool_arity(SessionId, Name, Arity),
+    !,
+    session_user_tool_head(SessionId, Name, Head),
+    ( session_user_tool_types(SessionId, Name, Types) -> true ; Types = none ),
+    ( session_user_tool_desc(SessionId, Name, Desc), Desc \== none -> true ; Desc = "" ),
+    (   Types == none
+    ->  format("  % tool ~q — ~w~n", [Head, Desc])
+    ;   format("  % tool ~q ~w — ~w~n", [Head, Types, Desc])
+    ).
+repl_listing_tool_line(_, _, _).
+
+%% repl_listing_tool_summary(+SessionId): one line at the end of `all`.
+repl_listing_tool_summary(SessionId) :-
+    findall(ToolName/Arity,
+        (   session_user_tools(SessionId, ToolName),
+            \+ session_builtin_tool(SessionId, ToolName),
+            session_user_tool_arity(SessionId, ToolName, Arity)
+        ),
+        Tools0),
+    sort(Tools0, Tools),
+    (   Tools == []
+    ->  true
+    ;   format("~ntools: ~w~n", [Tools])
+    ).
+
+%% repl_listing_tools(+SessionId, +IncludeBuiltins)
+%% User tools first and compact; the built-in form tools only on request. The
+%% old listing led with seven built-ins as raw schema dicts, which buried the
+%% harness's own tools.
+repl_listing_tools(SessionId, IncludeBuiltins) :-
+    findall(ToolName/Arity,
+        (   session_user_tools(SessionId, ToolName),
+            session_user_tool_arity(SessionId, ToolName, Arity),
+            (   IncludeBuiltins == true
+            ->  true
+            ;   \+ session_builtin_tool(SessionId, ToolName)
+            )
+        ),
+        Tools0),
+    sort(Tools0, Tools),
+    (   Tools == []
+    ->  format("no tools registered. A tool is tool(Head, \"description\", [InputTypes]) :- Delegate.~n")
+    ;   forall(member(ToolName/Arity, Tools),
+            (   session_user_tool_head(SessionId, ToolName, Head),
+                ( session_user_tool_types(SessionId, ToolName, Types) -> true ; Types = none ),
+                ( session_user_tool_desc(SessionId, ToolName, Desc), Desc \== none -> true ; Desc = "" ),
+                format("~w/~w~n  % tool ~q", [ToolName, Arity, Head]),
+                (   Types == none
+                ->  true
+                ;   format(" ~w", [Types])
+                ),
+                format(" — ~w~n", [Desc]),
+                (   SessionId:tool_source(ToolName, Source)
+                ->  format("~w~n", [Source])
+                ;   true
+                )
+            ))
     ).
 
 %% A filter either names a predicate (`name/arity`), names a prefix, or is `all`.
@@ -1686,6 +1921,33 @@ record_directive(SessionId, Directive) :-
 %% directives, tools, embedded scripts, then user predicates sorted name/arity.
 export_harness(SessionId, Header, Text) :-
     with_output_to(string(Text), export_harness_output(SessionId, Header)).
+
+%% repl_display_harness(+SessionId, -Text)
+%% The same module as `export_harness/3`, but for humans: clauses come from the
+%% stored source view, so variable names, `{Var}` and `schema(...)` are the ones
+%% the author wrote. Export keeps its deterministic A/B numbering for hashing and
+%% byte-stable round-trips.
+repl_display_harness(SessionId, Text) :-
+    with_output_to(string(Text), repl_display_output(SessionId)).
+
+repl_display_output(SessionId) :-
+    export_directives(SessionId),
+    export_tools(SessionId),
+    repl_display_clauses(SessionId).
+
+repl_display_clauses(SessionId) :-
+    findall(Name/Arity,
+        (   current_predicate(SessionId:Name/Arity),
+            export_user_predicate(SessionId, Name, Arity)
+        ),
+        Preds0),
+    sort(Preds0, Preds),
+    forall(member(Name/Arity, Preds),
+        (   session_source_view(SessionId, Name/Arity, SourceView)
+        ->  format("~w~n", [SourceView])
+        ;   functor(Head, Name, Arity),
+            forall(clause(SessionId:Head, Body), export_clause(Head, Body))
+        )).
 
 export_harness_output(SessionId, Header) :-
     (   Header == none
@@ -1949,6 +2211,8 @@ repl_assert(SessionId, ClauseText, Result) :-
                 repl_require_new_predicate(SessionId, PreparedTerm)),
             forall(member(PreparedTerm, PreparedTerms),
                 repl_assert_clause(PreparedTerm, SessionId)),
+            repl_source_views(SessionId, ClauseText, Views),
+            repl_store_source_views(SessionId, Views, append),
             Result = ok
         ),
         AssertError,
@@ -1990,10 +2254,77 @@ repl_set_prolog_snippets(SessionId, Text) :-
 %% repl_parse_clauses(+SessionId, +ClausesText, -Terms)
 %% Parse and preprocess a block of DML clauses without asserting them.
 repl_parse_clauses(SessionId, ClausesText, Terms) :-
+    repl_parse_clauses(SessionId, ClausesText, Terms, _Views).
+
+%% repl_parse_clauses/4 also returns the source view: the block as written, with
+%% the author's variable names, before task/N rewriting. Asserting a clause loses
+%% those names (listing used to show A, B, C), so the view is what listing prints.
+repl_parse_clauses(SessionId, ClausesText, Terms, Views) :-
     ensure_full_stop(ClausesText, Text1),
     open_string(Text1, Stream),
     repl_read_prepared_terms(Stream, SessionId, Terms),
-    close(Stream).
+    close(Stream),
+    repl_source_views(SessionId, ClausesText, Views).
+
+%% repl_source_views(+Text, -Views): Indicator-Source pairs, one per clause.
+%% A source view is best-effort: it only improves `listing`. Read the text as it
+%% is first — a comment-only harness (the export header) and an empty string are
+%% both valid, and `ensure_full_stop` would append a lone `.` after the comment,
+%% which the reader rejects with `end_of_clause`. Only when the final clause
+%% lacks a full stop does a retry with one make sense.
+repl_source_views(SessionId, Text, Views) :-
+    (   catch(repl_source_views_raw(SessionId, Text, Views0), _, fail)
+    ->  Views = Views0
+    ;   catch(( ensure_full_stop(Text, Text1),
+                repl_source_views_raw(SessionId, Text1, Views)
+              ), _, Views = [])
+    ).
+
+repl_source_views_raw(SessionId, Text, Views) :-
+    open_string(Text, Stream),
+    call_cleanup(repl_source_views_loop(Stream, SessionId, Views), close(Stream)).
+
+repl_source_views_loop(Stream, SessionId, Views) :-
+    read_term(Stream, Term, [module(SessionId), variable_names(Bindings)]),
+    (   Term == end_of_file
+    ->  Views = []
+    ;   (   repl_term_indicator(Term, Indicator)
+        ->  with_output_to(string(Body),
+                write_term(Term, [variable_names(Bindings), quoted(true)])),
+            format(string(Source), "~w.~n", [Body]),
+            Views = [Indicator-Source|Rest]
+        ;   Views = Rest
+        ),
+        repl_source_views_loop(Stream, SessionId, Rest)
+    ).
+
+%% repl_store_source_views(+SessionId, +Views, +Mode)
+%% Mode is `replace` (define) or `append` (assert).
+repl_store_source_views(SessionId, Views, Mode) :-
+    keysort(Views, Sorted),
+    repl_store_view_groups(SessionId, Sorted, Mode).
+
+repl_store_view_groups(_, [], _).
+repl_store_view_groups(SessionId, [Indicator-Source|Rest], Mode) :-
+    repl_same_indicator(Indicator, Rest, [Source], Sources, Remaining),
+    atomic_list_concat(Sources, '', NewText),
+    (   Mode == append,
+        session_source_view(SessionId, Indicator, Existing)
+    ->  atomic_list_concat([Existing, NewText], '', Text)
+    ;   retractall(session_source_view(SessionId, Indicator, _)),
+        Text = NewText
+    ),
+    assertz(session_source_view(SessionId, Indicator, Text)),
+    repl_store_view_groups(SessionId, Remaining, Mode).
+
+repl_same_indicator(Indicator, [Indicator-Source|Rest], Acc, [Source|Same], Remaining) :-
+    !,
+    repl_same_indicator(Indicator, Rest, Acc, Same, Remaining).
+repl_same_indicator(_, Rest, Acc, Acc, Rest).
+
+%% repl_drop_source_view(+SessionId, +Indicator)
+repl_drop_source_view(SessionId, Indicator) :-
+    retractall(session_source_view(SessionId, Indicator, _)).
 
 repl_read_prepared_terms(Stream, SessionId, Terms) :-
     read_term(Stream, Term, [module(SessionId), variable_names(Bindings)]),
@@ -2042,8 +2373,20 @@ repl_commit_terms(SessionId, Terms) :-
         (   repl_protected_clause(PreparedTerm)
         ->  throw(error(permission_error(modify, reserved_name, PreparedTerm),
                     context(repl_assert_many/3, 'cannot define a reserved predicate')))
+        ;   repl_replace_annotation(SessionId, PreparedTerm)
+        ->  process_clause(PreparedTerm, SessionId)
         ;   process_clause(PreparedTerm, SessionId)
         )).
+
+%% repl_replace_annotation(+SessionId, +Term)
+%% Remove the existing entry with the same key before asserting the new one.
+repl_replace_annotation(SessionId, Term) :-
+    repl_annotation_key(Term, AnnotationName, Key),
+    current_predicate(SessionId:AnnotationName/2),
+    functor(Template, AnnotationName, 2),
+    arg(1, Template, Key),
+    retractall(SessionId:Template),
+    !.
 
 %% repl_assert_many(+SessionId, +ClausesText, -Result)
 %% Parses a block of clauses and asserts them in the order written. Prefer this
@@ -2052,12 +2395,13 @@ repl_commit_terms(SessionId, Terms) :-
 repl_assert_many(SessionId, ClausesText, Result) :-
     catch(
         (   guard_not_frozen(SessionId),
-            repl_parse_clauses(SessionId, ClausesText, Terms),
+            repl_parse_clauses(SessionId, ClausesText, Terms, SourceViews),
             % assert appends; against an existing predicate that leaves both
             % versions live with their clauses interleaved.
             forall(member(Term, Terms), repl_require_new_predicate(SessionId, Term)),
             repl_commit_terms(SessionId, Terms),
             repl_note_touched(SessionId, Terms),
+            repl_store_source_views(SessionId, SourceViews, append),
             Result = ok
         ),
         AssertError,
@@ -2068,6 +2412,7 @@ repl_assert_many(SessionId, ClausesText, Result) :-
 %% The plain predicate a parsed clause defines. Directives and tool/2 wrappers
 %% have no plain indicator here (process_clause owns them).
 repl_term_indicator((:- _), _) :- !, fail.
+repl_term_indicator('$dc_tool'(_, _), _) :- !, fail.
 repl_term_indicator((tool(_, _) :- _), _) :- !, fail.
 repl_term_indicator((tool(_, _, _) :- _), _) :- !, fail.
 repl_term_indicator((tool(_) :- _), _) :- !, fail.
@@ -2093,80 +2438,129 @@ repl_note_indicator(SessionId, Name/Arity) :-
 %% that mixes the old and the new version — both stay live, clause order
 %% interleaves them, and nothing says so. Refuse instead, and name the remedy.
 repl_require_new_predicate(SessionId, Term) :-
-    repl_term_indicator(Term, Name/Arity),
-    findall(x,
+    % Annotation facts (`doc/2`, `schema/2`, `script_file/2`) are keyed records,
+    % not appendable clauses: a new key is fine, an existing key must be replaced.
+    (   repl_annotation_key(Term, AnnotationName, Key)
+    ->  (   functor(AnnotationTemplate, AnnotationName, 2),
+            clause(SessionId:AnnotationTemplate, Body),
+            repl_annotation_clause_key(AnnotationName, Body, Key)
+        ->  format(atom(AnnotationMessage),
+                '~w(~w, …) already exists. Use define("~w", "…") to replace that entry (other entries are kept).',
+                [AnnotationName, Key, AnnotationName]),
+            throw(error(permission_error(modify, existing_annotation, AnnotationName),
+                        context(repl_require_new_predicate/2, AnnotationMessage)))
+        ;   true
+        )
+    ;   repl_term_indicator(Term, Name/Arity),
+        findall(x,
         (   functor(Head, Name, Arity),
             clause(SessionId:Head, _)
         ),
         Existing),
-    Existing \== [],
-    !,
-    length(Existing, Count),
-    format(atom(Message),
-        '~w/~w already has ~w clause(s). assert appends, so the old and the new clauses would both be present and clause order would interleave them. Use define("~w/~w", "...") to replace the predicate, or delete("~w/~w") first.',
-        [Name, Arity, Count, Name, Arity, Name, Arity]),
-    throw(error(permission_error(modify, existing_predicate, Name/Arity),
-                context(repl_require_new_predicate/2, Message))).
+        Existing \== [],
+        !,
+        length(Existing, Count),
+        format(atom(Message),
+            '~w/~w already has ~w clause(s). assert appends, so the old and the new clauses would both be present and clause order would interleave them. Use define("~w/~w", "...") to replace the predicate, or delete("~w/~w") first.',
+            [Name, Arity, Count, Name, Arity, Name, Arity]),
+        throw(error(permission_error(modify, existing_predicate, Name/Arity),
+                    context(repl_require_new_predicate/2, Message)))
+    ).
 repl_require_new_predicate(_SessionId, _Term).
 
+%% repl_annotation_key(+Term, -Name, -Key)
+%% The annotation predicates whose entries are keyed: one per documented
+%% predicate, schema or linked script. Defining one entry must not delete the
+%% others, which is exactly what "replace the whole predicate" used to do.
+repl_annotation_key(doc(Key, _), doc, Key) :- !.
+repl_annotation_key(schema(Key, _), schema, Key) :- !.
+repl_annotation_key(script_file(Key, _), script_file, Key).
+repl_annotation_key((Head :- _), Name, Key) :- !, repl_annotation_key(Head, Name, Key).
+
+repl_annotation_clause_key(doc, doc(Key, _), Key) :- !.
+repl_annotation_clause_key(schema, schema(Key, _), Key) :- !.
+repl_annotation_clause_key(script_file, script_file(Key, _), Key).
+
+repl_annotation_predicate(doc, 2).
+repl_annotation_predicate(schema, 2).
+repl_annotation_predicate(script_file, 2).
+
 %% repl_forget_tool(+SessionId, +Name)
-%% Drop the tool annotation that belonged to a predicate being removed.
+%% Drop the tool annotation that belonged to a predicate being removed, and the
+%% `tool/1` implementation clause that carried it. Leaving the implementation
+%% behind meant a later `task/N` still offered the old body while the export
+%% carried the new one, so the live session and the exported harness disagreed.
 repl_forget_tool(SessionId, Name) :-
     (   session_user_tools(SessionId, Name)
     ->  retractall(session_user_tools(SessionId, Name)),
         retractall(session_user_tool_schema(SessionId, Name, _)),
+        retractall(session_user_tool_arity(SessionId, Name, _)),
+        retractall(session_user_tool_head(SessionId, Name, _)),
+        retractall(session_user_tool_desc(SessionId, Name, _)),
+        retractall(session_user_tool_names(SessionId, Name, _)),
+        retractall(session_user_tool_types(SessionId, Name, _)),
+        retractall(session_user_tool_body(SessionId, Name, _)),
         catch(retractall(SessionId:tool_source(Name, _)), _, true)
     ;   true
-    ).
+    ),
+    repl_forget_tool_clauses(SessionId, Name).
+
+%% repl_forget_tool_clauses(+SessionId, +Name)
+%% Every `tool(Head) :- Body` whose head is this tool. The clause lives in the
+%% module's `tool/1` predicate, so it cannot be abolished by name/arity.
+repl_forget_tool_clauses(SessionId, Name) :-
+    forall(( clause(SessionId:tool(Head), Body), compound(Head), functor(Head, Name, _) ),
+        (   Body == true
+        ->  retract(SessionId:tool(Head))
+        ;   retract(SessionId:(tool(Head) :- Body))
+        )).
 
 %% repl_capture_predicates(+SessionId, +Indicators, -Captured)
 %% Copy the clauses and tool bookkeeping a replacement is about to destroy, so
 %% a failure part-way through can put them back.
 repl_capture_predicates(SessionId, Indicators, Captured) :-
-    findall(indicator(Name, Arity, Clauses, tool(IsTool, Schema, Source)),
+    findall(indicator(Name, Arity, Clauses, ToolInfo),
         (   member(Name/Arity, Indicators),
-            findall(Stored,
-                (   functor(Head, Name, Arity),
-                    clause(SessionId:Head, Body),
-                    (   Body == true
-                    ->  Stored = Head
-                    ;   Stored = (Head :- Body)
-                    )
-                ),
-                Clauses),
-            (   session_user_tools(SessionId, Name)
-            ->  IsTool = true
-            ;   IsTool = false
-            ),
-            (   session_user_tool_schema(SessionId, Name, Found)
-            ->  Schema = Found
-            ;   Schema = none
-            ),
-            (   current_predicate(SessionId:tool_source/2),
-                SessionId:tool_source(Name, FoundSource)
-            ->  Source = FoundSource
-            ;   Source = none
-            )
+            findall(Stored, capture_clause(SessionId, Name, Arity, Stored), Clauses),
+            capture_tool_info(SessionId, Name, ToolInfo)
         ),
         Captured).
 
+capture_clause(SessionId, Name, Arity, Stored) :-
+    functor(Head, Name, Arity),
+    clause(SessionId:Head, Body),
+    (   Body == true
+    ->  Stored = Head
+    ;   Stored = (Head :- Body)
+    ).
+
+capture_tool_info(SessionId, Name, ToolInfo) :-
+    (   session_user_tools(SessionId, Name),
+        \+ session_builtin_tool(SessionId, Name),
+        % Head and Body must come from the *same* clause: reading the stored head
+        % and body separately gives two copies with unrelated variables, and the
+        % restored tool then delegates to an unbound goal.
+        clause(SessionId:tool(Head), Body),
+        compound(Head),
+        functor(Head, Name, _),
+        session_user_tool_desc(SessionId, Name, Desc)
+    ->  ( session_user_tool_names(SessionId, Name, Names) -> true ; Names = [] ),
+        ( session_user_tool_types(SessionId, Name, Types) -> true ; Types = none ),
+        ToolInfo = tool(true, tool_meta(Head, Desc, Names, Types, Body))
+    ;   ToolInfo = none
+    ).
+
 %% repl_restore_captured(+SessionId, +Captured)
 repl_restore_captured(SessionId, Captured) :-
-    forall(member(indicator(Name, Arity, Clauses, tool(IsTool, Schema, Source)), Captured),
-        (   catch(abolish(SessionId:Name/Arity), _, true),
+    forall(member(indicator(Name, Arity, Clauses, ToolInfo), Captured),
+        (   % Only the arity this transaction touched: other arities of the same
+            % name were never part of it.
+            catch(abolish(SessionId:Name/Arity), _, true),
             repl_forget_tool(SessionId, Name),
             forall(member(Clause, Clauses), assertz(SessionId:Clause)),
-            (   IsTool == true
-            ->  assertz(session_user_tools(SessionId, Name))
+            (   ToolInfo = tool(true, tool_meta(Head, Desc, Names, Types, Body))
+            ->  catch(repl_register_tool(SessionId, Head, Desc, Types, Body, Names), _, true)
             ;   true
-            ),
-            (   Schema == none
-            ->  true
-            ;   assertz(session_user_tool_schema(SessionId, Name, Schema))
-            ),
-            (   Source == none
-            ->  true
-            ;   assertz(SessionId:tool_source(Name, Source))
             )
         )).
 
@@ -2174,7 +2568,12 @@ repl_restore_captured(SessionId, Captured) :-
 %% The destructive half of define: abolish the targets, then assert the block.
 repl_replace_predicates(SessionId, Indicators, Terms) :-
     forall(member(Name/Arity, Indicators),
-        (   catch(abolish(SessionId:Name/Arity), _, true),
+        (   % Annotation predicates merge per key (repl_commit_terms replaces the
+            % entry the block defines); abolishing them deleted every other
+            % predicate's doc/schema/script link.
+            repl_annotation_predicate(Name, Arity)
+        ->  true
+        ;   catch(abolish(SessionId:Name/Arity), _, true),
             repl_forget_tool(SessionId, Name)
         )),
     repl_commit_terms(SessionId, Terms).
@@ -2220,40 +2619,64 @@ repl_retract(SessionId, ClauseText, Result) :-
     catch(
         (   guard_not_frozen(SessionId),
             repl_read_clause(SessionId, ClauseText, Pattern),
-            repl_head_of(Pattern, Clause),
-            repl_callable_indicator(Clause, Name, Arity),
-            (   repl_protected_clause(Clause)
-            ->  throw(error(permission_error(modify, reserved_name, Clause),
-                        context(repl_retract/3, 'cannot retract a reserved predicate')))
-            ;   true
-            ),
-            findall(x, retract(SessionId:Pattern), Removed),
-            length(Removed, RemovedCount),
-            (   RemovedCount =:= 0
-            ->  format(atom(Message),
-                    'no clause of ~w/~w matched ~w, so nothing was removed',
-                    [Name, Arity, Clause]),
-                throw(error(existence_error(clause, Clause),
-                            context(repl_retract/3, Message)))
-            ;   true
-            ),
-            % Only drop the tool annotation when the predicate is really gone;
-            % other clauses of it may still be live.
-            (   functor(Head, Name, Arity),
-                clause(SessionId:Head, _)
-            ->  true
-            ;   repl_forget_tool(SessionId, Name)
-            ),
-            repl_note_indicator(SessionId, Name/Arity),
-            (   RemovedCount =:= 1
-            ->  Suffix = ''
-            ;   Suffix = 's'
-            ),
-            format(atom(Result), 'ok(removed ~w clause~w)', [RemovedCount, Suffix])
+            (   repl_tool_pattern_name(Pattern, ToolName)
+            ->  repl_forget_tool(SessionId, ToolName),
+                format(atom(Result), 'ok(removed tool ~w)', [ToolName])
+            ;   repl_retract_predicate_clause(SessionId, Pattern, Result)
+            )
         ),
         RetractError,
         format(atom(Result), 'error(~w)', [RetractError])
     ).
+
+%% A `tool(...)` pattern names an annotation, not a module clause. The
+%% implementation lives in `tool/1` and the metadata outside the module, so the
+%% generic retract found nothing and reported "no clause of tool/2 matched" —
+%% while the tool stayed registered and the agent had no way to remove it.
+repl_tool_pattern_name(Pattern, Name) :-
+    repl_tool_pattern_head(Pattern, Head),
+    compound(Head),
+    functor(Head, Name, _),
+    \+ Name == tool_source.
+
+repl_tool_pattern_head((tool(Head) :- _), Head) :- !.
+repl_tool_pattern_head((tool(Head, _) :- _), Head) :- !.
+repl_tool_pattern_head((tool(Head, _, _) :- _), Head) :- !.
+repl_tool_pattern_head(tool(Head), Head) :- !.
+repl_tool_pattern_head(tool(Head, _), Head) :- !.
+repl_tool_pattern_head(tool(Head, _, _), Head).
+
+repl_retract_predicate_clause(SessionId, Pattern, Result) :-
+    repl_head_of(Pattern, Clause),
+    repl_callable_indicator(Clause, Name, Arity),
+    (   repl_protected_clause(Clause)
+    ->  throw(error(permission_error(modify, reserved_name, Clause),
+                context(repl_retract/3, 'cannot retract a reserved predicate')))
+    ;   true
+    ),
+    findall(x, retract(SessionId:Pattern), Removed),
+    length(Removed, RemovedCount),
+    (   RemovedCount =:= 0
+    ->  format(atom(Message),
+            'no clause of ~w/~w matched ~w, so nothing was removed',
+            [Name, Arity, Clause]),
+        throw(error(existence_error(clause, Clause),
+                    context(repl_retract/3, Message)))
+    ;   true
+    ),
+    % Only drop the tool annotation when the predicate is really gone;
+    % other clauses of it may still be live.
+    (   functor(Head, Name, Arity),
+        clause(SessionId:Head, _)
+    ->  true
+    ;   repl_forget_tool(SessionId, Name)
+    ),
+    repl_note_indicator(SessionId, Name/Arity),
+    (   RemovedCount =:= 1
+    ->  Suffix = ''
+    ;   Suffix = 's'
+    ),
+    format(atom(Result), 'ok(removed ~w clause~w)', [RemovedCount, Suffix]).
 
 %% repl_delete_predicate(+SessionId, +Name, +Arity, -Result)
 %% Fully remove a predicate. Unlike retract (which only removes matching
@@ -2267,11 +2690,22 @@ repl_delete_predicate(SessionId, Name, Arity, Result) :-
                         context(repl_delete_predicate/4, 'cannot delete a reserved predicate')))
             ;   true
             ),
+            (   repl_annotation_predicate(Name, Arity)
+            ->  throw(error(permission_error(modify, annotation_predicate, Name/Arity),
+                        context(repl_delete_predicate/4,
+                            'doc/2, schema/2 and script_file/2 are keyed annotations, not skills. Remove one entry with retract("doc(name/arity, _)") / retract("schema(name, _)") / retract("script_file(name, _)"), or replace it with define.')))
+            ;   true
+            ),
+            (   Name == tool
+            ->  throw(error(domain_error(delete_target, tool/Arity),
+                        context(repl_delete_predicate/4,
+                            'tool/2 and tool/1 are the annotation mechanism, not a predicate to delete. To remove one tool use delete("tool:Name/Arity") or retract("tool(Head, _)").')))
+            ;   true
+            ),
             catch(abolish(SessionId:Name/Arity), _, true),
+            repl_drop_source_view(SessionId, Name/Arity),
             (   session_user_tools(SessionId, Name)
-            ->  retractall(session_user_tools(SessionId, Name)),
-                retractall(session_user_tool_schema(SessionId, Name, _)),
-                retractall(SessionId:tool_source(Name, _))
+            ->  repl_forget_tool(SessionId, Name)
             ;   true
             ),
             (   session_edit_touched(SessionId, Name/Arity)
@@ -2282,6 +2716,26 @@ repl_delete_predicate(SessionId, Name, Arity, Result) :-
         ),
         DeleteError,
         format(atom(Result), 'error(~w)', [DeleteError])
+    ).
+
+%% repl_delete_tool(+SessionId, +ToolName, -Result)
+%% `delete("tool:name/arity")`. Removes the annotation and its implementation,
+%% and leaves the delegate predicate alone — that is a skill in its own right.
+repl_delete_tool(SessionId, ToolName, Result) :-
+    catch(
+        (   guard_not_frozen(SessionId),
+            atom(ToolName),
+            (   session_user_tools(SessionId, ToolName)
+            ->  repl_forget_tool(SessionId, ToolName),
+                Result = ok
+            ;   format(atom(Message),
+                    'no tool named ~w is registered, so nothing was removed', [ToolName]),
+                throw(error(existence_error(tool, ToolName),
+                            context(repl_delete_tool/3, Message)))
+            )
+        ),
+        DeleteToolError,
+        format(atom(Result), 'error(~w)', [DeleteToolError])
     ).
 
 %% repl_define(+SessionId, +HeadPatternText, +ClausesText, -Result)
@@ -2297,7 +2751,7 @@ repl_define(SessionId, HeadPatternText, ClausesText, Result) :-
     catch(
         (   guard_not_frozen(SessionId),
             repl_define_target(SessionId, HeadPatternText, HeadName, HeadArity),
-            repl_parse_clauses(SessionId, ClausesText, Terms),
+            repl_parse_clauses(SessionId, ClausesText, Terms, SourceViews),
             findall(Name/Arity,
                 ( member(Term, Terms), repl_term_indicator(Term, Name/Arity) ),
                 BlockIndicators0),
@@ -2325,11 +2779,33 @@ repl_define(SessionId, HeadPatternText, ClausesText, Result) :-
                     ))
             ),
             repl_note_touched(SessionId, Terms),
+            repl_restore_kept_tools(SessionId, Captured),
+            repl_store_source_views(SessionId, SourceViews, replace),
             Result = ok
         ),
         DefineError,
         format(atom(Result), 'error(~w)', [DefineError])
     ).
+
+%% repl_restore_kept_tools(+SessionId, +Captured)
+%%
+%% `define` replaces a predicate; the tool annotation is separate bookkeeping.
+%% It used to be dropped whenever the new block did not repeat the tool clause,
+%% so a perfectly good capability silently disappeared from the next `task/N`.
+%% Keep it when the delegate still exists at the same arity; a block that
+%% re-declares the tool has already registered it.
+repl_restore_kept_tools(SessionId, Captured) :-
+    forall(member(indicator(Name, _Arity, _Clauses, ToolInfo), Captured),
+        (   ToolInfo = tool(true, tool_meta(Head, Desc, Names, Types, Body)),
+            \+ session_user_tools(SessionId, Name)
+        ->  Head =.. [Name|Args],
+            length(Args, HeadArity),
+            (   current_predicate(SessionId:Name/HeadArity)
+            ->  catch(repl_register_tool(SessionId, Head, Desc, Types, Body, Names), _, true)
+            ;   true
+            )
+        ;   true
+        )).
 
 %% repl_define_target(+SessionId, +HeadText, -Name, -Arity)
 %% The first argument of `define` names the predicate being replaced, written as
@@ -2349,6 +2825,12 @@ repl_define_target(SessionId, HeadText, Name, Arity) :-
         Arity = IndicatorArity
     ;   repl_head_of(Pattern, HeadClause),
         repl_callable_indicator(HeadClause, Name, Arity)
+    ),
+    (   Name == tool
+    ->  throw(error(domain_error(define_target, tool/Arity),
+                context(repl_define/4,
+                    'define the predicate the tool delegates to, and put the tool(...) clause in the same block: define("up/2", "up(X, Y) :- ... . tool(up(X, Y), \"…\") :- up(X, Y).")')))
+    ;   true
     ).
 
 %% repl_require_committable(+SessionId, +Term)
@@ -2525,6 +3007,7 @@ repl_rollback(SessionId, Source, Result) :-
     catch(
         (   guard_not_frozen(SessionId),
             repl_abolish_user_predicates(SessionId),
+            retractall(session_source_view(SessionId, _, _)),
             retractall(session_directive(SessionId, _)),
             retractall(session_user_tools(SessionId, _)),
             retractall(session_user_tool_schema(SessionId, _, _)),
@@ -2598,8 +3081,14 @@ repl_user_predicates(SessionId, Preds) :-
 %% repl_user_predicates_text(+SessionId, -Text)
 %% Rendered "name/arity, name/arity" for change diffing on the host side.
 repl_user_predicates_text(SessionId, Text) :-
-    repl_user_predicates(SessionId, Preds),
+    repl_user_predicates(SessionId, Preds0),
+    % doc/2, schema/2 and script_file/2 are annotations. Reporting them as
+    % changed predicates invited `delete(doc/2)`, which wipes every doc at once.
+    exclude(repl_annotation_indicator, Preds0, Preds),
     with_output_to(string(Text), print_pred_list(Preds)).
+
+repl_annotation_indicator(Name/Arity) :-
+    repl_annotation_predicate(Name, Arity).
 
 %% repl_predicate_arities(+SessionId, +Name, -Arities)
 %% Sorted arities of a user predicate, e.g. agent_main -> [0,1,2]. Used by
@@ -2676,16 +3165,40 @@ repl_predicate_pure(SessionId, Name, Arity) :-
 
 %% repl_validate_tools(+SessionId, -Warnings)
 repl_validate_tools(SessionId, Warnings) :-
-    findall(W, tool_contract_violation(SessionId, W), Raw),
+    findall(W,
+        (   tool_contract_violation(SessionId, W)
+        ;   tool_shape_violation(SessionId, W)
+        ),
+        Raw),
     list_to_set(Raw, Warnings).
+
+%% tool_shape_violation(+SessionId, -Warning)
+%%
+%% A tool head has exactly one output, and it is the last argument. The type
+%% list labels only the inputs, so a mismatch means the author's `Content` is
+%% being offered to the model as an output — the `fs_write(Path, Content)` shape,
+%% which a nested agent cannot fill in. This used to be printed to stderr at
+%% registration time, where the agent never saw it.
+tool_shape_violation(SessionId, Warning) :-
+    session_user_tools(SessionId, ToolName),
+    \+ session_builtin_tool(SessionId, ToolName),
+    session_user_tool_arity(SessionId, ToolName, Arity),
+    session_user_tool_types(SessionId, ToolName, Types),
+    is_list(Types),
+    length(Types, Declared),
+    Inputs is Arity - 1,
+    Declared =\= Inputs,
+    !,
+    format(string(Warning),
+        'tool ~w/~w declares ~w input type(s) but has ~w input argument(s). The last argument of a tool head is its output; put several values in one dict or JSON string, or add an explicit result argument.',
+        [ToolName, Arity, Declared, Inputs]).
 
 %% repl_validate_docs(+SessionId, -Warnings)
 %%
-%% `doc(Name/Arity, Text)` is an annotation: it documents a predicate, it does not
-%% create one. A `doc/2` whose predicate has no clauses therefore names a goal that
-%% fails silently when called — the failure surfaces far away as an empty result,
-%% and the name still appears in the manifest, so the listing looks healthy.
-%% Reported at `end_turn`, where the author can still see what they just wrote.
+%% `doc(Name/Arity, Text)` is an annotation: it documents a predicate, it does
+%% not create one. A `doc/2` whose predicate has no clauses names a goal that
+%% fails silently when called, and the name still appears in the manifest, so the
+%% listing looks healthy. Reported at `end_turn`.
 repl_validate_docs(SessionId, Warnings) :-
     findall(W, doc_without_clauses(SessionId, W), Raw),
     list_to_set(Raw, Warnings).
@@ -2704,6 +3217,9 @@ doc_without_clauses(SessionId, Warning) :-
         'doc(~w/~w) documents a predicate with no clauses, so calling it fails silently and yields an empty result. Define ~w/~w, or remove the doc/2.',
         [Name, Arity, Name, Arity]).
 
+%% tool_contract_violation(+SessionId, -Warning)
+%% A nested agent calls the tool body, so it must reach real logic with the same
+%% name and arity as its head.
 tool_contract_violation(SessionId, Warning) :-
     clause(SessionId:tool(Head), Body),
     compound(Head),
@@ -2717,8 +3233,8 @@ tool_contract_violation(SessionId, Warning) :-
     length(Args, CalleeArity),
     (   Callee == Name, CalleeArity == Arity, \+ repl_user_predicate(SessionId, Name, Arity)
     ->  format(string(Warning),
-            'tool ~w/~w calls the tool itself, so a nested agent recurses forever. Define ~w/~w separately and delegate to it: tool(~w(A,B), "…") :- ~w(A,B).',
-            [Name, Arity, Name, Name, Name, Name])
+            'tool ~w/~w calls ~w/~w, which does not exist, so a nested agent gets "Tool not found". Define ~w/~w and delegate to it: tool(~w(A, B), "…") :- ~w(A, B).',
+            [Name, Arity, Callee, CalleeArity, Name, Arity, Name, Name])
     ;   Callee == Name, CalleeArity \== Arity
     ->  format(string(Warning),
             'tool ~w/~w declares a different arity than its body calls (~w/~w). A tool head and its delegate must match, with the output argument last.',
@@ -2749,8 +3265,77 @@ tool_body_goal(Body, Call) :-
     F \== (',').
 
 %% tool_first_goal(+Body, -Call): the first call in a conjunction body.
-tool_first_goal((A, _), Call) :- !, tool_first_goal(A, Call).
+%% tool_first_goal((A, _), Call) :- !, tool_first_goal(A, Call).
 tool_first_goal(Call, Call).
+
+%% ============================================================
+%% Complexity advisories
+%% ============================================================
+%%
+%% The goal is many small composable skills, not one clever predicate. These
+%% checks catch the shapes a model falls into when it reaches for Prolog instead
+%% of composition: a long clause, inline Python long enough to belong in a
+%% script, and an `agent_main` that returns a value instead of answering.
+repl_validate_complexity(SessionId, Warnings) :-
+    findall(W, complexity_violation(SessionId, W), Raw),
+    list_to_set(Raw, Warnings).
+
+complexity_violation(SessionId, Warning) :-
+    current_predicate(SessionId:Name/Arity),
+    integer(Arity),
+    repl_user_predicate(SessionId, Name, Arity),
+    functor(Head, Name, Arity),
+    clause(SessionId:Head, Body),
+    Body \== true,
+    (   Name == agent_main,
+        Arity > 0,
+        \+ body_calls_predicate(Body, answer, 1)
+    ->  format(string(Warning),
+            'agent_main/~w has arguments but never calls answer/1. `agent_main/N` takes the run inputs; return the result with answer/1, not as an extra output argument.',
+            [Arity])
+    ;   body_goal_count(Body, Count),
+        Count > 12
+    ->  format(string(Warning),
+            '~w/~w has ~w goals in one clause. Split it into named skills and compose them (A, B) or with maplist/3; a clause this long is where a harness stops being reviewable.',
+            [Name, Arity, Count])
+    ;   body_inline_python_lines(Body, Lines),
+        Lines > 3
+    ->  format(string(Warning),
+            '~w/~w embeds ~w lines of Python in a DML string. Put the script in a workspace file, link it with script_file/2, and call run_script(Name, Args, Value).',
+            [Name, Arity, Lines])
+    ;   fail
+    ).
+
+body_calls_predicate(Body, Name, Arity) :-
+    sub_term(Sub, Body),
+    compound(Sub),
+    compound_name_arity(Sub, Name, Arity).
+
+body_goal_count(Body, Count) :-
+    conj_list(Body, Goals),
+    length(Goals, Count).
+
+body_inline_python_lines(Body, Lines) :-
+    sub_term(Sub, Body),
+    compound(Sub),
+    compound_name_arity(Sub, python, _Arity),
+    Sub =.. [_|Options],
+    python_option(code, Options, Code),
+    string(Code),
+    split_string(Code, "\n", "", Lines0),
+    length(Lines0, Lines).
+
+%% python_option(+Key, +Options, -Value)
+%% `exec(python(code: "…"))` reaches Prolog as `python(:(code, "…"))`; a dict is
+%% also accepted. Both spell the same option.
+python_option(Key, Options, Value) :-
+    member(Option, Options),
+    (   is_dict(Option)
+    ->  get_dict(Key, Option, Value)
+    ;   compound_name_arity(Option, :, 2),
+        arg(1, Option, Key),
+        arg(2, Option, Value)
+    ).
 
 %% True when the predicate has at least one clause with a real body (not a fact).
 repl_predicate_has_rule(SessionId, Name, Arity) :-
@@ -3322,6 +3907,7 @@ destroy_engine(SessionId) :-
     retractall(session_params(SessionId, _)),
     retractall(session_user_tools(SessionId, _)),
     retractall(session_user_tool_schema(SessionId, _, _)),
+    retractall(session_source_view(SessionId, _, _)),
     retractall(session_pending_input(SessionId, _)),
     retractall(session_input_cancelled(SessionId)),
     retractall(session_agent_result(SessionId, _)),
@@ -4546,12 +5132,22 @@ mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
 %%
 %%   task("From the front matter extract every author: {Text}",
 %%        list(schema(author, Authors))).
-%% schema_fill(+Fields, +Value, -Filled): the pure part, so it is testable and
-%% usable without a session. The session predicate schema_fill/3 looks the fields
-%% up from `schema/2`.
+%% schema_fill(+Fields, +Value, -Filled): the pure part (primitive field types),
+%% so it is testable and usable without a session. The session predicate
+%% schema_fill/3 looks the fields up from `schema/2`.
 schema_fill_fields(Fields, Value, Filled) :-
+    schema_fill_fields(none, Fields, Value, Filled).
+
+%% schema_fill_fields(+SessionOrNone, +Fields, +Value, -Filled)
+%%
+%% Field types: a primitive (`string`, `integer`, `number`, `boolean`, `object`,
+%% `array`), `list(Type)`, or `schema(Name)` / `schema(Name, _)` for a nested
+%% object. Nested schemas are filled and validated recursively; before this,
+%% `list(schema(part, _))` was an unknown type and every value was rejected —
+%% including `[]`.
+schema_fill_fields(Session, Fields, Value, Filled) :-
     is_dict(Value),
-    (   member(field(Field, Type, required), Fields),
+    (   member(field(Field, _Type, required), Fields),
         \+ dict_field(Value, Field, _),
         !,
         format(atom(Msg), 'schema: required field "~w" is missing', [Field]),
@@ -4560,7 +5156,7 @@ schema_fill_fields(Fields, Value, Filled) :-
     ),
     (   member(field(Field, Type, _), Fields),
         dict_field(Value, Field, Found),
-        \+ schema_value_ok(Type, Found),
+        \+ schema_value_ok(Session, Type, Found),
         !,
         format(atom(Msg), 'schema: field "~w" is not ~w (~w)', [Field, Type, Found]),
         throw(error(schema_error(Msg), schema_fill/3))
@@ -4569,10 +5165,9 @@ schema_fill_fields(Fields, Value, Filled) :-
     dict_pairs(Value, _, Pairs),
     findall(Key-NewValue,
         (   member(Key-Old, Pairs),
-            (   member(field(Key, _, Option), Fields)
-            ->  (   Option = default(Default), Old == "" -> NewValue = Default
-                ;   NewValue = Old
-                )
+            (   member(field(Key, Type, Option), Fields)
+            ->  (   Option = default(Default), Old == "" -> Base = Default ; Base = Old ),
+                schema_fill_value(Session, Type, Base, NewValue)
             ;   NewValue = Old          % undeclared: kept, so it stays visible
             )
         ),
@@ -4585,15 +5180,57 @@ schema_fill_fields(Fields, Value, Filled) :-
     append(Updated, Missing, All),
     dict_pairs(Filled, _, All).
 
+%% schema_fill_value(+SessionOrNone, +Type, +Value, -Filled)
+schema_fill_value(Session, list(Inner), Value, Filled) :-
+    !,
+    (   is_list(Value)
+    ->  maplist(schema_fill_value(Session, Inner), Value, Filled)
+    ;   Filled = Value
+    ).
+schema_fill_value(Session, schema(Name), Value, Filled) :-
+    !,
+    schema_fill_nested(Session, Name, Value, Filled).
+schema_fill_value(Session, schema(Name, _), Value, Filled) :-
+    !,
+    schema_fill_nested(Session, Name, Value, Filled).
+schema_fill_value(_, _, Value, Value).
+
+schema_fill_nested(none, _, Value, Value) :- !.
+schema_fill_nested(Session, Name, Value, Filled) :-
+    (   is_dict(Value)
+    ->  schema_fields_of(Session, Name, Fields),
+        schema_fill_fields(Session, Fields, Value, Filled)
+    ;   Filled = Value
+    ).
+
 %% A declared type accepts its own shape; anything coarser (a number for a string
 %% field, for instance) fails, because silently coercing hides the model's error.
-schema_value_ok(string, V) :- ( string(V) ; atom(V) ), !.
-schema_value_ok(integer, V) :- integer(V), !.
-schema_value_ok(number, V) :- number(V), !.
-schema_value_ok(boolean, V) :- ( V == true ; V == false ; V == yes ; V == no ), !.
-schema_value_ok(object, V) :- is_dict(V), !.
-schema_value_ok(array, V) :- is_list(V), !.
-schema_value_ok(_, _) :- fail.
+schema_value_ok(_, string, V) :- ( string(V) ; atom(V) ), !.
+schema_value_ok(_, integer, V) :- integer(V), !.
+schema_value_ok(_, number, V) :- number(V), !.
+schema_value_ok(_, boolean, V) :- ( V == true ; V == false ; V == yes ; V == no ), !.
+schema_value_ok(_, object, V) :- is_dict(V), !.
+schema_value_ok(_, array, V) :- is_list(V), !.
+schema_value_ok(Session, list(Inner), V) :-
+    !,
+    is_list(V),
+    maplist(schema_value_ok(Session, Inner), V).
+schema_value_ok(Session, schema(Name), V) :-
+    !,
+    schema_value_ok_nested(Session, Name, V).
+schema_value_ok(Session, schema(Name, _), V) :-
+    !,
+    schema_value_ok_nested(Session, Name, V).
+schema_value_ok(none, list(_), V) :- is_list(V), !.
+schema_value_ok(none, schema(_), V) :- is_dict(V), !.
+schema_value_ok(none, schema(_, _), V) :- is_dict(V), !.
+schema_value_ok(_, _, _) :- fail.
+
+schema_value_ok_nested(none, _, V) :- is_dict(V), !.
+schema_value_ok_nested(Session, Name, V) :-
+    is_dict(V),
+    schema_fields_of(Session, Name, Fields),
+    catch((schema_fill_fields(Session, Fields, V, _), true), _, fail).
 
 %% bind_task_variables(+VarsDict, +Names, -Values)
 bind_task_variables(_, _, [], []) :- !.
@@ -4609,8 +5246,8 @@ bind_task_variables(SessionId, VarsDict, [N|Names], [Value|Values]) :-
     (   is_dict(N), get_dict(schema, N, SchemaName), nonvar(Raw)
     ->  schema_fields_of(SessionId, SchemaName, Fields),
         (   is_list(Raw)
-        ->  maplist(schema_filled(Fields), Raw, Value)
-        ;   schema_fill_fields(Fields, Raw, Value)
+        ->  schema_fill_list(SessionId, Fields, Raw, Value)
+        ;   schema_fill_fields(SessionId, Fields, Raw, Value)
         )
     ;   Value = Raw
     ),
@@ -4643,18 +5280,36 @@ resolve_schema_field(SessionId, VarName, Resolved) :-
 
 %% Field descriptors as dicts, so they cross the bridge without a decoder.
 %% `required` is 1/0 rather than an atom: the atom `false` arrives as the string
-%% "false", which is truthy in JavaScript.
+%% "false", which is truthy in JavaScript. A nested schema carries its own
+%% `fields`, so the description the nested agent reads includes them.
 schema_field_dicts(SessionId, SchemaName, Dicts) :-
     catch(clause(SessionId:schema(SchemaName, Fields), true), _, fail),
-    findall(x{name: Field, type: Type, required: Required, default: Default},
-        (   member(field(Field, Type, Option), Fields),
+    findall(x{name: Field, type: Type, itemType: ItemType, required: Required,
+              default: Default, fields: Nested},
+        (   member(field(Field, TypeTerm, Option), Fields),
+            field_type_dict(SessionId, TypeTerm, Type, ItemType, Nested),
             (   Option == required -> Required = 1 ; Required = 0 ),
             (   Option = default(D) -> Default = D ; Default = no_default )
         ),
         Dicts).
 
-schema_filled(Fields, Raw, Filled) :-
-    (   is_dict(Raw) -> schema_fill_fields(Fields, Raw, Filled) ; Filled = Raw ).
+%% field_type_dict(+Session, +TypeTerm, -Type, -ItemType, -Fields)
+field_type_dict(Session, list(Inner), array, ItemType, Nested) :-
+    !,
+    field_type_dict(Session, Inner, ItemType, _, Nested).
+field_type_dict(Session, schema(Name), object, none, Nested) :-
+    !,
+    schema_field_dicts(Session, Name, Nested).
+field_type_dict(Session, schema(Name, _), object, none, Nested) :-
+    !,
+    schema_field_dicts(Session, Name, Nested).
+field_type_dict(_, Type, Type, none, []).
+
+%% schema_fill_list(+Session, +Fields, +Values, -Filled)
+schema_fill_list(_, _, [], []).
+schema_fill_list(Session, Fields, [Raw|Raws], [Value|Values]) :-
+    schema_fill_fields(Session, Fields, Raw, Value),
+    schema_fill_list(Session, Fields, Raws, Values).
 
 %% ============================================================
 %% Exec Handling
@@ -4678,7 +5333,92 @@ mi_call(exec(ToolCall, Output), StateIn, StateOut) :-
         add_trace_with_result(SessionId, exit, ToolName, Args, Output, Depth),
         StateOut = State0
     ;   add_trace_entry(SessionId, fail, ToolName, Args, Depth),
-        fail
+        % A failed host call used to be a plain failure. `exec(bash(...))` in the
+        % browser therefore produced no bindings and no message at all: the goal
+        % just failed, which reads like "the predicate did not match" instead of
+        % "there is no such host tool". Surface the host's reason as an error.
+        % post_exec_result/3 stores the reason under `result`, not `error`.
+        % Only a *missing* tool becomes an error: that is the case that used to
+        % fail with no explanation at all (`exec(bash(...))` in the browser).
+        % A tool that ran and failed stays a plain failure, so `catch/3` and
+        % `\+` around `exec` keep working.
+        (   catch(get_dict(result, Result, Reason0), _, fail),
+            format(string(Reason), '~w', [Reason0]),
+            sub_string(Reason, _, _, _, "Tool not found")
+        ->  throw(error(tool_error(ToolName, Reason), context(exec/2, Reason)))
+        ;   fail
+        )
+    ).
+
+%% ============================================================
+%% Scripts: one helper instead of five goals of glue
+%% ============================================================
+%%
+%% run_script(+ScriptName, +Args, -Value)
+%%
+%% Resolve a `script_file(Name, Path)` link, convert the arguments to the strings
+%% `argv` takes, run it, check `exitCode`, and parse stdout as JSON when it is
+%% JSON. Every Python-backed skill otherwise repeats `script_file`, a numeric
+%% conversion, `exec`, `get_dict(exitCode)`, `get_dict(stdout)` and
+%% `atom_json_dict` — and the version that forgets the exit-code check is the one
+%% that reports fabricated results.
+mi_call(run_script(Name, Args, Value), StateIn, StateOut) :-
+    !,
+    get_session_id(SessionId),
+    (   atom(Name),
+        current_predicate(SessionId:script_file/2),
+        SessionId:script_file(Name, Path)
+    ->  true
+    ;   atom(Name)
+    ->  throw(error(existence_error(script, Name),
+                context(run_script/3,
+                    'no script_file(Name, Path) links that name; declare script_file/2 and create the file first')))
+    ;   throw(error(type_error(atom, Name), context(run_script/3, 'the script name must be an atom')))
+    ),
+    (   is_list(Args)
+    ->  maplist(script_arg_string, Args, Argv)
+    ;   throw(error(type_error(list, Args),
+                context(run_script/3, 'pass the script arguments as a list'))) 
+    ),
+    script_exec(Path, Argv, Result, StateIn, State1),
+    (   catch(get_dict(exitCode, Result, 0), _, fail)
+    ->  get_dict(stdout, Result, Out),
+        (   catch(atom_json_dict(Out, Parsed, []), _, fail)
+        ->  Value = Parsed
+        ;   Value = Out
+        ),
+        StateOut = State1
+    ;   ( catch(get_dict(stderr, Result, Err), _, fail) -> true ; Err = "script failed" ),
+        throw(error(script_failed(Name, Err), context(run_script/3, Err)))
+    ).
+
+%% script_exec(+Path, +Argv, -Result, +StateIn, -StateOut)
+%% The capability tool differs by embedding: the browser registers `python`, the
+%% CLI has a shell. Try Python first and fall back to running the file, so one
+%% `run_script/3` works in both places. A missing tool is the catchable
+%% `tool_error` raised by `exec/2`; anything else is the script's own failure.
+script_exec(Path, Argv, Result, StateIn, State1) :-
+    (   catch(mi_call(exec(python(script: Path, argv: Argv), Result), StateIn, State1),
+              error(tool_error(_, _), _), fail)
+    ->  true
+    ;   script_shell_command(Path, Argv, Command),
+        mi_call(exec(bash(argv: Command), Result), StateIn, State1)
+    ).
+
+%% script_shell_command(+Path, +Argv, -Command): execute a .py with python3,
+%% anything else directly (it needs a shebang or to be a shell script).
+script_shell_command(Path, Argv, [python3, Path|Argv]) :-
+    sub_atom(Path, _, _, 0, '.py'),
+    !.
+script_shell_command(Path, Argv, [Path|Argv]).
+
+%% script_arg_string(+Value, -String): argv entries are strings.
+script_arg_string(Value, String) :-
+    (   string(Value) -> String = Value
+    ;   atom(Value) -> atom_string(Value, String)
+    ;   number(Value) -> number_string(Value, String)
+    ;   throw(error(type_error(atomic, Value),
+                context(run_script/3, 'script arguments must be atoms, strings or numbers')))
     ).
 
 %% ============================================================
@@ -5391,7 +6131,7 @@ mi_call(output(Media), StateIn, StateIn) :-
     nonvar(Media),
     (   Media = media(_, _)
     ;   Media = media(_)
-    ;   is_dict(Media)
+    ;   is_dict(Media), media_dict_keys(Media)
     ),
     media_dict(Media, Dict),
     !,
@@ -5403,6 +6143,10 @@ mi_call(output(Media), StateIn, StateIn) :-
     get_depth(StateIn, Depth),
     add_trace_entry(SessionId, media, media, [Path], Depth),
     engine_yield(media(media{path: Path, mimeType: Mime, kind: Kind, data: Data})).
+
+%% media_dict_keys(+Dict): a dict shaped like a media reference.
+media_dict_keys(Dict) :-
+    ( get_dict(mime, Dict, _) ; get_dict(svg, Dict, _) ; get_dict(path, Dict, _) ; get_dict(data, Dict, _) ).
 
 %% mi_call(output(html(Path)), +StateIn, -StateOut)
 %% Present a workspace HTML file as an interactive miniapp.
@@ -5419,6 +6163,14 @@ mi_call(output(html(Path)), StateIn, StateIn) :-
     add_trace_entry(SessionId, html, html, [HtmlPath], Depth),
     !,
     engine_yield(html(html{path: HtmlPath})).
+
+%% A plain dict is not text. `output(R)` on an exec result used to reach the media
+%% path and fail inside sub_atom with `type_error(atom, dict{...})`.
+mi_call(output(Value), _StateIn, _StateOut) :-
+    is_dict(Value),
+    !,
+    throw(error(type_error(text, Value), context(output/1,
+        'output/1 expects text or media; read a field first, e.g. get_dict(stdout, R, Text), output(Text)'))).
 
 %% mi_call(output(Text), +StateIn, -StateOut)
 mi_call(output(Text), StateIn, StateIn) :-
@@ -6413,7 +7165,7 @@ workspace_predicate_clause(S, (S:json_gets(D, P, Vs) :- deepclause_mi:json_gets(
 workspace_predicate_clause(S, (S:json_put(D, P, V, D2) :- deepclause_mi:json_put(D, P, V, D2))).
 workspace_predicate_clause(S, (S:json_text(D, T) :- deepclause_mi:json_text(D, T))).
 workspace_predicate_clause(S, (S:schema_fill(N, V, F) :-
-    deepclause_mi:schema_fields_of(S, N, Fields), deepclause_mi:schema_fill_fields(Fields, V, F))).
+    deepclause_mi:schema_fields_of(S, N, Fields), deepclause_mi:schema_fill_fields(S, Fields, V, F))).
 workspace_predicate_clause(S, (S:pattern(T, Text, B) :- deepclause_mi:pattern(T, Text, B))).
 
 workspace_predicate_clause(S, (S:time_file(F, T) :-
@@ -6690,6 +7442,32 @@ mi_call(_Module:Goal, StateIn, StateOut) :-
     !,
     mi_call(Goal, StateIn, StateOut).
 
+% A goal qualified with a module other than the session's runs natively. Its
+% body must resolve its own unqualified helpers in *its* module: interpreting it
+% here called `interp_json/2` (and any other helper) as `deepclause_mi:…`.
+% Session-qualified goals still need the interpreter so task/N and exec/2 work.
+mi_call(Module:Goal, StateIn, StateIn) :-
+    external_callable_module(Module),
+    !,
+    call(Module:Goal).
+
+%% external_callable_module(+Module)
+%% Modules whose predicates must run natively rather than be re-interpreted
+%% here. Deliberately a whitelist: a session module (a generated `repl_*`) must
+%% keep going through the interpreter, or `task/N` and `exec/2` inside a
+%% qualified goal would not be intercepted.
+external_callable_module(deepclause_strings).
+external_callable_module(deepclause_memory).
+external_callable_module(deepclause_analysis).
+external_callable_module(json).
+external_callable_module(clpfd).
+external_callable_module(clpr).
+external_callable_module(clpq).
+external_callable_module(lists).
+external_callable_module(apply).
+external_callable_module(system).
+external_callable_module(user).
+
 % For regular module-qualified goals, use clause/2 for backtracking
 mi_call(Module:Goal, StateIn, StateOut) :-
     predicate_property(Module:Goal, defined),
@@ -6729,6 +7507,7 @@ is_mi_special_predicate(task_named(_,_,_)).   %% Transformed form of task/N
 is_mi_special_predicate(sample_token(_,_)).
 is_mi_special_predicate(sample_token(_,_,_)).
 is_mi_special_predicate(exec(_,_)).
+is_mi_special_predicate(run_script(_,_,_)).
 is_mi_special_predicate(spawn(_,_)).
 is_mi_special_predicate(spawn_opt(_,_,_)).
 is_mi_special_predicate(self(_)).
@@ -7011,6 +7790,23 @@ consume_gas(StateIn, StateOut) :-
 %% mi_call_dispatch(+Goal, +StateIn, -StateOut)
 %% Dispatch user-defined vs built-in predicates
 %% Uses separate clauses instead of if-then-else to preserve backtracking
+%%
+%% A goal qualified with another module (for example
+%% `deepclause_strings:dc_interp_value/2`, which the interpolation rewrite emits)
+%% must run natively. Interpreting its body here would resolve *its* unqualified
+%% helper calls against this module and fail with `deepclause_mi:helper/2`.
+mi_call_dispatch(Goal, StateIn, StateIn) :-
+    get_session_id(SessionId),
+    nonvar(Goal),
+    Goal = Module:Inner,
+    atom(Module),
+    Module \== SessionId,
+    % Only external modules: a session-qualified goal still needs the
+    % interpreter so task/N, exec/2 and gas accounting keep working.
+    Module \== user,
+    !,
+    call(Module:Inner).
+
 mi_call_dispatch(Goal, StateIn, StateIn) :-
     get_session_id(SessionId),
     callable(Goal),
@@ -7023,6 +7819,15 @@ mi_call_dispatch(Goal, StateIn, StateIn) :-
     predicate_property(Goal, built_in),
     !,  % Commit: it's built-in, no backtracking needed
     call(Goal).
+
+%% `script_file/2` is a fact annotation, not a helper. Calling it before the
+%% fact exists used to fail as `existence_error(procedure, ...)` with no hint.
+mi_call_dispatch(script_file(_, _), _StateIn, _StateOut) :-
+    get_session_id(SessionId),
+    \+ current_predicate(SessionId:script_file/2),
+    !,
+    throw(error(existence_error(procedure, script_file/2), context(script_file/2,
+        'script_file/2 is an annotation, not a helper: declare script_file(Name, "path/to/script.py"), then run it with run_script(Name, Args, Value)'))).
 
 mi_call_dispatch(Goal, StateIn, StateOut) :-
     get_session_id(SessionId),
@@ -7373,12 +8178,22 @@ build_format_call(Template, Bindings, TempVar, FullGoal) :-
     ),
     extract_interpolation_vars(T, VarNames, FormatString),
     lookup_vars_with_params(VarNames, Bindings, VarList, ParamGoals),
-    FormatGoal = format(string(TempVar), FormatString, VarList),
-    (   ParamGoals == []
+    % Values are rendered by dc_interp_value/2 and spliced with `~s`, so a list
+    % or a dict arrives as JSON rather than Prolog syntax.
+    render_interp_vars(VarList, RenderedVars, RenderGoals),
+    FormatGoal = format(string(TempVar), FormatString, RenderedVars),
+    append(ParamGoals, RenderGoals, Goals),
+    (   Goals == []
     ->  FullGoal = FormatGoal
-    ;   list_to_conjunction(ParamGoals, ParamConj),
-        FullGoal = (ParamConj, FormatGoal)
+    ;   list_to_conjunction(Goals, Conj),
+        FullGoal = (Conj, FormatGoal)
     ).
+
+%% render_interp_vars(+Vars, -Rendered, -Goals)
+render_interp_vars([], [], []).
+render_interp_vars([Var|Vars], [Rendered|Rendereds], [Goal|Goals]) :-
+    Goal = deepclause_strings:dc_interp_value(Var, Rendered),
+    render_interp_vars(Vars, Rendereds, Goals).
 
 %% list_to_conjunction(+List, -Conjunction)
 list_to_conjunction([G], G) :- !.
@@ -7402,7 +8217,7 @@ extract_interpolation_vars(Template, VarNames, FormatString) :-
 extract_vars_from_codes([], [], []) :- !.
 
 % Found opening brace
-extract_vars_from_codes([0'{|Rest], [VarName|VarNames], [0'~, 0'w|FormatRest]) :-
+extract_vars_from_codes([0'{|Rest], [VarName|VarNames], [0'~, 0's|FormatRest]) :-
     extract_var_until_close(Rest, VarNameCodes, AfterClose),
     valid_placeholder_codes(VarNameCodes),
     !,

@@ -89,7 +89,7 @@ describe('the authoring prompt and the language reference', () => {
     expect(prefix).toContain('helper script');
     expect(prefix).toContain('model call');
     // And the specific trap: a plausible `stdin` argument that does nothing.
-    expect(prefix).toContain('no `stdin`');
+    expect(prefix).toContain('no standard input');
     expect(prefix).toMatch(/argv/);
   });
 
@@ -100,7 +100,7 @@ describe('the authoring prompt and the language reference', () => {
 
   it('documents the accepted bash inputs in the reference', () => {
     const reference = readFileSync(join(DOCS, 'DML_REFERENCE.md'), 'utf8');
-    expect(reference).toContain('There is\n**no `stdin`**');
+    expect(reference).toContain('no `stdin`');
     expect(reference).toContain('#### Do not parse in DML');
   });
 

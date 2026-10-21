@@ -89,25 +89,29 @@ export function describeEnvironment(options: EnvironmentBlockOptions = {}): stri
       + 'same file. Prefer this name; it is the same everywhere.',
     '- Only files under the workspace reach the host. In DML, any other absolute path '
       + '(e.g. `/etc/x`, `/tmp/x`) is the ephemeral per-session VM filesystem, not this '
-      + `machine. For scratch use \`$TMPDIR\` (per-session in every backend), not a fixed path.`,
+      + `machine. ${environment?.kind === 'wasm'
+        ? 'Anything you want to keep goes under `/workspace`; `/tmp` is scratch and is gone when the worker ends.'
+        : 'For scratch use `$TMPDIR` (per-session in every backend), not a fixed path.'}`,
     '- Do not hardcode the workspace\'s host path: it depends on how the session is run '
-      + '(AgentVM, bubblewrap, sandbox-exec, or nothing at all).',
+      + '(AgentVM, bubblewrap, sandbox-exec, a browser, or nothing at all).',
   );
 
   return lines.join('\n') + '\n';
 }
 
 /** `NOW` — always recomputed, so a long session does not read yesterday's date. */
-export function describeCurrentTime(now: Date = new Date()): string {
+export function describeCurrentTime(now: Date = new Date(), capabilityTool = 'bash'): string {
+  const lookup = capabilityTool === 'bash'
+    ? 'run `date` (or `exec(bash(argv: ["date", "-Is"]))`)'
+    : 'use the host tool, e.g. `exec(python(code: "import datetime; print(datetime.datetime.now().isoformat())"), R)`';
   return [
     'NOW',
     `- ${describeNow(now)}`,
-    '- Do not assume today\'s date from training data. For the exact time run `date` '
-      + '(or `exec(bash(argv: ["date", "-Is"]))`).',
+    `- Do not assume today's date from training data. For the exact time ${lookup}.`,
   ].join('\n') + '\n';
 }
 
 /** Both blocks, in the order they should be appended. */
 export function describeRuntimeContext(options: EnvironmentBlockOptions = {}): string {
-  return `\n${describeEnvironment(options)}\n${describeCurrentTime(options.now)}\n`;
+  return `\n${describeEnvironment(options)}\n${describeCurrentTime(options.now, options.capabilityTool)}\n`;
 }

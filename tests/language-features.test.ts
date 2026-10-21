@@ -954,14 +954,14 @@ describe('exec() & Tool Registration', () => {
       expect(events.find(e => e.type === 'answer')?.content).toBe('Echo: hello world');
     });
 
-    it('should fail if tool is not registered', async () => {
+    it('reports an unregistered tool instead of failing silently', async () => {
+      // A missing host tool used to be a plain failure, so the second clause
+      // silently won and the harness looked fine. It is now an error that names
+      // the tool, which is what the author needs to see.
       const code = `
         agent_main :-
             exec(nonexistent_tool("arg"), _),
             answer("should not reach").
-        
-        agent_main :-
-            answer("fallback").
       `;
 
       const events: any[] = [];
@@ -969,7 +969,7 @@ describe('exec() & Tool Registration', () => {
         events.push(event);
       }
 
-      expect(events.find(e => e.type === 'answer')?.content).toBe('fallback');
+      expect(JSON.stringify(events)).toContain('nonexistent_tool');
     });
 
     it('should handle tool execution errors gracefully', async () => {
