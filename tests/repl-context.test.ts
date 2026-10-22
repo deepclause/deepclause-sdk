@@ -41,6 +41,16 @@ class CannedBackend implements LLMBackend {
   }
 }
 
+function defineCall(clauses: string): { name: string; arguments: Record<string, unknown> } {
+  const first = clauses
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line && !line.startsWith(':-') && !line.startsWith('%'))
+    ?.replace(/\s*\.\s*$/, '')
+    .replace(/\s*:-.*$/, '') ?? 'defined_predicate';
+  return { name: 'define', arguments: { head: first, clauses } };
+}
+
 function finalResponse(code: string, run?: string): CannedResponse {
   return {
     text: 'Here is the harness.',
@@ -48,7 +58,7 @@ function finalResponse(code: string, run?: string): CannedResponse {
       ...(run
         ? [
             { name: 'begin_turn', arguments: {} },
-            { name: 'assert_many', arguments: { clauses: code } },
+            defineCall(code),
             { name: 'execute', arguments: { goal: run } },
             { name: 'end_turn', arguments: {} },
           ]
@@ -170,7 +180,7 @@ describe('execute recursion', () => {
           toolCalls: [
             { name: 'execute', arguments: { goal: 'task("nested ask", R), output(R)' } },
             { name: 'begin_turn', arguments: {} },
-            { name: 'assert_many', arguments: { clauses: 'kept(1).' } },
+            defineCall('kept(1).'),
             { name: 'end_turn', arguments: {} },
             { name: 'finish', arguments: { success: true } },
           ],

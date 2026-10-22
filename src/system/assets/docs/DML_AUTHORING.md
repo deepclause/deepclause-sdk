@@ -243,16 +243,11 @@ text-only — never attach media to them.
   Never patch it clause by clause.
 - Open the transaction once with `begin_turn`; it is idempotent and returns a
   reminder if it is already open. Do not call it again before every edit.
-- `assert`/`assert_many` are only for a **new** predicate: they reject a
-  predicate that already has any clauses. This includes `doc/2` and other
-  annotation/fact predicates. There is no append operation in the authoring
-  tools. To change an existing predicate, use `define` with its complete clause
-  set; to add a `doc/2` fact, include all existing doc facts in that `define`.
-- `retract` removes the clauses matching its pattern and says how many; `delete`
-  removes a whole predicate. `retract` fails when nothing matched — check that
-  the pattern is the one you meant.
-- Clause order matters: base case before a recursive rule; give a whole predicate
-  to `define`/`assert_many` at once (clauses in the order written).
+- `define` is the only edit operation for predicates: it replaces the complete
+  clause set in written order, including `doc/2` and other annotation facts.
+- `delete` removes a whole predicate. To remove one clause, `define` the
+  predicate again with the complete remaining clause set.
+- Clause order matters: base case before a recursive rule.
 - Verify after changing a predicate: `listing(Name/Arity)`.
 - Bounded iteration only: finite recursion or an explicit bound. `execute` is
   gas-limited and the turn has a model-call budget, but a single builtin call

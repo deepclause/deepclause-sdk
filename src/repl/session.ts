@@ -40,7 +40,7 @@ import {
   type CompactionSettings,
 } from './compaction.js';
 import { HarnessAgent } from './agent.js';
-import { BRIEF_VALUE_CHARS, createHarnessTools } from './harness-tools.js';
+import { BRIEF_VALUE_CHARS, createHarnessTools, createWorkAgentTools } from './harness-tools.js';
 import type { BindingMode, HarnessCommitResult, HarnessExecuteResult } from './harness-tools.js';
 import type {
   DMLEvent,
@@ -152,6 +152,8 @@ export interface DMLSessionOptions {
   jev?: JevJudgeOptions;
   /** Replace the bundled authoring prompt (e.g. a compact local-model profile). */
   agentSystemPrompt?: string;
+  /** This is a Work assistant: expose shell tools instead of authoring tools. */
+  workMode?: boolean;
   /**
    * Restrict the authoring agent to these tool names. Used for small local
    * models, where a long tool catalogue costs more prefill than it is worth.
@@ -1959,8 +1961,10 @@ export class DMLSession {
 
   private async getHarnessAgent(): Promise<HarnessAgent> {
     if (this.harnessAgent) return this.harnessAgent;
-    const authoringTools = createHarnessTools(this);
-    const allowed = this.openOptions.authoringToolNames
+    const authoringTools = this.openOptions.workMode
+      ? createWorkAgentTools(this)
+      : createHarnessTools(this);
+    const allowed = !this.openOptions.workMode && this.openOptions.authoringToolNames
       ? new Set(this.openOptions.authoringToolNames)
       : null;
     if (allowed) {

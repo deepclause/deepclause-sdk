@@ -68,8 +68,7 @@ describe('createHarnessTools', () => {
     const { controller } = stubController();
     const names = [...createHarnessTools(controller).keys()];
     for (const expected of [
-      'listing', 'begin_turn', 'end_turn', 'rollback', 'define', 'assert', 'assert_many',
-      'retract', 'delete', 'execute', 'reference',
+      'listing', 'begin_turn', 'end_turn', 'rollback', 'define', 'delete', 'execute', 'reference',
     ]) {
       expect(names).toContain(expected);
     }
@@ -83,12 +82,11 @@ describe('createHarnessTools', () => {
     const { controller, calls } = stubController();
     const tools = createHarnessTools(controller);
     await tools.get('define')!.execute({ head: 'a(1)', clauses: 'a(1).' });
-    await tools.get('assert')!.execute({ clause: 'b(1).' });
     await tools.get('delete')!.execute({ predicate: 'c/1' });
     await tools.get('execute')!.execute({ goal: 'a(X)' });
     await tools.get('listing')!.execute({ filter: 'all' });
     expect(calls.map((call) => call.method)).toEqual(
-      expect.arrayContaining(['define', 'assertClause', 'deletePredicate', 'execute', 'listing']),
+      expect.arrayContaining(['define', 'deletePredicate', 'execute', 'listing']),
     );
   });
 
@@ -96,7 +94,7 @@ describe('createHarnessTools', () => {
     const { controller } = stubController({ isFrozen: () => true });
     const tools = createHarnessTools(controller);
     expect(await tools.get('define')!.execute({ head: 'a(1)', clauses: 'a(1).' })).toMatchObject({ ok: false });
-    expect(await tools.get('assert')!.execute({ clause: 'a(1).' })).toMatchObject({ ok: false });
+    expect(await tools.get('delete')!.execute({ predicate: 'a/1' })).toMatchObject({ ok: false });
   });
 });
 

@@ -34,7 +34,9 @@ export type {
   FormEventPayload,
   FormSubmitPayload,
   ShellSpec,
+  ShellTool,
   ShellWorkflow,
+  ShellWorkflowArg,
 } from './types.js';
 
 // DML REPL (goal + prompt mode) for CLI and embedding

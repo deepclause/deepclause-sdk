@@ -550,7 +550,13 @@ export interface ShellWorkflowArg {
 export interface ShellWorkflow {
   name: string;
   goal: string;
-  args: ShellWorkflowArg[];
+  inputs: ShellWorkflowArg[];
+  outputs: ShellWorkflowArg[];
+}
+
+/** A DML predicate exposed to the Work agent as a real tool. */
+export interface ShellTool extends ShellWorkflow {
+  description: string;
 }
 
 /** `shell/1` (or `shell/3`) presentation contract for Work mode. */
@@ -558,6 +564,9 @@ export interface ShellSpec {
   kind: 'agent' | 'workflow';
   system: string;
   hostTools: string[];
+  /** Agent-facing capabilities. Not directly runnable from the UI. */
+  tools: ShellTool[];
+  /** User-facing recurring tasks. */
   workflows: ShellWorkflow[];
   welcome: string;
 }

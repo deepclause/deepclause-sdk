@@ -46,6 +46,16 @@ class CannedBackend implements LLMBackend {
   }
 }
 
+function defineCall(clauses: string): { name: string; arguments: Record<string, unknown> } {
+  const first = clauses
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line && !line.startsWith(':-') && !line.startsWith('%'))
+    ?.replace(/\s*\.\s*$/, '')
+    .replace(/\s*:-.*$/, '') ?? 'defined_predicate';
+  return { name: 'define', arguments: { head: first, clauses } };
+}
+
 function finalResponse(code: string, run?: string): CannedResponse {
   return {
     text: 'Here is the harness.',
@@ -53,7 +63,7 @@ function finalResponse(code: string, run?: string): CannedResponse {
       ...(code.trim()
         ? [
             { name: 'begin_turn', arguments: {} },
-            { name: 'assert_many', arguments: { clauses: code } },
+            defineCall(code),
             { name: 'end_turn', arguments: {} },
           ]
         : []),
@@ -320,7 +330,7 @@ describe('prompt mode', () => {
         text: '',
         toolCalls: [
           { name: 'begin_turn', arguments: {} },
-          { name: 'assert_many', arguments: { clauses: 'foo :- task("hi", X), output(X).\n' } },
+          defineCall('foo :- task("hi", X), output(X).\n'),
           { name: 'execute', arguments: { goal: 'foo' } },
           { name: 'end_turn', arguments: {} },
           { name: 'set_result', arguments: { variable: 'DMLCode', value: 'kept(1).' } },
@@ -354,12 +364,12 @@ describe('prompt mode', () => {
     expect(String(typeof term === 'object' ? term?.v : term)).toContain('unrewritten_task_form');
   });
 
-  it('assert_many accepts blocks that end with a newline', async () => {
+  it('define accepts blocks that end with a newline', async () => {
     backend = new CannedBackend([{
       text: '',
       toolCalls: [
         { name: 'begin_turn', arguments: {} },
-        { name: 'assert_many', arguments: { clauses: 'a(1).\nb(2).\nc(3) :- true.\n' } },
+        defineCall('a(1).\nb(2).\nc(3) :- true.\n'),
         { name: 'execute', arguments: { goal: 'a(X), b(Y), c(Z)' } },
         { name: 'end_turn', arguments: {} },
         { name: 'set_result', arguments: { variable: 'DMLCode', value: 'kept(1).' } },
@@ -371,10 +381,10 @@ describe('prompt mode', () => {
 
     const events = await collect(repl.prompt('assert a multi-clause block'));
     expect(events.some((event) => (
-      event.type === 'tool_call' && event.toolName === 'assert_many' && event.toolState === 'completed'
+      event.type === 'tool_call' && event.toolName === 'define' && event.toolState === 'completed'
     ))).toBe(true);
     expect(events.some((event) => (
-      event.type === 'tool_call' && event.toolName === 'assert_many' && event.toolState === 'failed'
+      event.type === 'tool_call' && event.toolName === 'define' && event.toolState === 'failed'
     ))).toBe(false);
   });
 
@@ -384,7 +394,7 @@ describe('prompt mode', () => {
       toolCalls: [
         { name: 'execute', arguments: { goal: 'no_such_predicate(1)' } },
         { name: 'begin_turn', arguments: {} },
-        { name: 'assert_many', arguments: { clauses: 'kept(1).' } },
+        defineCall('kept(1).'),
         { name: 'end_turn', arguments: {} },
         { name: 'finish', arguments: { success: true } },
       ],
@@ -397,17 +407,12 @@ describe('prompt mode', () => {
     expect(values(await collect(repl.query('kept(X)')), 'X')).toEqual(['1']);
   });
 
-  it('assert_many keeps clause order so recursion terminates', async () => {
+  it('define keeps clause order so recursion terminates', async () => {
     backend = new CannedBackend([{
       text: '',
       toolCalls: [
         { name: 'begin_turn', arguments: {} },
-        {
-          name: 'assert_many',
-          arguments: {
-            clauses: 'fact(0, 1).\nfact(N, F) :- N > 0, N1 is N - 1, fact(N1, F1), F is N * F1.',
-          },
-        },
+        defineCall('fact(0, 1).\nfact(N, F) :- N > 0, N1 is N - 1, fact(N1, F1), F is N * F1.'),
         { name: 'execute', arguments: { goal: 'fact(5, F)' } },
         { name: 'end_turn', arguments: {} },
         { name: 'set_result', arguments: { variable: 'DMLCode', value: 'kept(1).' } },
@@ -417,7 +422,7 @@ describe('prompt mode', () => {
     }]);
     repl = await openRepl();
 
-    const events = await collect(repl.prompt('define fact with assert_many'));
+    const events = await collect(repl.prompt('define fact with define'));
     expect(events.some((event) => event.type === 'error')).toBe(false);
     expect(events.some((event) => (
       event.type === 'tool_call'
@@ -493,7 +498,7 @@ describe('prompt mode', () => {
     backend = new CannedBackend([{
       text: '',
       toolCalls: [
-        { name: 'assert_many', arguments: { clauses: 'fact(0, 1) :- .' } },
+        defineCall('fact(0, 1) :- .'),
         { name: 'finish', arguments: { success: true } },
       ],
     }]);
@@ -502,22 +507,20 @@ describe('prompt mode', () => {
     const before = await repl.list('all');
 
     const events = await collect(repl.prompt('write broken code'));
-    expect(events.some((event) => event.type === 'tool_call' && event.toolName === 'assert_many' && event.toolState === 'failed')).toBe(true);
+    expect(events.some((event) => event.type === 'tool_call' && event.toolName === 'define' && event.toolState === 'failed')).toBe(true);
     expect(await repl.list('all')).toBe(before);
     expect(values(await collect(repl.query('existing(X)')), 'X')).toEqual(['1']);
   });
 
   
 
-  it('retracts clauses through the agent retract tool', async () => {
+  it('replaces clauses through the agent define tool', async () => {
     backend = new CannedBackend([
       {
         text: '',
         toolCalls: [
           { name: 'begin_turn', arguments: {} },
-          { name: 'assert_many', arguments: { clauses: 'foo(1).\nfoo(2).\nbar(1).\n' } },
-          // A full-clause pattern must target foo/1, not every rule.
-          { name: 'retract', arguments: { clause: 'foo(_) :- true' } },
+          defineCall('foo(1).\nbar(1).\n'),
           { name: 'execute', arguments: { goal: 'foo(X)' } },
           { name: 'execute', arguments: { goal: 'bar(1)' } },
           { name: 'end_turn', arguments: {} },
@@ -527,10 +530,10 @@ describe('prompt mode', () => {
     ]);
     repl = await openRepl();
 
-    const events = await collect(repl.prompt('retract foo'));
+    const events = await collect(repl.prompt('replace foo clauses'));
     expect(events.some((event) => event.type === 'error')).toBe(false);
 
-    expect(events.some((event) => event.type === 'tool_call' && event.toolName === 'retract' && event.toolState === 'completed')).toBe(true);
+    expect(events.some((event) => event.type === 'tool_call' && event.toolName === 'define' && event.toolState === 'completed')).toBe(true);
 
     const executeSolutions = (goal: string) => {
       const event = events.find(
@@ -541,7 +544,7 @@ describe('prompt mode', () => {
       );
       return (JSON.parse(event?.toolSummary ?? '{}') as { solutions?: unknown[] }).solutions?.length ?? -1;
     };
-    expect(executeSolutions('foo(X)')).toBe(0);
+    expect(executeSolutions('foo(X)')).toBe(1);
     expect(executeSolutions('bar(1)')).toBe(1);
   });
 });

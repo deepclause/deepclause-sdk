@@ -195,14 +195,9 @@ Editing is a **transaction**:
 - `begin_turn` — open a transaction (snapshot the module). **Required before any
   edit.**
 - `define(head, clauses)` — replace the predicate(s) the clause block defines.
-- `assert(clause)` / `assert_many(clauses)` — add clauses to a **new**
-  predicate, in written order. Refused when the predicate already has clauses:
-  appending would leave both versions live with their clauses interleaved. Use
-  `define` to change an existing predicate.
-- `retract(clause)` — remove the clauses **matching** a pattern, e.g.
-  `retract("f(1)")` or `retract("f(X) :- g(X)")`; it reports how many were
-  removed and fails when none matched.
-- `delete("Name/Arity")` — remove a whole predicate.
+- `delete("Name/Arity")` — remove a whole predicate. This is the only removal
+  operation: to remove one clause, define the predicate again with the complete
+  remaining clause set.
 - `end_turn` — validate and commit the change (records a version). It also
   probes the predicates you changed and returns a `warnings` list (shown as `⚠`)
   when a helper looks nondeterministic — e.g. yields many solutions on fresh
@@ -235,7 +230,7 @@ from the transaction's tracked set: the nondeterminism probe skips them, and a
 directive that fails inside the file only warns. They still show up in the next
 commit's diff, so the change lands with no record of where it came from — which is
 exactly what makes it hard to review or undo. If you want code from another file,
-read it (`read_file`, or a script) and add it with `assert_many`/`define`. Loading a
+read it (`read_file`, or a script) and add it with `define`. Loading a
 harness (`-l`, `/load`) is a user action; if that is what is wanted, say so rather
 than performing it as an edit.
 
@@ -527,49 +522,67 @@ Decide this before adding the shell:
 
 Python is always a host tool, never a shell: call `exec(python(code: "..."), Result)` or `exec(python(script: "scripts/foo.py", argv: [...]), Result)`. Mention Python in the shell system prompt when the harness does computation, files or network work.
 
-For complex DML, use the documentation tools rather than guessing: `reference("language")`, `reference("authoring")`, `reference("forms")`, `reference("patterns")`, `reference("examples")`, `reference("snippets")` and `reference("tools")`. The Work assistant also has `listing`, `reference`, `execute` and `show_image`.
+For complex DML, use the documentation tools rather than guessing:
+`reference("language")`, `reference("authoring")`, `reference("forms")`,
+`reference("patterns")`, `reference("examples")`, `reference("snippets")` and
+`reference("tools")`. Those are authoring tools. The Work agent does not need
+DML or the authoring toolset: it receives the declared typed tools and
+workflows.
 
 ## Shell shape
 
-Canonical agent shell:
+Canonical agent shell with tools and workflows:
 
 ```prolog
 shell(_{
     kind: agent,
-    system: "You are the support assistant for this harness. Use lookup_order/1 to find an order and summarise_ticket/2 for a ticket. Run tools through complete DML goals; use Python via exec(python(...)) only when analysis or file work is needed.",
-    host_tools: [show_image, execute],
+    system: "You are the support assistant for this harness.",
+    host_tools: [show_image],
+    tools: [
+        _{
+            name: "lookup_order",
+            goal: "lookup_order",
+            description: "Find an order by its id.",
+            inputs: [_{name: "OrderId", type: string}],
+            outputs: [_{name: "Order", type: object}]
+        }
+    ],
     workflows: [
         _{
             name: "Check a mailbox",
             goal: "check_mail",
-            args: [ _{name: "Account", type: string} ]
+            inputs: [_{name: "Account", type: string}],
+            outputs: [_{name: "Summary", type: string}]
         }
     ],
     welcome: "## Support\nAsk a question, or run a workflow."
 }).
 ```
 
-Canonical single workflow:
+Canonical workflow-only shell:
 
 ```prolog
 shell(workflow([
     goal(entry_point),
-    args([(string:"Param 1"), (integer:"Count"), (file:"Document")])
+    inputs([(string:"Param 1"), (integer:"Count"), (file:"Document")]),
+    outputs([(string:"Result")])
 ])).
 ```
 
 The older `shell(agent(...), workflows(...), welcome(...))` form is accepted too,
-but the dict form is the one to write. A workflow's `goal` must name a predicate
-in the harness; its `args` are inputs in order. `string`, `integer`, `number`,
-`boolean` and `file` are the field types. A `file` field opens a workspace picker
-(with upload) in Work and passes the selected workspace-relative path as a string.
-`welcome` is Markdown shown in the empty view.
+but the dict form is the one to write. A workflow or tool `goal` must name a
+predicate in the harness. `inputs` and `outputs` are explicit and ordered; the
+goal arity is inputs + outputs. Field types are `string`, `integer`, `number`,
+`boolean` and `file`. A `file` input opens a workspace picker/upload in Work and
+passes the selected workspace-relative path as a string. The old `args` form is
+legacy input data only. `welcome` is Markdown shown in the empty view.
 
-`system` should be a concise domain/persona prompt plus the execute-only tool
-map and any constraints. The Work assistant already receives the generic guide
-for `listing`, `reference`, `execute`, Python and workflows; do not repeat that
-mechanics text in every shell. The shell must still mention the harness-specific
-predicates that should be used through `execute`.
+`system` is the persona/domain prompt. Tool descriptions carry the Work
+assistant's capability semantics; it already receives each tool's typed schema
+and the workflow list. Do not teach the Work assistant DML, `execute`,
+`listing`, or `reference`; those belong to the authoring agent. Do not expose
+every helper: use workflows for recurring user tasks and tools for composable
+operations.
 
 Keep the `shell/1` fact in the same transaction as the skills it exposes. Users
 can also inspect and edit the shell with the visual **Shell** editor in Work;
@@ -1148,7 +1161,7 @@ More patterns: `reference("patterns")`; shapes: `reference("examples")`.
 # Editing rules
 
 - **Edit through the transaction tools only** — `begin_turn` then
-  `define`/`assert`/`assert_many`/`retract`/`delete`, then `end_turn`. Never
+  `define`/`delete`, then `end_turn`. Never
   `consult`, `use_module` a workspace `.dml`, or load a file to add code: those
   assert past the edit tools, so the predicates miss the tracked set and the probes
   that go with it, and the change arrives in the diff with nothing saying who made
@@ -1337,7 +1350,7 @@ Bind up to three variables.
 > **Note — `task/N` is load-time sugar.** `task/1,2,3,4` and `prompt/2,3,4` are
 > rewritten by the DML loader into `task_named/3` / `prompt_named/3` with typed
 > output variables. The rewrite runs whenever code is loaded (`deepclause run`,
-> the REPL `-l` and commit paths, `consult`, and the REPL `assert`/`assert_many`
+> the REPL `-l` and commit paths, `consult`, and the REPL `define`/`delete`
 > tools). The untransformed form has no runtime handler,
 > so code that somehow reaches the runtime without the rewrite raises
 > `domain_error(unrewritten_task_form, Goal)` instead of failing silently.
@@ -3181,7 +3194,7 @@ transaction's tracked set — the nondeterminism probe does not see them, and a
 directive that fails inside the file only warns. They do still appear in the next
 commit's diff, so the change is recorded without any account of where it came from —
 and outside a transaction there is no snapshot, so nothing validates the load at all.
-An agent changing a harness adds code with `assert`/`assert_many`/`define` inside a
+An agent changing a harness adds code with `define` inside a
 transaction instead.
 
 Any other directive does nothing, and the loader now says so — it reports
@@ -3202,8 +3215,8 @@ DML skills can also be grown interactively in a persistent **living module**.
 - `/goal <dml>` runs a goal and enumerates its solutions (the legacy dotted
   `goal: <dml>.` form still works).
 - Plain English builds the module: the **authoring agent** inspects and edits it
-  through tools (`listing`, `begin_turn`, `define`/`assert`/`assert_many`,
-  `retract`/`delete`, `execute`, `end_turn`/`rollback`). Edits are transactions:
+  through tools (`listing`, `begin_turn`, `define`/`delete`, `execute`,
+  `end_turn`/`rollback`). Edits are transactions:
   `begin_turn` is required before any edit, `end_turn` commits a version.
   Nothing is auto-run; the agent uses `execute` to test during a turn.
 - There is **no implicit `agent_main` requirement** in the REPL. Run any

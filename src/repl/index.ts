@@ -64,6 +64,8 @@ export interface HarnessReplOptions {
   hostToolsCatalog?: string;
   /** Replace the bundled authoring prompt (e.g. a compact local-model profile). */
   agentSystemPrompt?: string;
+  /** This is a Work assistant: expose shell tools instead of authoring tools. */
+  workMode?: boolean;
   /** Restrict the authoring agent to these tools (small local-model profile). */
   authoringToolNames?: string[];
   /**
@@ -268,6 +270,7 @@ export async function createHarnessRepl(options: HarnessReplOptions): Promise<Ha
     maxModelCalls: options.maxModelCalls,
     hostToolsCatalog: options.hostToolsCatalog,
     agentSystemPrompt: options.agentSystemPrompt,
+    workMode: options.workMode,
     authoringToolNames: options.authoringToolNames,
     executionBackend: options.executionBackend,
     capabilityTool: options.capabilityTool,

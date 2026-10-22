@@ -6,7 +6,7 @@
  * the live harness through a `HarnessToolController` implemented by `DMLSession`.
  */
 
-import type { DMLEvent, ToolDefinition } from '../types.js';
+import type { DMLEvent, ShellSpec, ShellTool, ShellWorkflow, ToolDefinition } from '../types.js';
 import type { DiagramMode } from '../visualize/index.js';
 
 import type { Pid, ProcessInfo, SpawnOptions } from './processes.js';
@@ -59,6 +59,8 @@ export interface HarnessToolController {
   isFrozen(): boolean;
   /** Read the harness: `all`, `Name/Arity`, `tools`, or a name prefix. */
   listing(filter: string): Promise<string>;
+  /** The harness Work shell, when one is declared. */
+  shell(): ShellSpec | null;
   /** Concise harness manifest for the system prompt. */
   manifest(): Promise<string>;
   /** Snapshot the harness and open a transaction. */
@@ -69,12 +71,6 @@ export interface HarnessToolController {
   rollbackTurn(): Promise<void>;
   /** Replace a predicate with the given complete clause block. */
   define(head: string, clauses: string): Promise<{ ok: boolean; error?: string }>;
-  /** Assert one clause (new predicates only). */
-  assertClause(clause: string): Promise<{ ok: boolean; error?: string }>;
-  /** Assert a block of clauses in order. */
-  assertMany(clauses: string): Promise<{ ok: boolean; error?: string }>;
-  /** Retract matching clauses. */
-  retractClause(clause: string): Promise<{ ok: boolean; error?: string }>;
   /** Delete a predicate by `Name/Arity`. */
   deletePredicate(nameArity: string): Promise<{ ok: boolean; error?: string }>;
   /** Run a DML goal against the scratch harness. */
@@ -172,6 +168,128 @@ export function formatProcessCode(source: ProcessCodeSource, target: string): st
 
 const stringProp = (description: string): { type: string; description: string } => ({ type: 'string', description });
 
+function workArgValue(type: string, value: unknown): string {
+  if (type === 'integer') {
+    const number = Number(value);
+    return Number.isInteger(number) ? String(number) : '0';
+  }
+  if (type === 'number') {
+    const number = Number(value);
+    return Number.isFinite(number) ? String(number) : '0';
+  }
+  if (type === 'boolean') return value === true || value === 'true' ? 'true' : 'false';
+  return JSON.stringify(value == null ? '' : String(value));
+}
+
+function workArgSchema(type: string): { type: string } {
+  if (type === 'integer' || type === 'number') return { type: 'number' };
+  if (type === 'boolean') return { type: 'boolean' };
+  if (type === 'object') return { type: 'object' };
+  if (type === 'array') return { type: 'array' };
+  return { type: 'string' };
+}
+
+function workGoal(entry: { goal: string; inputs: ShellWorkflow['inputs']; outputs: ShellWorkflow['outputs'] }, values: Record<string, unknown>): string {
+  const inputs = entry.inputs.map((arg, index) => workArgValue(arg.type, values[arg.name] ?? values[`arg${index + 1}`]));
+  const outputs = entry.outputs.map((_, index) => `Out${index + 1}`);
+  const all = [...inputs, ...outputs];
+  return all.length > 0 ? `${entry.goal}(${all.join(', ')})` : entry.goal;
+}
+
+function workResult(entry: { outputs: ShellWorkflow['outputs'] }, result: HarnessExecuteResult): Record<string, unknown> {
+  const solution = result.solutions[0] ?? result.bindings;
+  const byName = new Map(solution.map((binding) => [binding.name, binding.value]));
+  const outputs: Record<string, string> = {};
+  entry.outputs.forEach((arg, index) => {
+    outputs[arg.name] = byName.get(`Out${index + 1}`) ?? '';
+  });
+  return { ok: !result.error, outputs, output: result.output, ...(result.error ? { error: result.error } : {}) };
+}
+
+function toolParameters(tool: ShellTool): ToolDefinition['parameters'] {
+  const properties: Record<string, { type: string; description: string }> = {};
+  for (const input of tool.inputs) {
+    properties[input.name || `arg${Object.keys(properties).length + 1}`] = {
+      type: workArgSchema(input.type).type,
+      description: `Input (${input.type}).`,
+    };
+  }
+  return { type: 'object', properties, required: tool.inputs.map((input) => input.name).filter(Boolean) };
+}
+
+function usageLine(entry: ShellWorkflow): string {
+  const args = [
+    ...entry.inputs.map((arg) => `${arg.name}: ${arg.type}`),
+    ...entry.outputs.map((arg) => `-> ${arg.name}: ${arg.type}`),
+  ];
+  return `${entry.goal}(${args.join(', ')})`;
+}
+
+/**
+ * Tools for a Work agent. The model sees declared harness capabilities and
+ * workflows, never raw DML or the authoring/execute tools.
+ */
+export function createWorkAgentTools(controller: HarnessToolController): Map<string, ToolDefinition> {
+  const shell = controller.shell();
+  const tools = new Map<string, ToolDefinition>();
+  if (!shell) return tools;
+  const base = createHarnessTools(controller);
+  const showImage = base.get('show_image');
+  if (showImage && shell.hostTools.includes('show_image')) tools.set('show_image', showImage);
+
+  for (const tool of shell.tools) {
+    if (tools.has(tool.name)) continue;
+    tools.set(tool.name, {
+      description: tool.description || `Run ${usageLine(tool)}`,
+      parameters: toolParameters(tool),
+      execute: async (args, context) => {
+        const result = await controller.execute(
+          workGoal(tool, args),
+          1,
+          context?.signal,
+          context?.onEvent,
+          'full',
+        );
+        return workResult(tool, result);
+      },
+    });
+  }
+
+  if (shell.workflows.length > 0) {
+    const names = shell.workflows.map((workflow) => workflow.name);
+    const descriptions = shell.workflows.map((workflow) => `- ${workflow.name}: ${usageLine(workflow)}`).join('\n');
+    tools.set('run_workflow', {
+      description: `Run a recurring harness workflow with its input values and return its outputs.\n${descriptions}`,
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', enum: names, description: 'Workflow name.' },
+          inputs: {
+            type: 'object',
+            description: 'Input values keyed by the workflow input names.',
+          },
+        },
+        required: ['name'],
+      },
+      execute: async (args, context) => {
+        const name = String(args.name ?? '');
+        const workflow = shell.workflows.find((entry) => entry.name === name);
+        if (!workflow) return { ok: false, error: `unknown workflow: ${name}` };
+        const values = (args.inputs && typeof args.inputs === 'object' ? args.inputs : {}) as Record<string, unknown>;
+        const result = await controller.execute(
+          workGoal(workflow, values),
+          1,
+          context?.signal,
+          context?.onEvent,
+          'full',
+        );
+        return workResult(workflow, result);
+      },
+    });
+  }
+  return tools;
+}
+
 /** Build the authoring agent's harness tools. */
 export function createHarnessTools(controller: HarnessToolController): Map<string, ToolDefinition> {
   const tools = new Map<string, ToolDefinition>();
@@ -189,7 +307,7 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
   });
 
   tools.set('begin_turn', {
-    description: 'Open the edit transaction (snapshot the harness). Call this once before the first edit; it is a no-op if the transaction is already open. `define`/`assert`/`assert_many`/`retract`/`delete` are refused while no transaction is open. `end_turn` commits it, `rollback` discards it.',
+    description: 'Open the edit transaction (snapshot the harness). Call this once before the first edit; it is a no-op if the transaction is already open. `define`/`delete` are refused while no transaction is open. `end_turn` commits it, `rollback` discards it.',
     parameters: { type: 'object', properties: {}, required: [] },
     execute: async () => {
       return controller.beginTurn();
@@ -235,36 +353,6 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
       required: ['head', 'clauses'],
     },
     execute: async (args) => frozenError('define') ?? controller.define(String(args.head ?? ''), String(args.clauses ?? '')),
-  });
-
-  tools.set('assert', {
-    description: 'Assert one clause of a NEW predicate. Requires an open transaction (call begin_turn first). Refused if the predicate already has clauses: use define to replace it, or delete first.',
-    parameters: {
-      type: 'object',
-      properties: { clause: stringProp('The DML clause/fact text to assert (no trailing period required).') },
-      required: ['clause'],
-    },
-    execute: async (args) => frozenError('assert') ?? controller.assertClause(String(args.clause ?? '')),
-  });
-
-  tools.set('assert_many', {
-    description: 'Assert a block of clauses in the order written. Requires an open transaction (call begin_turn first). Use this only for a NEW predicate, so clause order (base case before recursive rule) is preserved. It cannot append to an existing predicate, including doc/2; use define with the complete clause set to replace one.',
-    parameters: {
-      type: 'object',
-      properties: { clauses: stringProp('The DML clauses/facts, in order, each ending with a period.') },
-      required: ['clauses'],
-    },
-    execute: async (args) => frozenError('assert_many') ?? controller.assertMany(String(args.clauses ?? '')),
-  });
-
-  tools.set('retract', {
-    description: 'Remove the clauses matching a pattern, e.g. retract("f(1)") or retract("f(X) :- g(X)"). A tool annotation pattern such as retract("tool(f(_, X), _)") removes that tool. Reports how many were removed. Requires an open transaction (call begin_turn first). Reserved names are protected.',
-    parameters: {
-      type: 'object',
-      properties: { clause: stringProp('The clause pattern to retract (no trailing period required).') },
-      required: ['clause'],
-    },
-    execute: async (args) => frozenError('retract') ?? controller.retractClause(String(args.clause ?? '')),
   });
 
   tools.set('delete', {

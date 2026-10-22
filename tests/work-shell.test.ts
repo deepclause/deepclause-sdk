@@ -42,7 +42,7 @@ describe('Work shell', () => {
       system: 'You are a mail assistant.',
       hostTools: ['show_image', 'execute'],
       welcome: '## Mail',
-      workflows: [{ name: 'Check emails', goal: 'check_mail', args: [{ name: 'Account', type: 'string' }] }],
+      workflows: [{ name: 'Check emails', goal: 'check_mail', inputs: [{ name: 'Account', type: 'string' }], outputs: [] }],
     })
   })
 
@@ -53,7 +53,7 @@ describe('Work shell', () => {
     `)
     expect(shell).toMatchObject({
       kind: 'workflow',
-      workflows: [{ goal: 'entry_point', args: [{ name: 'Param 1', type: 'string' }, { name: 'Count', type: 'integer' }] }],
+      workflows: [{ goal: 'entry_point', inputs: [{ name: 'Param 1', type: 'string' }, { name: 'Count', type: 'integer' }], outputs: [] }],
     })
   })
 
@@ -65,7 +65,7 @@ describe('Work shell', () => {
     expect(shell).toMatchObject({
       kind: 'workflow',
       workflows: [
-        { goal: 'read_document', args: [{ name: 'Document', type: 'file' }, { name: 'Question', type: 'string' }] },
+        { goal: 'read_document', inputs: [{ name: 'Document', type: 'file' }, { name: 'Question', type: 'string' }], outputs: [] },
       ],
     })
   })
@@ -79,7 +79,51 @@ describe('Work shell', () => {
       kind: 'agent',
       system: 'Hi',
       hostTools: ['show_image', 'execute'],
-      workflows: [{ name: 'A', goal: 'a', args: [] }],
+      workflows: [{ name: 'A', goal: 'a', inputs: [], outputs: [] }],
+    })
+  })
+
+
+  it('reads explicit tool inputs and outputs', async () => {
+    const shell = await load(`
+      shell(_{
+        kind: agent,
+        tools: [_{
+          name: "Lookup",
+          goal: "lookup",
+          description: "Find a thing.",
+          inputs: [_{name: "Id", type: string}],
+          outputs: [_{name: "Thing", type: object}]
+        }],
+        workflows: [_{
+          name: "Review",
+          goal: "review",
+          inputs: [_{name: "Text", type: string}],
+          outputs: [_{name: "Summary", type: string}, _{name: "Score", type: integer}]
+        }]
+      }).
+      lookup(_, _).
+      review(_, _, _).
+    `)
+    expect(shell).toMatchObject({
+      tools: [{ name: 'Lookup', goal: 'lookup', description: 'Find a thing.', inputs: [{ name: 'Id', type: 'string' }], outputs: [{ name: 'Thing', type: 'object' }] }],
+      workflows: [{ name: 'Review', inputs: [{ name: 'Text', type: 'string' }], outputs: [{ name: 'Summary', type: 'string' }, { name: 'Score', type: 'integer' }] }],
+    })
+  })
+
+
+  it('reads inputs and outputs from the workflow form', async () => {
+    const shell = await load(`
+      shell(workflow([
+        goal(demo),
+        inputs([(string:"Text")]),
+        outputs([(string:"Result")])
+      ])).
+      demo(Text, Result) :- Result = Text.
+    `)
+    expect(shell).toMatchObject({
+      kind: 'workflow',
+      workflows: [{ goal: 'demo', inputs: [{ name: 'Text', type: 'string' }], outputs: [{ name: 'Result', type: 'string' }] }],
     })
   })
 

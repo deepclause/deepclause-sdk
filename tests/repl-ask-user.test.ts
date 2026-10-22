@@ -45,6 +45,16 @@ class CannedBackend implements LLMBackend {
 let workspace: string;
 let repl: HarnessRepl | null = null;
 
+function defineCall(clauses: string): { name: string; arguments: Record<string, unknown> } {
+  const first = clauses
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line && !line.startsWith(':-') && !line.startsWith('%'))
+    ?.replace(/\s*\.\s*$/, '')
+    .replace(/\s*:-.*$/, '') ?? 'defined_predicate';
+  return { name: 'define', arguments: { head: first, clauses } };
+}
+
 async function collect(gen: AsyncGenerator<DMLEvent>): Promise<DMLEvent[]> {
   const events: DMLEvent[] = [];
   for await (const event of gen) {
@@ -118,7 +128,7 @@ describe('harness input/2', () => {
       toolCalls: [
         { name: 'execute', arguments: { goal: 'input("Nested question?", A), output(A)' } },
         { name: 'begin_turn', arguments: {} },
-        { name: 'assert_many', arguments: { clauses: 'kept(1).' } },
+        defineCall('kept(1).'),
         { name: 'end_turn', arguments: {} },
         { name: 'finish', arguments: { success: true } },
       ],

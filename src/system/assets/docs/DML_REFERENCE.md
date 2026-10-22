@@ -168,7 +168,7 @@ Bind up to three variables.
 > **Note — `task/N` is load-time sugar.** `task/1,2,3,4` and `prompt/2,3,4` are
 > rewritten by the DML loader into `task_named/3` / `prompt_named/3` with typed
 > output variables. The rewrite runs whenever code is loaded (`deepclause run`,
-> the REPL `-l` and commit paths, `consult`, and the REPL `assert`/`assert_many`
+> the REPL `-l` and commit paths, `consult`, and the REPL `define`/`delete`
 > tools). The untransformed form has no runtime handler,
 > so code that somehow reaches the runtime without the rewrite raises
 > `domain_error(unrewritten_task_form, Goal)` instead of failing silently.
@@ -2012,7 +2012,7 @@ transaction's tracked set — the nondeterminism probe does not see them, and a
 directive that fails inside the file only warns. They do still appear in the next
 commit's diff, so the change is recorded without any account of where it came from —
 and outside a transaction there is no snapshot, so nothing validates the load at all.
-An agent changing a harness adds code with `assert`/`assert_many`/`define` inside a
+An agent changing a harness adds code with `define` inside a
 transaction instead.
 
 Any other directive does nothing, and the loader now says so — it reports
@@ -2033,8 +2033,8 @@ DML skills can also be grown interactively in a persistent **living module**.
 - `/goal <dml>` runs a goal and enumerates its solutions (the legacy dotted
   `goal: <dml>.` form still works).
 - Plain English builds the module: the **authoring agent** inspects and edits it
-  through tools (`listing`, `begin_turn`, `define`/`assert`/`assert_many`,
-  `retract`/`delete`, `execute`, `end_turn`/`rollback`). Edits are transactions:
+  through tools (`listing`, `begin_turn`, `define`/`delete`, `execute`,
+  `end_turn`/`rollback`). Edits are transactions:
   `begin_turn` is required before any edit, `end_turn` commits a version.
   Nothing is auto-run; the agent uses `execute` to test during a turn.
 - There is **no implicit `agent_main` requirement** in the REPL. Run any

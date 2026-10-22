@@ -36,12 +36,22 @@ class CannedBackend implements LLMBackend {
   }
 }
 
+function defineCall(clauses: string): { name: string; arguments: Record<string, unknown> } {
+  const first = clauses
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line && !line.startsWith(':-') && !line.startsWith('%'))
+    ?.replace(/\s*\.\s*$/, '')
+    .replace(/\s*:-.*$/, '') ?? 'defined_predicate';
+  return { name: 'define', arguments: { head: first, clauses } };
+}
+
 function commitResponse(code: string): CannedResponse {
   return {
     text: '',
     toolCalls: [
       { name: 'begin_turn', arguments: {} },
-      { name: 'assert_many', arguments: { clauses: code } },
+      defineCall(code),
       { name: 'end_turn', arguments: {} },
       { name: 'finish', arguments: { success: true } },
     ],

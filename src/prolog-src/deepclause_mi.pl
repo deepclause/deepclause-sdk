@@ -1951,7 +1951,7 @@ repl_shell_spec(SessionId, Spec) :-
 shell_from_one(workflow(Items), Spec) :-
     !,
     workflow_from(workflow(Items), Workflow),
-    Spec = shell_spec{kind: workflow, system: "", hostTools: [], workflows: [Workflow], welcome: ""}.
+    Spec = shell_spec{kind: workflow, system: "", hostTools: [], tools: [], workflows: [Workflow], welcome: ""}.
 shell_from_one(Dict, Spec) :-
     is_dict(Dict),
     !,
@@ -1959,7 +1959,7 @@ shell_from_one(Dict, Spec) :-
 shell_from_one(agent(Items), Spec) :-
     !,
     agent_items(Items, System, Tools),
-    Spec = shell_spec{kind: agent, system: System, hostTools: Tools, workflows: [], welcome: ""}.
+    Spec = shell_spec{kind: agent, system: System, hostTools: Tools, tools: [], workflows: [], welcome: ""}.
 
 shell_from_parts(AgentTerm, WorkflowsTerm, WelcomeTerm, Spec) :-
     agent_term(AgentTerm, System, Tools),
@@ -1968,7 +1968,7 @@ shell_from_parts(AgentTerm, WorkflowsTerm, WelcomeTerm, Spec) :-
     ->  text_value(Welcome0, Welcome)
     ;   text_value(WelcomeTerm, Welcome)
     ),
-    Spec = shell_spec{kind: agent, system: System, hostTools: Tools, workflows: Workflows, welcome: Welcome}.
+    Spec = shell_spec{kind: agent, system: System, hostTools: Tools, tools: [], workflows: Workflows, welcome: Welcome}.
 
 shell_from_dict(Dict, Spec) :-
     (   get_dict(kind, Dict, Kind0)
@@ -1982,9 +1982,10 @@ shell_from_dict(Dict, Spec) :-
     ->  host_tools_value(Tools1, Tools)
     ;   Tools = ["show_image", "execute"]
     ),
+    (   get_dict(tools, Dict, ToolsList0) -> tools_term(ToolsList0, ToolSpecs) ; ToolSpecs = [] ),
     (   get_dict(workflows, Dict, Wfs0) -> workflows_term(Wfs0, Workflows) ; Workflows = [] ),
     (   get_dict(welcome, Dict, Welcome0) -> text_value(Welcome0, Welcome) ; Welcome = "" ),
-    Spec = shell_spec{kind: Kind, system: System, hostTools: Tools, workflows: Workflows, welcome: Welcome}.
+    Spec = shell_spec{kind: Kind, system: System, hostTools: Tools, tools: ToolSpecs, workflows: Workflows, welcome: Welcome}.
 
 shell_infer_kind(Dict, Kind) :-
     (   get_dict(system, Dict, _)
@@ -2044,10 +2045,27 @@ workflows_list([Item|Rest], [Workflow|Workflows]) :-
 workflow_from(Dict, Workflow) :-
     is_dict(Dict),
     !,
+    workflow_dict_parts(Dict, Name, Goal, Inputs, Outputs),
+    Workflow = shell_workflow{name: Name, goal: Goal, inputs: Inputs, outputs: Outputs}.
+
+workflow_dict_parts(Dict, Name, Goal, Inputs, Outputs) :-
     ( get_dict(name, Dict, Name0) -> text_value(Name0, Name) ; Name = "" ),
     ( get_dict(goal, Dict, Goal0) -> text_value(Goal0, Goal) ; Goal = "" ),
-    ( get_dict(args, Dict, Args0) -> workflow_args(Args0, Args) ; Args = [] ),
-    Workflow = shell_workflow{name: Name, goal: Goal, args: Args}.
+    ( get_dict(inputs, Dict, In0) -> workflow_args(In0, Inputs)
+    ; get_dict(args, Dict, Args0) -> workflow_args(Args0, Inputs)
+    ; Inputs = []
+    ),
+    ( get_dict(outputs, Dict, Out0) -> workflow_args(Out0, Outputs) ; Outputs = [] ).
+
+tool_from(Dict, Tool) :-
+    is_dict(Dict),
+    !,
+    workflow_dict_parts(Dict, Name, Goal, Inputs, Outputs),
+    ( get_dict(description, Dict, Desc0) -> text_value(Desc0, Description) ; Description = "" ),
+    Tool = shell_tool{name: Name, goal: Goal, inputs: Inputs, outputs: Outputs, description: Description}.
+
+tools_term(Tools, ToolsOut) :-
+    ( is_list(Tools) -> maplist(tool_from, Tools, ToolsOut) ; ToolsOut = [] ).
 workflow_from(workflow(Name, Pred), Workflow) :- !, text_value(Name, N), workflow_from_parts(N, Pred, Workflow).
 workflow_from(workflow(Pred), Workflow) :- !, workflow_from_parts("", Pred, Workflow).
 workflow_from(predicate(Pred), Workflow) :- !, workflow_from_parts("", Pred, Workflow).
@@ -2056,11 +2074,15 @@ workflow_from_parts(Name, Pred, Workflow) :-
     (   Pred = predicate(Items) -> true ; Items = Pred ),
     (   is_list(Items)
     ->  (   member(goal(Goal0), Items) -> text_value(Goal0, Goal) ; Goal = "" ),
-        (   member(args(Args0), Items) -> workflow_args(Args0, Args) ; Args = [] )
-    ;   text_value(Pred, Goal), Args = []
+        (   member(inputs(Inputs0), Items) -> workflow_args(Inputs0, Inputs)
+        ;   member(args(Args0), Items) -> workflow_args(Args0, Inputs)
+        ;   Inputs = []
+        ),
+        (   member(outputs(Outputs0), Items) -> workflow_args(Outputs0, Outputs) ; Outputs = [] )
+    ;   text_value(Pred, Goal), Inputs = [], Outputs = []
     ),
     (   Name == "" -> WorkflowName = Goal ; WorkflowName = Name ),
-    Workflow = shell_workflow{name: WorkflowName, goal: Goal, args: Args}.
+    Workflow = shell_workflow{name: WorkflowName, goal: Goal, inputs: Inputs, outputs: Outputs}.
 
 workflow_args(Args, Normalized) :-
     (   Args = args(Inner) -> true ; Inner = Args ),
