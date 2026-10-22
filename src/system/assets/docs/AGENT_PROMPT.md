@@ -509,32 +509,41 @@ model that can do the job, and a `with_model` spec must name one of those
 
 # Work mode: present a harness with `shell/1`
 
-A harness can say how it should be used in Work mode. Without a shell it opens
-the classic run view; with one, Work shows either a **Work agent** with
-workflows or a **single workflow form**.
+A harness is one inspectable DML module: predicates, docs, schemas, tools and an optional `shell/1`. The shell is the harness's Work contract: it says whether users get a conversational assistant or a workflow-only surface, what the assistant's persona is, which recurring tasks appear on the left, their typed inputs, and which host tools are exposed. A good shell fully describes how the harness should be used; do not rely on the UI to invent that contract.
 
-When a user asks to build a harness, ask one question first: **is it an agent
-people talk to, or a workflow with fixed inputs?** Then build accordingly.
+Before building the shell, ask one clear question:
 
-- **A skill** is a predicate. Record it with a `capability(Name/Arity)` fact
-  when it is something a user should know the harness can do.
-- **A workflow** is an existing skill exposed in `shell/1` with a fixed goal and
-  typed arguments. Add the skill first, then list it.
-- **A conversation** is an `agent` shell: the Work assistant (an outer agent with
-  `execute` and `show_image`, no authoring tools) talks to the user and runs the
-  harness's predicates.
+> Do you want a **standard agent experience** (the Work assistant plus a few workflows), or a **custom conversational experience** with its own persona and welcome?
+
+If the request is a recurring procedure with fixed inputs, use a **workflow-only** shell instead. Do not guess; ask.
+
+## Workflows or tools?
+
+Decide this before adding the shell:
+
+- **Workflow** — a recurring, user-triggered task with a prescribed outcome and typed inputs. Examples: summarise a document, triage a ticket, prepare a weekly report. A workflow may mix deterministic DML with `prompt/N`, `task/N`, `llm/N`, forms, tool calls and nested agent loops. Keep the list focused on real recurring tasks (usually 2–5); arguments are the inputs users provide each time.
+- **Tool-like predicate** — a smaller reusable operation the Work assistant composes through `execute`: lookup, normalize, validate, send, parse, calculate. Do **not** expose every helper as a workflow. Mention tool predicates in `shell.system` with their name/arity, argument shapes and when to use them. The Work assistant receives the generic shell guide automatically; the system prompt supplies the harness-specific tool map.
+- Leave internal helpers, `doc/N`, `schema/N`, capability records and form plumbing out of the workflow list.
+
+Python is always a host tool, never a shell: call `exec(python(code: "..."), Result)` or `exec(python(script: "scripts/foo.py", argv: [...]), Result)`. Mention Python in the shell system prompt when the harness does computation, files or network work.
+
+For complex DML, use the documentation tools rather than guessing: `reference("language")`, `reference("authoring")`, `reference("forms")`, `reference("patterns")`, `reference("examples")`, `reference("snippets")` and `reference("tools")`. The Work assistant also has `listing`, `reference`, `execute` and `show_image`.
+
+## Shell shape
 
 Canonical agent shell:
 
 ```prolog
 shell(_{
     kind: agent,
-    system: "You are the support assistant for this harness.",
+    system: "You are the support assistant for this harness. Use lookup_order/1 to find an order and summarise_ticket/2 for a ticket. Run tools through complete DML goals; use Python via exec(python(...)) only when analysis or file work is needed.",
     host_tools: [show_image, execute],
     workflows: [
-        _{ name: "Check a mailbox",
-           goal: "check_mail",
-           args: [ _{name: "Account", type: string} ] }
+        _{
+            name: "Check a mailbox",
+            goal: "check_mail",
+            args: [ _{name: "Account", type: string} ]
+        }
     ],
     welcome: "## Support\nAsk a question, or run a workflow."
 }).
@@ -545,19 +554,26 @@ Canonical single workflow:
 ```prolog
 shell(workflow([
     goal(entry_point),
-    args([(string:"Param 1"), (integer:"Count")])
+    args([(string:"Param 1"), (integer:"Count"), (file:"Document")])
 ])).
 ```
 
 The older `shell(agent(...), workflows(...), welcome(...))` form is accepted too,
 but the dict form is the one to write. A workflow's `goal` must name a predicate
-in the harness; its `args` are inputs in order. `string`, `integer`, `number` and
-`boolean` and `file` are the field types. A `file` field opens a workspace
-picker (with upload) in Work and passes the selected workspace-relative path as
-a string. `welcome` is Markdown shown in the empty view.
+in the harness; its `args` are inputs in order. `string`, `integer`, `number`,
+`boolean` and `file` are the field types. A `file` field opens a workspace picker
+(with upload) in Work and passes the selected workspace-relative path as a string.
+`welcome` is Markdown shown in the empty view.
 
-Do not add a shell unless the user wants the Work presentation. Keep the
-`shell/1` fact in the same transaction as the skills it exposes.
+`system` should be a concise domain/persona prompt plus the execute-only tool
+map and any constraints. The Work assistant already receives the generic guide
+for `listing`, `reference`, `execute`, Python and workflows; do not repeat that
+mechanics text in every shell. The shell must still mention the harness-specific
+predicates that should be used through `execute`.
+
+Keep the `shell/1` fact in the same transaction as the skills it exposes. Users
+can also inspect and edit the shell with the visual **Shell** editor in Work;
+mention that option when they want to tune the experience without changing DML.
 
 # Your goal
 
