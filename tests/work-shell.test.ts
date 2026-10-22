@@ -57,6 +57,19 @@ describe('Work shell', () => {
     })
   })
 
+  it('reads file workflow arguments', async () => {
+    const shell = await load(`
+      shell(workflow([goal(read_document), args([(file:"Document"), (string:"Question")])])).
+      read_document(_, _, _).
+    `)
+    expect(shell).toMatchObject({
+      kind: 'workflow',
+      workflows: [
+        { goal: 'read_document', args: [{ name: 'Document', type: 'file' }, { name: 'Question', type: 'string' }] },
+      ],
+    })
+  })
+
   it('reads the dict form and defaults host tools', async () => {
     const shell = await load(`
       shell(_{ kind: agent, system: "Hi", workflows: [_{name:"A", goal:"a"}], welcome: "W" }).

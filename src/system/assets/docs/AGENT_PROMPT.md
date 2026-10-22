@@ -552,7 +552,9 @@ shell(workflow([
 The older `shell(agent(...), workflows(...), welcome(...))` form is accepted too,
 but the dict form is the one to write. A workflow's `goal` must name a predicate
 in the harness; its `args` are inputs in order. `string`, `integer`, `number` and
-`boolean` are the field types. `welcome` is Markdown shown in the empty view.
+`boolean` and `file` are the field types. A `file` field opens a workspace
+picker (with upload) in Work and passes the selected workspace-relative path as
+a string. `welcome` is Markdown shown in the empty view.
 
 Do not add a shell unless the user wants the Work presentation. Keep the
 `shell/1` fact in the same transaction as the skills it exposes.
