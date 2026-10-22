@@ -33,6 +33,7 @@ export type {
   ToolPolicy,
   FormEventPayload,
   FormSubmitPayload,
+  ShellSpec,
 } from './types.js';
 
 // DML REPL (goal + prompt mode) for CLI and embedding

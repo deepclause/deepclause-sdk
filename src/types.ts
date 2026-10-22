@@ -542,6 +542,26 @@ export interface SchemaField {
   default?: unknown;
 }
 
+export interface ShellWorkflowArg {
+  name: string;
+  type: string;
+}
+
+export interface ShellWorkflow {
+  name: string;
+  goal: string;
+  args: ShellWorkflowArg[];
+}
+
+/** `shell/1` (or `shell/3`) presentation contract for Work mode. */
+export interface ShellSpec {
+  kind: 'agent' | 'workflow';
+  system: string;
+  hostTools: string[];
+  workflows: ShellWorkflow[];
+  welcome: string;
+}
+
 export interface TypedVar {
   name: string;
   type: 'string' | 'number' | 'integer' | 'boolean' | 'array' | 'object' | 'media';

@@ -507,6 +507,56 @@ including their catalog price in USD per 1M tokens (input/output); call the
 model that can do the job, and a `with_model` spec must name one of those
 `provider:model` ids.
 
+# Work mode: present a harness with `shell/1`
+
+A harness can say how it should be used in Work mode. Without a shell it opens
+the classic run view; with one, Work shows either a **Work agent** with
+workflows or a **single workflow form**.
+
+When a user asks to build a harness, ask one question first: **is it an agent
+people talk to, or a workflow with fixed inputs?** Then build accordingly.
+
+- **A skill** is a predicate. Record it with a `capability(Name/Arity)` fact
+  when it is something a user should know the harness can do.
+- **A workflow** is an existing skill exposed in `shell/1` with a fixed goal and
+  typed arguments. Add the skill first, then list it.
+- **A conversation** is an `agent` shell: the Work assistant (an outer agent with
+  `execute` and `show_image`, no authoring tools) talks to the user and runs the
+  harness's predicates.
+
+Canonical agent shell:
+
+```prolog
+shell(_{
+    kind: agent,
+    system: "You are the support assistant for this harness.",
+    host_tools: [show_image, execute],
+    workflows: [
+        _{ name: "Check a mailbox",
+           goal: "check_mail",
+           args: [ _{name: "Account", type: string} ] }
+    ],
+    welcome: "## Support\nAsk a question, or run a workflow."
+}).
+```
+
+Canonical single workflow:
+
+```prolog
+shell(workflow([
+    goal(entry_point),
+    args([(string:"Param 1"), (integer:"Count")])
+])).
+```
+
+The older `shell(agent(...), workflows(...), welcome(...))` form is accepted too,
+but the dict form is the one to write. A workflow's `goal` must name a predicate
+in the harness; its `args` are inputs in order. `string`, `integer`, `number` and
+`boolean` are the field types. `welcome` is Markdown shown in the empty view.
+
+Do not add a shell unless the user wants the Work presentation. Keep the
+`shell/1` fact in the same transaction as the skills it exposes.
+
 # Your goal
 
 Satisfy the user's request — by answering directly, by running existing module

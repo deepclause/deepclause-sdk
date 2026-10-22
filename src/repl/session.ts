@@ -29,6 +29,7 @@ import { resolveReplJudgeSelection, type JevJudgeOptions } from './judge.js';
 import { DmlProcessExecutor } from './process-executor.js';
 import type { ProcessBackend } from './process-backend.js';
 import type { Pid, ProcessEvent, ProcessInfo, ProcessLogEntry, SpawnOptions } from './processes.js';
+import type { ShellSpec } from '../types.js';
 import { pidKey } from './processes.js';
 import type { HarnessSnapshot, HarnessPredicate } from './tui/harness-view.js';
 import {
@@ -618,6 +619,20 @@ export class DMLSession {
    * Read from the session module rather than from the last commit, so a side view
    * shows the harness *being built* — including uncommitted edits.
    */
+  /** The harness's Work-mode presentation (`shell/1`), or null. */
+  shell(): ShellSpec | null {
+    const result = this.prologQuery(
+      `deepclause_mi:repl_shell_json('${this.sessionId}', Json)`,
+    );
+    const text = String(plainValue(result?.Json) ?? 'null');
+    try {
+      const parsed = JSON.parse(text) as ShellSpec | null;
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
   harnessView(): HarnessSnapshot {
     const result = this.prologQuery(`deepclause_mi:repl_harness_view('${this.sessionId}', Rows)`);
     const raw = toJsValue(result?.Rows);

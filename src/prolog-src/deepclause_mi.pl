@@ -73,6 +73,7 @@
     repl_set_authoring_examples/2,
     repl_manifest/2,
     repl_display_harness/2,
+    repl_shell_json/2,
     repl_history_load/2,
     repl_history_record/2,
     repl_history_summary/2,
@@ -1921,6 +1922,173 @@ record_directive(SessionId, Directive) :-
 %% directives, tools, embedded scripts, then user predicates sorted name/arity.
 export_harness(SessionId, Header, Text) :-
     with_output_to(string(Text), export_harness_output(SessionId, Header)).
+
+%% repl_shell_json(+SessionId, -Json)
+%%
+%% How the harness wants to be presented in Work mode. Two shapes are accepted:
+%%
+%%   shell(agent([system("…"), host_tools(show_image, execute)]),
+%%         workflows([name("Check mail"), predicate([goal(check_mail), args([(string:"Account")])])]),
+%%         welcome("## …")).
+%%
+%%   shell(workflow([goal(entry_point), args([(string:"Param 1")])])).
+%%
+%% A `shell(_{...})` dict is the third form. Everything is normalized to one
+%% JSON object; a harness without a shell is `null` and Work keeps its old view.
+repl_shell_json(SessionId, Json) :-
+    (   repl_shell_spec(SessionId, Spec)
+    ->  atom_json_dict(Json, Spec, [])
+    ;   Json = "null"
+    ).
+
+repl_shell_spec(SessionId, Spec) :-
+    (   clause(SessionId:shell(One), true)
+    ->  shell_from_one(One, Spec)
+    ;   clause(SessionId:shell(Agent, Workflows, Welcome), true)
+    ->  shell_from_parts(Agent, Workflows, Welcome, Spec)
+    ).
+
+shell_from_one(workflow(Items), Spec) :-
+    !,
+    workflow_from(workflow(Items), Workflow),
+    Spec = shell_spec{kind: workflow, system: "", hostTools: [], workflows: [Workflow], welcome: ""}.
+shell_from_one(Dict, Spec) :-
+    is_dict(Dict),
+    !,
+    shell_from_dict(Dict, Spec).
+shell_from_one(agent(Items), Spec) :-
+    !,
+    agent_items(Items, System, Tools),
+    Spec = shell_spec{kind: agent, system: System, hostTools: Tools, workflows: [], welcome: ""}.
+
+shell_from_parts(AgentTerm, WorkflowsTerm, WelcomeTerm, Spec) :-
+    agent_term(AgentTerm, System, Tools),
+    workflows_term(WorkflowsTerm, Workflows),
+    (   WelcomeTerm = welcome(Welcome0)
+    ->  text_value(Welcome0, Welcome)
+    ;   text_value(WelcomeTerm, Welcome)
+    ),
+    Spec = shell_spec{kind: agent, system: System, hostTools: Tools, workflows: Workflows, welcome: Welcome}.
+
+shell_from_dict(Dict, Spec) :-
+    (   get_dict(kind, Dict, Kind0)
+    ->  text_value(Kind0, Kind)
+    ;   shell_infer_kind(Dict, Kind)
+    ),
+    (   get_dict(system, Dict, Sys0) -> text_value(Sys0, System) ; System = "" ),
+    (   get_dict(host_tools, Dict, Tools0)
+    ->  host_tools_value(Tools0, Tools)
+    ;   get_dict(hostTools, Dict, Tools1)
+    ->  host_tools_value(Tools1, Tools)
+    ;   Tools = ["show_image", "execute"]
+    ),
+    (   get_dict(workflows, Dict, Wfs0) -> workflows_term(Wfs0, Workflows) ; Workflows = [] ),
+    (   get_dict(welcome, Dict, Welcome0) -> text_value(Welcome0, Welcome) ; Welcome = "" ),
+    Spec = shell_spec{kind: Kind, system: System, hostTools: Tools, workflows: Workflows, welcome: Welcome}.
+
+shell_infer_kind(Dict, Kind) :-
+    (   get_dict(system, Dict, _)
+    ;   get_dict(host_tools, Dict, _)
+    ;   get_dict(hostTools, Dict, _)
+    ),
+    !,
+    Kind = agent.
+shell_infer_kind(_, workflow).
+
+agent_term(agent(Items), System, Tools) :- !, agent_items(Items, System, Tools).
+agent_term(Items, System, Tools) :- is_list(Items), !, agent_items(Items, System, Tools).
+agent_term(_, "", ["show_image", "execute"]).
+
+agent_items(Items, System, Tools) :-
+    (   member(system(S), Items) -> text_value(S, System) ; System = "" ),
+    (   member(Term, Items),
+        compound(Term),
+        ( compound_name_arity(Term, host_tools, _) ; compound_name_arity(Term, hostTools, _) )
+    ->  Term =.. [_|Args],
+        host_tools_args(Args, Tools)
+    ;   Tools = ["show_image", "execute"]
+    ).
+
+host_tools_args([Single], Tools) :-
+    is_list(Single),
+    !,
+    host_tools_value(Single, Tools).
+host_tools_args(Args, Tools) :-
+    maplist(text_value, Args, Tools).
+
+host_tools_value(Tools, Normalized) :-
+    (   is_list(Tools)
+    ->  maplist(text_value, Tools, Normalized)
+    ;   Normalized = []
+    ).
+
+workflows_term(workflows(Items), Workflows) :- !, workflows_list(Items, Workflows).
+workflows_term(Items, Workflows) :- is_list(Items), !, workflows_list(Items, Workflows).
+workflows_term(Item, [Workflow]) :- workflow_from(Item, Workflow).
+
+workflows_list([], []).
+workflows_list([name(Name), predicate(Pred)|Rest], [Workflow|Workflows]) :-
+    !,
+    text_value(Name, N),
+    workflow_from_parts(N, Pred, Workflow),
+    workflows_list(Rest, Workflows).
+workflows_list([name(Name), workflow(Pred)|Rest], [Workflow|Workflows]) :-
+    !,
+    text_value(Name, N),
+    workflow_from_parts(N, Pred, Workflow),
+    workflows_list(Rest, Workflows).
+workflows_list([Item|Rest], [Workflow|Workflows]) :-
+    workflow_from(Item, Workflow),
+    workflows_list(Rest, Workflows).
+
+workflow_from(Dict, Workflow) :-
+    is_dict(Dict),
+    !,
+    ( get_dict(name, Dict, Name0) -> text_value(Name0, Name) ; Name = "" ),
+    ( get_dict(goal, Dict, Goal0) -> text_value(Goal0, Goal) ; Goal = "" ),
+    ( get_dict(args, Dict, Args0) -> workflow_args(Args0, Args) ; Args = [] ),
+    Workflow = shell_workflow{name: Name, goal: Goal, args: Args}.
+workflow_from(workflow(Name, Pred), Workflow) :- !, text_value(Name, N), workflow_from_parts(N, Pred, Workflow).
+workflow_from(workflow(Pred), Workflow) :- !, workflow_from_parts("", Pred, Workflow).
+workflow_from(predicate(Pred), Workflow) :- !, workflow_from_parts("", Pred, Workflow).
+
+workflow_from_parts(Name, Pred, Workflow) :-
+    (   Pred = predicate(Items) -> true ; Items = Pred ),
+    (   is_list(Items)
+    ->  (   member(goal(Goal0), Items) -> text_value(Goal0, Goal) ; Goal = "" ),
+        (   member(args(Args0), Items) -> workflow_args(Args0, Args) ; Args = [] )
+    ;   text_value(Pred, Goal), Args = []
+    ),
+    (   Name == "" -> WorkflowName = Goal ; WorkflowName = Name ),
+    Workflow = shell_workflow{name: WorkflowName, goal: Goal, args: Args}.
+
+workflow_args(Args, Normalized) :-
+    (   Args = args(Inner) -> true ; Inner = Args ),
+    (   is_list(Inner) -> maplist(workflow_arg, Inner, Normalized) ; Normalized = [] ).
+
+workflow_arg(Type:Label, shell_arg{name: Name, type: TypeText}) :-
+    !,
+    text_value(Label, Name),
+    text_value(Type, TypeText).
+workflow_arg(Dict, shell_arg{name: Name, type: TypeText}) :-
+    is_dict(Dict),
+    !,
+    ( get_dict(name, Dict, N0) -> text_value(N0, Name) ; Name = "" ),
+    ( get_dict(type, Dict, T0) -> text_value(T0, TypeText) ; TypeText = "string" ).
+workflow_arg(arg(Name0, Type0), shell_arg{name: Name, type: TypeText}) :-
+    !,
+    text_value(Name0, Name),
+    text_value(Type0, TypeText).
+workflow_arg(Value, shell_arg{name: Value, type: "string"}) :- atom(Value), !.
+workflow_arg(Value, shell_arg{name: Value, type: "string"}) :- string(Value), !.
+workflow_arg(_, shell_arg{name: "", type: "string"}).
+
+text_value(Value, Text) :-
+    (   string(Value) -> Text = Value
+    ;   atom(Value) -> atom_string(Value, Text)
+    ;   number(Value) -> number_string(Value, Text)
+    ;   Text = ""
+    ).
 
 %% repl_display_harness(+SessionId, -Text)
 %% The same module as `export_harness/3`, but for humans: clauses come from the
