@@ -132,14 +132,16 @@ export async function buildAgentSystemPrompt(options: {
   // full catalog to it defeats that budget.
   const catalog = options.systemPrompt === undefined ? (options.modelCatalog ?? []) : [];
   if (options.currentModel || catalog.length > 0) {
-    const shown = catalog.slice(0, 60).map(formatModelCatalogEntry);
+    // Discovery is on demand through models(); do not append dozens of price
+    // entries to every authoring turn. Keep a bounded preview for simple routing.
+    const shown = catalog.slice(0, 4).map(formatModelCatalogEntry);
     prompt += [
       '',
       'AVAILABLE MODELS  (price = USD per 1M tokens, input/output)',
       options.currentModel ? `- current: ${options.currentModel}` : '',
-      shown.length > 0 ? `- with_model targets: ${shown.join(', ')}${catalog.length > shown.length ? ', …' : ''}` : '',
+      shown.length > 0 ? `- with_model targets (preview): ${shown.join(', ')}${catalog.length > shown.length ? `; ${catalog.length} configured models total — call models for all ids/prices.` : ''}` : '',
       '- Pick the cheapest model that can do the job; use `with_model/2` to route calls.',
-      '- Other models may be configured with `deepclause login`; a `with_model` spec must name one of these.',
+      '- A `with_model` spec must name an available configured model. Use the host model settings for other models; do not invent model ids or credentials.',
     ].filter(Boolean).join('\n') + '\n';
   }
 

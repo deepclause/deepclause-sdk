@@ -10,7 +10,9 @@ export type WorkspaceDocAssetName =
   | 'dml-forms'
   | 'harness-examples'
   | 'harness-patterns'
-  | 'prolog-snippets';
+  | 'prolog-snippets'
+  | 'dml-basics' | 'dml-tasks' | 'dml-shell' | 'dml-python'
+  | 'dml-processes' | 'dml-media' | 'dml-debugging';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -50,6 +52,13 @@ function getWorkspaceDocFileName(name: WorkspaceDocAssetName): string {
       return 'HARNESS_PATTERNS.md';
     case 'prolog-snippets':
       return 'PROLOG_SNIPPETS.md';
+    case 'dml-basics': return 'DML_BASICS.md';
+    case 'dml-tasks': return 'DML_TASKS.md';
+    case 'dml-shell': return 'DML_SHELL.md';
+    case 'dml-python': return 'DML_PYTHON.md';
+    case 'dml-processes': return 'DML_PROCESSES.md';
+    case 'dml-media': return 'DML_MEDIA.md';
+    case 'dml-debugging': return 'DML_DEBUGGING.md';
   }
 }
 

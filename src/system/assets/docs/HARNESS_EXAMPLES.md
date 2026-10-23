@@ -1,266 +1,342 @@
-# Idiomatic harness examples
+# Runnable canonical examples
 
-Copy-paste shapes for REPL harnesses. Keep each skill small and compose them.
-(The snippets are tested against the bundled SWI-Prolog.)
+Generated from scripts/canonical-examples.mjs; do not hand-copy into the system prompt.
+Pick ONE matching section. Each skill binds its outputs; agent_main is only used
+for the explicitly custom conversation. Host-dependent examples list prerequisites.
 
-Most skills should look like §2–§3: a short sequence of `task/N`/`prompt/N` calls
-with thin guards between them. §4–§7 (facts, pure logic, judgments, CLP) are the
-exception — reach for them only when the task is genuinely data- or
-logic-shaped, not as the default style. DML is the orchestration layer over model
-calls, not the logic library (`DML_AUTHORING.md` §0). For file work, shell out
-(`exec(bash(...))`) instead of reading files into DML (§2).
+## work-agent
 
-Every skill carries a `doc(Name/Arity, Text)` annotation and the harness a
-`module_doc(Text)` line (`DML_AUTHORING.md` §4). `module_doc/1` is the harness's
-**skill description** — what it does and when to use it; it is the first line of
-the manifest, which the agent reads at session start and whenever it changes. A
-file with only `module_doc/1` is still a valid skill (an advertised capability
-with an empty body). Keep both terse.
+**Default Work agent with a tool and workflow**
+
+The default conversation is supplied by shell/1. A custom persona does not need a DML chat loop. Inputs precede outputs; tools are not directly run from the sidebar.
+
+Requires: Work host; title workflow requires a text model. The character-count test is pure DML.
 
 ```prolog
-module_doc("Example harness: a few small skills used as patterns. Use when you need a copy-paste starting point.").
+length_of(Text, N) :- string_length(Text, N).
+title(Text, Label) :- prompt("Give a short title for: {Text}", string(Label)).
+shell(_{
+    kind: agent, system: "You are a concise writing assistant.", host_tools: [],
+    tools: [_{name: "text_length", goal: "length_of", description: "Count characters.",
+              inputs: [_{name: "Text", type: string}], outputs: [_{name: "N", type: integer}]}],
+    workflows: [_{name: "Create title", goal: "title",
+                  inputs: [_{name: "Text", type: string}], outputs: [_{name: "Label", type: string}]}],
+    welcome: "Ask about text, or create a title."
+}).
 ```
 
-## 1. Wrap a workspace script as a tool
+Test goal: `length_of("Ada", N), write(N)`. Expected: `3`.
 
-Materialize the program as a workspace file (run a DML goal with
-`make_directory_path("scripts"), write_file("scripts/count_words.py", "…")`),
-link it with `script_file/2`, and define a predicate for it. `tool/2` is only an
-annotation that exposes an existing predicate to `task/N`; keep it a one-line
-delegation so the predicate is also callable from `execute` / `/goal`:
+Failure/cancel check: Do not replace output binding with answer/1 or add a custom conversation loop.
+
+## basic-relation
+
+**Arguments, arithmetic and a deterministic branch**
+
+N is an input; Label is an output. is/2 evaluates arithmetic, = binds a returned value. A failed input guard is not an exception.
+
+Requires: No host tools or model.
 
 ```prolog
-script_file(count_words, ".dc-repl/scripts/count_words.py").
-
-% The capability: callable from `execute` / `/goal` and from `task/N`.
-count_words(File, Count) :-
-    script_file(count_words, Script),
-    format(atom(Cmd), "python3 '~w' '~w'", [Script, File]),
-    exec(bash(command: Cmd), Result),
-    get_dict(stdout, Result, Count).
-
-% The annotation exposing it to the nested agent (delegation only).
-tool(count_words(File, Count), "Count words in a workspace file.") :-
-    count_words(File, Count).
+size_label(N, Label) :-
+    integer(N), N >= 0,
+    Twice is N * 2,
+    ( Twice > 10 -> Label = large ; Label = small ).
 ```
 
-Untrusted data goes through files/stdin, never interpolated into the shell
-command. `script_file/2` is just a fact (the exporter bundles the file); the
-write lands on disk immediately, so `bash` can run the script in the same turn.
+Test goal: `size_label(2, Label), write(Label)`. Expected: `small`.
 
-## 2. A skill that calls the model
+Failure/cancel check: size_label(-1, _) has zero solutions; catch/3 does not catch a false guard.
 
-`task/N` runs a bounded agentic turn. Name each output variable in the
-description so the model fills it:
+## typed-pipeline
+
+**Fresh typed transformation and explicit data flow**
+
+Each prompt includes its input. No tool or previous-memory dependency. Reject empty intermediate data before the next semantic step.
+
+Requires: Text model; tests supply deterministic typed completions.
 
 ```prolog
-doc(classify/2, "Route a support message. classify(+Message, -Team). Example: /goal classify(\"I was charged twice\", T).").
-
-classify(Message, Team) :-
-    task("Route this support message to exactly one of billing, orders, or account. Message: {Message}. Store the choice in Team.", Team).
-
-demo :-
-    classify("I was charged twice for the same order", Team),
-    format(string(Out), "Routed to ~w", [Team]),
-    answer(Out).
+brief(Text, Report) :-
+    prompt("Extract the central claim from: {Text}", string(Claim)),
+    Claim \== "",
+    prompt("Explain this claim using only the source {Text}: {Claim}", string(Report)).
 ```
 
-## 3. Multi-step pipeline: task -> task -> answer
+Test goal: `brief("A source document", Report), write(Report)`. Expected: `A grounded summary.`.
+
+Failure/cancel check: An empty Claim fails before generating a report.
+
+## task-tools
+
+**A scoped task calls one declared capability**
+
+Host tools, nested tool/N annotations and shell tools are different surfaces. This task may only call length_of; the real predicate remains callable directly.
+
+Requires: Text model with tool calling; test checks the capability really executes.
 
 ```prolog
-report(Topic, Result) :-
-    task("List three risks of using an LLM for arithmetic. Store them in Risks.", Risks),
-    format(string(Desc), "Rank these risks and explain the top one: ~w", [Risks]),
-    task(Desc, Top),
-    format(string(Result), "Top risk: ~w", [Top]).
+length_of(Text, N) :- string_length(Text, N).
+tool(length_of(Text, N), "Count characters.", [string]) :- length_of(Text, N).
+inspect(Text, Reply) :-
+    with_tools([length_of], task("Call length_of for {Text}; report the observed count.", string(Reply))).
 ```
 
-Compose the steps and let the model do the thinking; keep only thin guards
-between them — an if-then-else for a branch, `once/1` to commit the first
-answer, or a simple check that fails a step:
+Test goal: `inspect("Ada", Reply), write(Reply)`. Expected: `3 characters`.
+
+Failure/cancel check: Naming length_of in prose without registering its annotation would not expose it.
+
+## task-memory
+
+**Task memory accumulates; a fresh prompt does not inherit it**
+
+Task memory is DML harness memory, not the authoring chat. The tasks share a fresh group, then a separate prompt receives only explicitly supplied data.
+
+Requires: Text model; tests inspect actual request memory, not only returned strings.
 
 ```prolog
-summarise(Doc, Summary) :-
-    task("Extract the document's main claim. Store it in Claim.", Claim),
-    (   Claim == ""
-    ->  Summary = "no claim found"
-    ;   task("Summarise this claim in one sentence: {Claim}", Summary)
-    ).
+memory_demo(Out) :-
+    with_fresh_memory(with_tools([], (
+        task("Return marker alpha.", string(First)),
+        task("Report the earlier marker. Explicit value: {First}", string(Second))
+    ))),
+    prompt("Report only this explicit result: {Second}", string(Out)).
 ```
 
-## 4. Data as facts (data = code)
+Test goal: `memory_demo(Out), write(Out)`. Expected: `Memory scopes checked.`.
 
-Small/medium data belongs in the module and is queried exactly like code:
+Failure/cancel check: Do not assume a prompt sees a prior task or a nested tool inherits the Work transcript.
 
-```prolog
-parent(alice, bob).
-parent(alice, carol).
-parent(bob, dave).
-parent(carol, eve).
+## judgment-routing
 
-doc(ancestor/2, "Transitive parent. ancestor(+A, -B) enumerates descendants. Example: /goal ancestor(alice, X).").
+**A constrained semantic choice with explicit evidence**
 
-ancestor(A, B) :- parent(A, B).
-ancestor(A, B) :- parent(A, C), ancestor(C, B).
-```
+Choose returns one option atom; deterministic branching follows it. A semantic judgment is not proof that an external action was performed.
 
-```text
-/goal ancestor(alice, X).
-X = bob ; X = carol ; X = dave ; X = eve
-```
-
-## 5. Pure logic + a test predicate
-
-```prolog
-doc(tally/2, "Count occurrences of each item. tally(+List, -Counts) yields Key-N pairs. Example: /goal tally([a,b,a,c,a], C).").
-
-tally(List, Counts) :-
-    list_to_set(List, Items),
-    findall(Item-N, (member(Item, Items), aggregate_all(count, member(Item, List), N)), Counts).
-
-test_tally :-
-    tally([a,b,a,c,a], C),
-    C == [a-3, b-1, c-1].
-```
-
-`/goal test_tally.` succeeds when the behavior is correct. When a skill changes,
-update or add its test and run it (`execute` during a turn, or `/goal`).
-
-## 6. Semantic judgments (the model decides, Prolog enforces)
+Requires: Configured judgment backend (the test uses the session model with a deterministic judge response).
 
 ```prolog
 route(Message, Team) :-
-    choose(Message, "Which team should handle this?", [billing, orders, account], Team).
-
-urgent(Message) :-
-    holds(Message, "Is this urgent?").
-```
-
-`choose/4` always returns one of your options; `verify/3` is three-valued
-(`yes`/`no`/`unknown`); `holds/2` is the semidet wrapper.
-
-## 7. Constraints with CLP(FD)
-
-```prolog
-:- use_module(library(clpfd)).
-
-doc(solve/3, "X+Y=Total with X<Y over 0..100. solve(+Total, -X, -Y). Example: /goal solve(10, X, Y).").
-
-solve(Total, X, Y) :-
-    [X, Y] ins 0..100,
-    X + Y #= Total,
-    X #< Y,
-    label([X, Y]).
-```
-
-The `:- use_module(...)` directive must be **top-level** (an inline
-`use_module` inside a body is not run at read time, so `#=`/`ins` are unknown).
-
-## 8. Vision: describe a workspace image
-
-```prolog
-doc(describe_image/2, "Describe an image file. describe_image(+Path, -Text). Example: /goal describe_image(\"photos/fox.png\", T).").
-
-describe_image(Path, Text) :-
-    read_media(Path, Image),         % media(Path, Mime) — no bytes
-    attach_media(Image),             % reference-only; sent by the next task/N
-    task("Describe the attached image in one sentence.", Text).
-```
-
-Images are files; `media(Path, Mime)` is the reference. The bytes are read from
-the workspace at call time, only PNG/JPEG/GIF/WebP are accepted, and they never
-enter clauses or memory. Judgments stay text-only.
-
-## 9. Forms: structured input from the user
-
-Use a form when the program needs **typed, validated** input rather than free
-text. Forms are always available — no directive, nothing to import.
-
-**Let the model design and drive the form** (the usual shape). Give `task/N` the
-form tools and describe what you need:
-
-```prolog
-doc(collect_claim/0, "Collect an expense claim and report it. Example: /goal collect_claim.").
-
-collect_claim(Summary) :-
-    system("You collect a new expense claim. Ask for the vendor, the amount and a note."),
-    with_tools([render_form, wait_for_form_change, close_form, set_result, finish],
-        task("Ask for the three fields, then report exactly what the user entered.",
-             string(Summary))).
-```
-
-The model's loop is three calls: `render_form(spec)` → a form id,
-`wait_for_form_change(formId)` → `{action, values}`, `close_form(formId)`.
-
-**Or drive it from DML**, with no model:
-
-```prolog
-doc(claim_form/1, "Collect an expense claim. claim_form(-Values) returns the entered values.").
-
-claim_form(Values) :-
-    form(_{ title: "New expense claim",
-           fields: [ _{name: vendor, type: string,  required: true},
-                     _{name: amount, type: integer, required: true, minimum: 0},
-                     _{name: notes,  widget: textarea} ] }, F),
-    await_form(F, Change),
-    close_form(F),
-    (   Change.action == submit               % an atom: submit, cancel
-    ->  Change.values = Values
-    ;   Values = _{}
+    choose(Message, "Which team handles this?", [billing, orders, account], Choice),
+    ( Choice == billing -> Team = billing
+    ; Choice == orders -> Team = orders
+    ; Team = account
     ).
-
-%% Domain rules on top of the spec's own constraints; both block a submit, and a
-%% refused submit is never returned — the host shows the errors and waits again.
-form_validate(Values, Errors) :-
-    findall(error(amount, "the amount looks implausible"),
-            ( get_dict(amount, Values, A), A > 100000 ),
-            Errors).
 ```
 
-Note what is *not* here: no `version`, no loop for rejected submits, no error
-branch. A field's `type` defaults to `string`, and the host owns validation.
-`Change.action` is an **atom** (`submit`, `cancel`) — compare with `==`, never
-against `"submit"`. `current_predicate(form/2)` reports `no` even when forms work
-(it is a host handler, like `exec/2`). See `reference("forms")` and
-`sdk-examples/forms.dml`.
+Test goal: `route("I was charged twice", Team), write(Team)`. Expected: `billing`.
 
-## 10. A conversational agent
+Failure/cancel check: Unknown evidence is not a reason to claim that a real refund happened.
 
-A conversation talks with the person over many turns and acts between them. Two
-primitives: `input/1` (the next message, no prompt) and `chat/1` (one traditional
-agent turn — tools, no `finish`, no nudging; it ends when the model stops calling
-tools). Run it as the foreground goal, not inside `execute`.
+## schema-output
+
+**A declared schema rather than guessed dict keys**
+
+The schema is an output contract, not merely a suggested JSON shape. Missing required fields and invalid types fail validation.
+
+Requires: Text model; deterministic schema-aware test output.
 
 ```prolog
-doc(agent_main/0, "Chat assistant that can add. Run with /goal agent_main.").
+schema(person, [field(name, string, required), field(age, integer, default(0))]).
+extract_person(Text, Person) :-
+    prompt("Extract a person from: {Text}", schema(person, Person)).
+```
 
+Test goal: `extract_person("Ada, age 36", Person), get_dict(name, Person, Name), write(Name)`. Expected: `Ada`.
+
+Failure/cancel check: Missing name must not be silently converted to an empty string.
+
+## python-files
+
+**Python, files and argv**
+
+Write/link the helper during authoring, not on each run. Script link normalise_py is distinct from the normalise/2 predicate. run_script checks exit status and parses JSON.
+
+Requires: Python host capability (or a compatible script execution embedding). Files below are fixtures to create before calling the skill.
+
+```prolog
+script_file(normalise_py, "scripts/normalise.py").
+normalise(Path, Text) :-
+    run_script(normalise_py, [Path], Data),
+    get_dict(text, Data, Text).
+```
+
+Test goal: `normalise("canonical/input.txt", Text), write(Text)`. Expected: `HELLO`.
+
+Failure/cancel check: A missing input file produces a script_failed error; no model fills the missing text.
+
+Fixture `canonical/input.txt` (create before run):
+
+```text
+hello
+```
+
+Fixture `scripts/normalise.py` (create before run):
+
+```python
+import json, sys
+from pathlib import Path
+print(json.dumps({'text': Path(sys.argv[1]).read_text().upper()}))
+```
+
+## swarm
+
+**Bounded parallel mapping with visible failures**
+
+Results preserve input order. Every item has its own process; failed items remain visible. Use pmap only if any failure should fail the whole batch.
+
+Requires: Process-capable session; no model.
+
+```prolog
+double(N, R) :- R is N * 2.
+parallel_values(Items, Results) :- swarm(double, Items, Results, 2).
+```
+
+Test goal: `parallel_values([1,2,3], Results), write(Results)`. Expected: `[ok(2),ok(4),ok(6)]`.
+
+Failure/cancel check: Inspect failed items rather than assuming all results succeeded.
+
+## spawn-python
+
+**Spawn a worker and return by message**
+
+Create required files before spawn. Child output variables do not bind the parent; send a result, receive it with a bound, then reap the worker.
+
+Requires: Python and process host. Test fixture canonical/input.txt exists before spawn.
+
+```prolog
+read_in_worker(Path, Out) :-
+    self(Me), spawn(file_worker(Path, Me), Pid),
+    receive(done(Out), 30000), wait(Pid, _).
+file_worker(Path, Parent) :-
+    exec(python(code: "from pathlib import Path\nimport sys\nprint(Path(sys.argv[1]).read_text().upper())", argv: [Path]), R),
+    get_dict(exitCode, R, 0), get_dict(stdout, R, Out),
+    send(Parent, done(Out)).
+```
+
+Test goal: `read_in_worker("canonical/input.txt", Out), write(Out)`. Expected: `HELLO`.
+
+Failure/cancel check: A failed worker may never send; the receive is bounded. Inspect the worker and stop/reap it after a timeout.
+
+Fixture `canonical/input.txt` (create before run):
+
+```text
+hello
+```
+
+## service
+
+**A stateful service with correlated replies**
+
+A service is for message-driven state, not a single model call. Registered names survive across turns while the process is alive. Stop/reap test services.
+
+Requires: Process-capable session.
+
+```prolog
+service_demo(Text) :-
+    serve(counter, counter_loop(0), Pid),
+    service_call(counter, bump, First, 5000),
+    service_call(counter, bump, Second, 5000),
+    service_call(counter, read, Final, 5000),
+    service_cast(counter, stop), wait(Pid, _),
+    format(string(Text), "~w ~w ~w", [First, Second, Final]).
+counter_loop(Count) :-
+    receive(Msg),
+    ( Msg = request(From, Ref, read)
+    -> send(From, reply(Ref, Count)), counter_loop(Count)
+    ; Msg = request(From, Ref, bump)
+    -> Next is Count + 1, send(From, reply(Ref, Next)), counter_loop(Next)
+    ; Msg = stop -> true
+    ; counter_loop(Count)
+    ).
+```
+
+Test goal: `service_demo(Text), write(Text)`. Expected: `1 2 2`.
+
+Failure/cancel check: Duplicate service names are rejected; callers use bounded service_call timeouts.
+
+## vision
+
+**Vision input is not display or generation**
+
+Attach a workspace reference, then use a vision task. A fresh prompt does not read the attached image. Display is a separate output operation.
+
+Requires: Vision-capable model and supported image file; tests provide a tiny PNG and assert media is actually in the model request.
+
+```prolog
+describe_image(Path, Text) :-
+    read_media(Path, Image), attach_media(Image),
+    with_tools([], task("Describe only the attached image.", string(Text))).
+show_image_file(Path) :- output(media(Path)).
+```
+
+Test goal: `describe_image("canonical/pixel.png", Text), write(Text)`. Expected: `An observed image.`.
+
+Failure/cancel check: A text-only model cannot analyse pixels. Image generation additionally needs a configured image backend.
+
+Binary fixture: provide a valid supported image before running (test suite includes one).
+
+## fixed-form
+
+**Fixed foreground form with a cancellation branch**
+
+Known fields need no model. The host enforces hard validation; a refused submit is not delivered. Never save on cancel or unavailable.
+
+Requires: Foreground form host. Browser disposable execute/process workers do not render forms.
+
+```prolog
+claim_form(Values) :-
+    form(_{title: "Quick check-in", fields: [_{name: name, type: string, required: true}]}, F),
+    await_form(F, Change), close_form(F),
+    ( Change.action == submit -> Change.values = Values ; Values = _{} ).
+```
+
+Test goal: `claim_form(V), get_dict(name, V, Name), format(string(S), "Hello ~w", [Name]), write(S)`. Expected: `Hello Ada`.
+
+Failure/cancel check: Cancel/unavailable returns an empty dict; a caller must not create a record from it.
+
+## dynamic-form
+
+**Context-dependent fields designed by a scoped task**
+
+The nested model designs the form, waits for actual values and closes it. Result/finish machinery is internal, not a user tool annotation.
+
+Requires: Foreground form host and text model with tools.
+
+```prolog
+collect_details(Context, Summary) :-
+    with_tools([render_form, wait_for_form_change, close_form],
+        task("Collect {Context} using a form, wait for the user action, close the form, and report only what they entered.", string(Summary))).
+```
+
+Test goal: `collect_details("name and favorite color", Summary), write(Summary)`. Expected: `Ada likes blue.`.
+
+Failure/cancel check: A form rendered without a real submission is not evidence that intake completed.
+
+## custom-intake
+
+**Custom staged conversation (advanced, not the default)**
+
+Only use a custom loop for a required protocol. This example validates project intake BEFORE allowing conversation. A normal assistant with a persona/tools uses shell/1 instead.
+
+Requires: Foreground conversation/input host and text model; file fixture exists. First input is the required project name, followed by chat messages.
+
+```prolog
 agent_main :-
-    system("You are a concise assistant. Use add/3 when asked for arithmetic."),
-    loop.
-
-loop :-
-    input(A),        % the person's next message; fails when there is none
-    chat(A),         % one turn: tools, then it replies and stops
-    loop.
-
-tool(add(A, B, Result), "Add two numbers.", [number, number]) :-
-    Result is A + B.
+    input("Project name?", Project), Project \== "",
+    system("You are a concise assistant for project {Project}."),
+    conversation.
+conversation :- input(Message), chat(Message), conversation.
+read_text(Path, Text) :- read_file(Path, Text).
+tool(read_text(Path, Text), "Read a workspace text file.", [string]) :- read_text(Path, Text).
 ```
 
-`chat(Message, Reply)` binds the assistant's last message if the harness wants to
-post-process it, and a failed turn is reported without ending the conversation.
-Memory carries the conversation, so each turn sees what was said. A turn may open
-a **form** (§9), which is how structured input fits inside a conversation.
+Test goal: `agent_main`. Expected: `I remember the earlier turn.`.
 
-`next/1` reads the same inbox for **events**: replace `input(A), chat(A)` with a
-`next/1` dispatch, and a worker's message wakes the conversation:
+Failure/cancel check: An empty project fails before chat starts; no custom loop should be added for ordinary conversation.
 
-```prolog
-loop(Me) :- next(Item), handle(Me, Item), loop(Me).
+Fixture `canonical/input.txt` (create before run):
 
-handle(_, user(Text))       :- chat(Text).                       % the person
-handle(_, message(mail(M))) :- system("New email."), chat("Summarise: {M}").
+```text
+hello
 ```
-
-The `message(Term)` comes from `send(Me, mail(M))` in a spawned worker. See
-[`docs/DML_CONVERSATION.md`](../../../../docs/DML_CONVERSATION.md) §5.

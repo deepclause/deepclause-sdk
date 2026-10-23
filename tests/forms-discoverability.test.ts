@@ -22,7 +22,7 @@ import { getAgentPromptAssetPath, getWorkspaceDocAssetPath } from '../src/system
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..');
 const bundledFormsDoc = path.join(repoRoot, 'src', 'system', 'assets', 'docs', 'DML_FORMS.md');
-const sourceFormsDoc = path.join(repoRoot, 'docs', 'DML_FORMS.md');
+const sourceFormsDoc = path.join(repoRoot, 'docs', 'reference', 'DML_FORMS.md');
 const examplesDoc = path.join(repoRoot, 'src', 'system', 'assets', 'docs', 'HARNESS_EXAMPLES.md');
 
 /** Every ```prolog block in a markdown document. */
@@ -48,13 +48,15 @@ describe('the reference tool serves forms', () => {
     await fs.rm(workspace, { recursive: true, force: true });
   });
 
-  it("reference('forms') returns the bundled forms reference", async () => {
-    const text = await repl.session.reference('forms');
-    expect(text.length).toBeGreaterThan(1000);
+  it("reference('forms') exposes an index and copyable API section", async () => {
+    const index = await repl.session.reference('forms');
+    expect(index).toContain('fixed-forms');
+    expect(index).toContain('foreground');
+    const text = await repl.session.reference('forms', { section: 'fixed-forms' });
     expect(text).toContain('form/2');
     expect(text).toContain('await_form');
-    // And it says the feature is on, not that it must be enabled.
-    expect(text).toContain('always available');
+    expect(text).toContain('claim_form(Values)');
+    expect(text).toContain('More: no.');
   });
 
   it('has no capability gate left to teach', async () => {
@@ -82,7 +84,7 @@ describe('the reference tool serves forms', () => {
     const source = await fs.readFile(sourceFormsDoc, 'utf8');
     expect(
       bundled,
-      'src/system/assets/docs/DML_FORMS.md is generated from docs/DML_FORMS.md — run: npm run sync:docs',
+      'src/system/assets/docs/DML_FORMS.md is generated from docs/reference/DML_FORMS.md — run: npm run sync:docs',
     ).toBe(source);
   });
 
@@ -91,7 +93,7 @@ describe('the reference tool serves forms', () => {
     expect(prompt).toContain('form/2');
     expect(prompt).toContain('await_form');
     // The behavioural half teaches forms directly; there is no capability topic.
-    expect(prompt).toContain('reference("forms")');
+    expect(prompt).toContain('`forms`');
     expect(prompt).not.toContain('reference("capabilities")');
     expect(getWorkspaceDocAssetPath('dml-forms').endsWith('DML_FORMS.md')).toBe(true);
   });
@@ -113,7 +115,7 @@ describe('the forms example in HARNESS_EXAMPLES.md', () => {
         onForm: async (form) => {
           sdk!.submitForm(form.formId, {
             action: 'submit',
-            values: { vendor: 'acme', amount: 5, notes: 'lunch' },
+            values: { name: 'Ada', vendor: 'acme', amount: 5, notes: 'lunch' },
           });
         },
       })) {

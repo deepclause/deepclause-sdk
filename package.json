@@ -24,6 +24,7 @@
     }
   },
   "scripts": {
+    "prebuild": "npm run check:agent-prompt && npm run check:docs",
     "build": "tsc && npm run copy:prolog && npm run copy:assets && npm run chmod:bins",
     "chmod:bins": "chmod +x dist/cli/index.js dist/cli/repl-bin.js",
     "copy:prolog": "mkdir -p dist/prolog-src && cp src/prolog-src/*.pl dist/prolog-src/",
@@ -42,7 +43,8 @@
     "sync:agent-prompt": "node scripts/sync-agent-prompt.mjs",
     "check:agent-prompt": "node scripts/sync-agent-prompt.mjs --check",
     "sync:docs": "node scripts/sync-forms-doc.mjs",
-    "check:docs": "node scripts/sync-forms-doc.mjs --check"
+    "check:docs": "node scripts/sync-forms-doc.mjs --check",
+    "eval:authoring": "node scripts/eval-authoring.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.35",

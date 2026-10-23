@@ -1,161 +1,68 @@
-# Common Prolog/DML snippets (tested)
+# Small deterministic Prolog/DML recipes
 
-Tested against the bundled SWI-Prolog. These are **glue**, not the shape of a
-skill: use a snippet to bind or check a value between `task/N` steps, not to
-write a Prolog algorithm. Prefer a `task/N`/`prompt/N` step when the
-transformation is open-ended (`DML_AUTHORING.md` §0).
-`Y` is the output; `>>` introduces a yall lambda.
+Use these for glue, not as a reason to build a large parser or custom algorithm.
+Examples are ordinary goals; bind their inputs first. Consult `basics` for
+unification, modes and side-effect/backtracking rules.
 
 ## Strings
 
-| Task | Snippet | Result |
-|---|---|---|
-| Split on a separator | `split_string("a,b,,c", ",", "", L)` | `[a,b,'',c]` |
-| Join | `atomic_list_concat([a,b,c], "-", S)` | `a-b-c` |
-| Join (strings) | `atomics_to_string([a,b,c], "-", S)` | `a-b-c` |
-| Lower / upper | `string_lower("AbC", L)` / `string_upper("AbC", U)` | `abc` / `ABC` |
-| Atom case | `downcase_atom('ABC', L)` / `upcase_atom('abc', U)` | `abc` / `ABC` |
-| Collapse whitespace | `normalize_space(string(T), "  a   b  ")` | `a b` |
-| Build a string | `format(string(S), "~w/~w", [A, B])` | `a/b` |
-| Run a command with data | `exec(bash(argv: ["python3", Script, Text]), R)` | args quoted by the runtime |
-| Number <-> string | `number_string(42, S)` / `atom_number("42", N)` | `"42"` / `42` |
-| Substring test | `sub_string(S, _, _, _, "needle")` | true |
-| Substring test (atom) | `sub_atom(A, _, _, _, needle)` | true |
-| Concat | `string_concat("a", "b", S)` | `ab` |
-| Char list | `string_chars("abc", L)` | `[a,b,c]` |
-| JSON string -> dict | `atom_json_dict('{"a":[1,2]}', D, []), get_dict(a, D, A)` | `[1,2]` |
-| dict -> JSON string | `atom_json_dict(S, x{a:1}, [])` (`atom_json_dict/3` is bidirectional) | `"{\"a\":1}"` |
-| JSON path | `json_get(D, "results.0.title", T)` / `[results,0,title]` | the nested value |
-| JSON with default | `json_get(D, "results.0.year", "unknown", T)` | default when absent |
-| JSON project | `json_gets(D, "results.*.title", Ts)` / `"a.*.b.*.c"` flattens | list of values |
-| JSON set | `json_put(D, "meta.reviewed", yes, D2)` (keys only, not indices) | updated dict |
-| Parse with a DCG | `string_chars(T, Cs), phrase(grammar(X), Cs)` | binds `X` |
-| Build from a template | `pattern("Name: $name", T, [name="Ada"])` | `"Name: Ada"` |
-| Parse a template | `pattern("Name: $name", "Name: Ada", B)` | `[name="Ada"]` |
-| Parse a typed slot | `pattern("n=$n:int", "n=42", B)` | `[n=42]` |
-
-In `task/`, `output/`, `answer/` description strings, `{Var}` interpolates the
-bound value; in `format/3` use `~w`.
-
-## Regex (SWI PCRE — verified behavior)
-
-| Task | Snippet | Result |
-|---|---|---|
-| Match test | `re_match("^[a-z]+[0-9]+$", S)` | true/false |
-| Match with options | `re_match("(?i)hello", S, [])` | true (case-insensitive) |
-| Capture groups | `re_matchsub("(?<user>[a-z]+)-(?<id>[0-9]+)", S, M, []), get_dict(id, M, Id)` | dict `_{0:..., user:..., id:...}` |
-| Replace (first match) | `re_replace("[0-9]+", "#", "a1b22c333", R)` | `a#b22c333` |
-| Collect every match | `re_foldl([M,Acc,[M|Acc]]>>true, "[0-9]+", "a1b22c333", [], L, []), reverse(L, Ms)` | `[_{0:"1"},_{0:"22"},_{0:"333"}]` |
-
-Notes: `re_replace/4` here replaces only the **first** match — collect all matches
-with `re_foldl/6` (or loop) to replace every one. `re_match/3` takes an options
-list, not a capture variable; use `re_matchsub/4` to capture groups. Prefix a
-pattern with `(?i)` for case-insensitive matching.
-
-## Wildcards (`wildcard_match/2`)
-
-| Pattern | Example | Result |
-|---|---|---|
-| `*` any run | `wildcard_match("*.dml", "skill.dml")` | true |
-| `?` one char | `wildcard_match("a?c", "abc")` | true |
-| `[a-z]` class | `wildcard_match("[a-z]*", "abc")` | true |
-| `{a,b}` alternation | `wildcard_match("{a,b}*", "bzz")` | true |
+- `split_string("a,b,,c", ",", "", Xs)` gives strings including `""`.
+- `atomics_to_string(["a","b"], "-", S)` joins into a string.
+- `string_upper("Ada", U)` / `string_lower/2` change case.
+- `format(string(S), "~w/~d", [name, 2])` builds a string.
+- `number_string(42, S)` / `atom_string(Atom, String)` convert deliberately.
+- `normalize_space(string(T), "  a   b ")` collapses whitespace.
+- `pattern("Name: $name", Text, [name="Ada"])` builds a template;
+  bind Text instead to parse. `$n:int` converts a typed slot; `$$` is a dollar.
 
 ## Lists
 
-| Task | Snippet | Result |
-|---|---|---|
-| Membership | `member(X, [1,2,3])` | enumerates |
-| Concatenate | `append([1,2], [3], L)` | `[1,2,3]` |
-| Length | `length([a,b,c], N)` | `3` |
-| Enumerate range | `numlist(1, 5, L)` | `[1,2,3,4,5]` |
-| Collect | `findall(X, between(1,3,X), L)` | `[1,2,3]` |
-| Map | `maplist([X,Y]>>(Y is X*X), [1,2,3], L)` | `[1,4,9]` |
-| Filter (keep) | `include([X]>>(0 is X mod 2), [1,2,3,4], L)` | `[2,4]` |
-| Filter (drop) | `exclude([X]>>(0 is X mod 2), [1,2,3,4], L)` | `[1,3]` |
-| Fold | `foldl([X,A0,A]>>(A is A0+X), [1,2,3], 0, S)` | `6` |
-| Sum / min / max | `sum_list([1,2,3], S)` / `min_list/2` / `max_list/2` / `max_member/2` | `6` |
-| Aggregate | `aggregate_all(sum(X), member(X,[1,2,3]), S)` | `6` |
-| Count | `aggregate_all(count, between(1,5,_), N)` | `5` |
-| Sort + dedupe | `sort([3,1,2,1], L)` | `[1,2,3]` |
-| Stable sort | `msort([3,1,2], L)` | `[1,2,3]` |
-| Sort by value (pairs) | `sort(2, @>=, [a-1,b-3,c-2], L)` | `[b-3,c-2,a-1]` |
-| Key sort (stable) | `keysort([b-2,a-1,c-2], L)` | `[a-1,b-2,c-2]` |
-| Dedupe | `list_to_set([a,b,a,c], L)` | `[a,b,c]` |
-| Set difference | `subtract([1,2,3,4], [2], L)` | `[1,3,4]` |
-| Intersection / union | `intersection([1,2,3],[2,3,4],L)` / `union([1,2],[2,3],L)` | `[2,3]` / `[1,2,3]` |
-| Partition | `partition([X]>>(0 is X mod 2), [1,2,3,4], E, O)` | `E=[2,4], O=[1,3]` |
-| Index (0-based) | `nth0(1, [a,b,c], E)` | `b` |
-| Last | `last([a,b,c], E)` | `c` |
-| Group by key | `group_pairs_by_key([a-1,a-2,b-3], G)` | `[a-[1,2], b-[3]]` |
+- `member(X, Xs)` enumerates; `memberchk(X, Xs)` commits one match.
+- `findall(X, between(1,3,X), Xs)` gives `[1,2,3]`; empty gives `[]`.
+- `maplist([X,Y]>>(Y is X*2), [1,2,3], Ys)` sequentially maps.
+- `include([X]>>(X > 0), [-1,0,2], Ys)` keeps positives.
+- `exclude(==(""), ["", "a"], Ys)` drops empty strings.
+- `foldl([X,A,B]>>(B is A+X), [1,2,3], 0, N)` gives 6.
+- `sort([2,1,2], Ys)` sorts AND deduplicates; `msort/2` keeps duplicates.
+- `keysort([b-2,a-1], Ys)` stable-sorts pairs by key.
+- `sum_list([1,2,3], N)` gives 6; guard empty lists before min/max.
+- `nth0(1, [a,b,c], X)` gives b; `nth1/3` is one-based.
+- `append/3`, `reverse/2`, `length/2`, `list_to_set/2` are standard glue.
 
-`sort/4`'s first argument is the **argument position** to sort on (here `2` =
-the value in each `Key-Value`), not a sort mode. It addresses arguments of a
-compound, so it does **not** work on dicts — use `predsort/3` for those.
+## Dicts and JSON
 
-More, all verified:
+- `D = _{name:"Ada"}, get_dict(name, D, N)` reads a controlled atom key.
+- `dict_field(D, "Name", N)` tolerates case/separator/key representation changes.
+- `dict_field(D, country, "unknown", C)` supplies a default.
+- `json_get(D, "rows.0.name", N)` reads a path; missing FAILS.
+- `json_get(D, "rows.0.year", "unknown", Y)` supplies a default.
+- `json_gets(D, "rows.*.name", Ns)` projects over lists.
+- `json_put(D, "meta.reviewed", true, D2)` sets a dict-key path.
+- `json_text(D, Text)` writes compact JSON.
+- `atom_json_dict(Text, D, [])` parses bound Text, or writes when Text is unbound.
+- `put_dict(score, D, 9, D2)` updates an immutable dict value.
 
-| Task | Snippet | Result |
-|---|---|---|
-| Reverse | `reverse([1,2,3], L)` | `[3,2,1]` |
-| 1-based index | `nth1(1, [a,b,c], E)` | `a` |
-| Remove one occurrence | `select(b, [a,b,c], L)` | `[a,c]` |
-| Membership, once | `memberchk(b, [a,b,c])` | true (no choice point) |
-| Generate blanks | `length(L, 3)` | `[_,_,_]` |
-| Zip | `pairs_keys_values(P, [a,b], [1,2])` | `[a-1,b-2]` |
-| Unzip | `pairs_keys/2` / `pairs_values/2` | `[a,b]` / `[1,2]` |
-| Keep only integers | `convlist([X,Y]>>(integer(X), Y is X*2), [1,a,3], L)` | `[2,6]` |
-| All of a type | `maplist(integer, [1,2,3])` | true |
-| Map over two lists | `maplist([A,B,C]>>(C is A+B), [1,2], [10,20], L)` | `[11,22]` |
-| Custom sort | `predsort([O,A,B]>>compare(O,A,B), [3,1,2], L)` | `[1,2,3]` |
-| Max by aggregate | `aggregate_all(max(N), member(N,[1,9,3]), M)` | `9` |
-| Drop empty strings | `exclude(==(""), ["",a,""], L)` | `[a]` |
-| Field from dicts | `json_gets(D, "rows.*.name", L)` | the field values |
-| Stable pairs sort | `msort([b-1,a-2,a-1], L)` | `[a-1,a-2,b-1]` |
+## Parsing and regex
 
-## Dicts and data
+Use Python for substantial/format-sensitive parsing. For a small exact template,
+use `pattern/3`. DCGs are supported by load-time expansion; `phrase/2,3` takes a
+LIST, so use `string_codes/2` or the grammar's expected character representation.
+Read `language` before mixing DCG literals, character lists and dcg/basics.
+SWI regex interfaces: `re_match/2` tests, `re_matchsub/4` returns capture dicts.
+`re_replace/4` behavior/options should be checked before assuming global replacement.
+Do not invent list/regex helpers; exact signatures matter.
 
-| Task | Snippet |
-|---|---|
-| Read a field | `D = point{x:1,y:2}, get_dict(x, D, X)` |
-| Model field, any key form | `dict_field(D, "affiliation", A)` — atom or string key, any case, `_`/`-`/space ignored; fails if absent |
-| Model field with default | `dict_field(D, country, "unstated", C)` |
-| Keys | `dict_keys(a{x:1,y:2}, K)` → `[x,y]` |
-| Add/replace a field | `put_dict(score, a{name:"n"}, 9, D2)` |
+## Boundaries
 
-## Numbers and time
-
-| Task | Snippet |
-|---|---|
-| Range (generator) | `between(1, 6, N)` |
-| Random int in range | `random_between(1, 6, N)` |
-| Epoch seconds | `get_time(T)` |
-| Broken-down time | `get_time(T), stamp_date_time(T, DT, local)` |
-| Format a time | `format_time(string(S), "%Y-%m-%d", 1700000000)` → `2023-11-15` |
-
-## Things that bite
-
-- `re_replace/4` replaces only the **first** match (verified); use `re_foldl/6`
-  to collect all matches.
-- `re_match/3` takes an options list; use `re_matchsub/4` for capture groups.
-- `sort/4`'s first argument is the argument position, not a mode.
-- Dict keys must be **atoms**: `get_dict("name", D)` raises
-  `type_error(dict-key, name)` rather than failing, and `x{"a":1}` is a syntax
-  error. Use `dict_field/3,4` for model-produced dicts, whose key spelling varies.
-- `phrase/2` takes a **list**: `phrase(g(X), "text")` raises
-  `type_error(list, "text")`. Convert first with `string_chars/2`.
-- **`setof/3` and `bagof/3` fail on an empty solution set**; `findall/3` gives `[]`.
-- **`sort/2` removes duplicates.** `msort/2` keeps them and is stable.
-- `max_list([])` fails; `sum_list([a,b])` raises a type error. Guard first.
-- **Not available in this build:** `nth0/4` (replace), `numlist/4` (step),
-  `chunk/3`, `rename_keys/3`.
-- A missing `json_get/3` path **fails**; use `json_get/4` for a default.
-- A top-level `:- use_module(library(clpfd)).` is required before `#=`/`ins`.
-- Untrusted data (URLs, file contents, user text) goes through files/stdin,
-  never interpolated into a shell command.
-- `{Var}` interpolates **only** in `task/N`/`prompt/N` descriptions; use
-  `format/3` (`~w`/`~q`/`~s`) everywhere else. A string literal escapes `\n`,
-  `\"`, `\\`; a quoted atom doubles `'` (`'it''s'`).
-- Building a command: single-quote known paths/flags, pass data via files/stdin,
-  never splice untrusted text in. Write foreign code to a file (quoted heredoc
-  `<<'EOF'`) rather than embedding it in a DML string.
+- `get_dict("name", D, N)` is wrong: keys must be atoms.
+- `X is Y+1` requires numeric Y; unification `X=Y+1` does not compute.
+- `setof/3` / `bagof/3` fail for no solutions; findall gives an empty list.
+- `sort/2` removes duplicates; it is not stable-preserve-all sorting.
+- A nondeterministic mapper can multiply solutions and replay effects.
+- `{Var}` interpolation is a loader feature in supported DML text positions;
+  use `format/3` for an arbitrary computed string.
+- Do not guess that nth0/4 or another library helper is present; check it with
+  a pure bounded execute goal. Never try to infer a DML handler's availability
+  only from current_predicate (form/exec handlers are not normal clauses).
+- Host command syntax is NOT Prolog syntax. Read the current tool schema; no
+  shell/stdin assumption belongs in a generic snippet.

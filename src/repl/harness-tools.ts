@@ -8,6 +8,7 @@
 
 import type { DMLEvent, ShellSpec, ShellTool, ShellWorkflow, ToolDefinition } from '../types.js';
 import type { DiagramMode } from '../visualize/index.js';
+import type { ReferenceOptions } from './reference.js';
 
 import type { Pid, ProcessInfo, SpawnOptions } from './processes.js';
 import { pidTermText } from './processes.js';
@@ -101,7 +102,7 @@ export interface HarnessToolController {
   /** Write a workspace file (creates parent directories). */
   writeFile(path: string, content: string): Promise<{ ok: boolean; error?: string }>;
   /** DML reference / authoring guide / examples / snippets. */
-  reference(topic: string): Promise<string>;
+  reference(topic: string, options?: ReferenceOptions): Promise<string>;
   /** The models available in this session (for `with_model/2`). */
   listModels(): Promise<string>;
   /** Start a session-scoped subagent; returns immediately. */
@@ -471,13 +472,22 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
   });
 
   tools.set('reference', {
-    description: 'Read DeepClause language documentation. Topics: "language" (DML reference), "authoring" (authoring guide), "forms" (structured human input), "patterns" (harness patterns by use case), "examples" (harness examples), "snippets" (Prolog snippets), "tools" (host tool catalog).',
+    description: 'Read one focused DML contract before using an unfamiliar feature or after a contract error. With no section, returns an index; section ids select copyable bounded pages. Follow returned offset when More: yes. Topics: index, basics, language, tasks, shell, python, processes, media, forms, authoring, debugging, patterns, examples, snippets, tools (CURRENT host catalog and schemas).',
     parameters: {
       type: 'object',
-      properties: { topic: stringProp('language | authoring | forms | examples | snippets | tools.') },
+      properties: {
+        topic: stringProp('index | basics | language | tasks | shell | python | processes | media | forms | authoring | debugging | patterns | examples | snippets | tools'),
+        section: stringProp('Exact section id from the topic index; do not invent ids.'),
+        query: stringProp('Optional words to search within this topic instead of reading every section.'),
+        offset: { type: 'integer', description: 'Block offset returned by a previous page. Omit for the first page.' },
+      },
       required: ['topic'],
     },
-    execute: async (args) => text(await controller.reference(String(args.topic ?? 'language'))),
+    execute: async (args) => text(await controller.reference(String(args.topic ?? 'index'), {
+      section: typeof args.section === 'string' ? args.section : undefined,
+      query: typeof args.query === 'string' ? args.query : undefined,
+      offset: typeof args.offset === 'number' ? args.offset : undefined,
+    })),
   });
 
   // ---- Session-scoped subagents (spec §9.1) ------------------------------

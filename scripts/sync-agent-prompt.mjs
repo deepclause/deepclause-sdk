@@ -1,57 +1,48 @@
 #!/usr/bin/env node
-/**
- * Keep the authoring agent's prompt in sync with the language reference.
- *
- * `AGENT_PROMPT.md` is the system prompt for the REPL's authoring agent, used
- * verbatim. Its second half is a copy of `DML_REFERENCE.md` so the agent has the
- * language detail in context without a tool call. A hand-maintained copy drifts:
- * five sections added to the reference in one session were missing from the prompt,
- * so the agent was reading a stale language guide while the live one was one
- * `reference("language")` call away.
- *
- * This rewrites the prompt as: the behavioural half, then the reference verbatim.
- * `npm run sync:agent-prompt` fixes drift; tests/authoring-prompt.test.ts fails on
- * it.
- */
+/** Build bounded normal/local profiles and example docs from shared sources. */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CANONICAL_EXAMPLES, examplesMarkdown } from './canonical-examples.mjs';
 
-const here = dirname(fileURLToPath(import.meta.url));
-const docs = join(here, '..', 'src', 'system', 'assets', 'docs');
-const promptPath = join(docs, 'AGENT_PROMPT.md');
-const referencePath = join(docs, 'DML_REFERENCE.md');
-
-/** The appendix marker: the first top-level reference heading. */
-export const APPENDIX_MARKER = '# DML Language Reference\n';
-
-/** The behavioural half of the prompt: everything before the appendix. */
-export function behaviouralPrefix(prompt) {
-  const index = prompt.indexOf(APPENDIX_MARKER);
-  if (index === -1) {
-    throw new Error('AGENT_PROMPT.md does not contain the reference appendix marker');
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const assets = join(root, 'src', 'system', 'assets');
+const docs = join(assets, 'docs');
+export const PROMPT_BUDGETS = { normal: 18000, local: 11000 };
+export function buildAuthoringProfiles(source) {
+  const normal = source.replace(/<!-- local:omit:(?:start|end) -->\n?/g, '').trim() + '\n';
+  const local = source.replace(/<!-- local:omit:start -->[\s\S]*?<!-- local:omit:end -->\n?/g, '').trim()
+    + '\n\nLocal model: call one tool at a time. Read a focused reference section when needed; do not guess unsupported syntax.\n';
+  if (normal.length > PROMPT_BUDGETS.normal || local.length > PROMPT_BUDGETS.local) {
+    throw new Error(`Authoring prompt budget exceeded: normal=${normal.length}, local=${local.length}`);
   }
-  return prompt.slice(0, index);
-}
-
-/** The prompt as it should be: behavioural half + the reference. */
-export function expectedPrompt(prompt, reference) {
-  const prefix = behaviouralPrefix(prompt);
-  const body = reference.replace(/\s*$/, '');
-  return `${prefix}${body}\n`;
-}
-
-const prompt = readFileSync(promptPath, 'utf8');
-const reference = readFileSync(referencePath, 'utf8');
-const expected = expectedPrompt(prompt, reference);
-
-if (process.argv.includes('--check')) {
-  if (prompt !== expected) {
-    console.error('AGENT_PROMPT.md is out of sync with DML_REFERENCE.md — run: npm run sync:agent-prompt');
-    process.exit(1);
+  if (normal.includes('# DML language API') || normal.includes('# DML Language Reference')) {
+    throw new Error('Do not embed the full reference in the system prompt.');
   }
-  console.log('AGENT_PROMPT.md is in sync with DML_REFERENCE.md');
-} else {
-  writeFileSync(promptPath, expected);
-  console.log(`synced AGENT_PROMPT.md (${expected.length} bytes)`);
+  return { normal, local };
+}
+export function generatedDocuments() {
+  const { normal, local } = buildAuthoringProfiles(readFileSync(join(assets, 'authoring-core.md'), 'utf8'));
+  return new Map([
+    ['AGENT_PROMPT.md', normal],
+    ['LOCAL_AGENT_PROMPT.md', local],
+    ['HARNESS_EXAMPLES.md', examplesMarkdown()],
+  ]);
+}
+export function syncPrompts(check = false) {
+  for (const [name, expected] of generatedDocuments()) {
+    const target = join(docs, name);
+    if (check) {
+      let current = '';
+      try { current = readFileSync(target, 'utf8'); } catch { /* show useful drift error */ }
+      if (current !== expected) throw new Error(`${name} is out of sync; run npm run sync:agent-prompt`);
+    } else writeFileSync(target, expected);
+    console.log(`${check ? 'checked' : 'synced'} ${name}: ${expected.length} characters`);
+  }
+  for (const example of CANONICAL_EXAMPLES) {
+    if (!example.requires || !example.goal || !example.expected || !example.failure) throw new Error(`Incomplete example ${example.id}`);
+  }
+}
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  try { syncPrompts(process.argv.includes('--check')); } catch (error) { console.error(error.message); process.exit(1); }
 }

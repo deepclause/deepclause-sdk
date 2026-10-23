@@ -24,6 +24,7 @@ import {
   type ExecutionEnvironment,
 } from '../system/runtime/shell-manager.js';
 import { getWorkspaceDocAssetPath } from '../system/assets/index.js';
+import { REFERENCE_TOPICS, referenceTopic, referenceIndex, renderReference, type ReferenceOptions } from './reference.js';
 import { DMLRunner, toJsValue, type Frame, type InternalRunOptions, type ProcessRequestPayload, type ProcessRequestResult, type RunnerOptions } from '../runner.js';
 import { resolveReplJudgeSelection, type JevJudgeOptions } from './judge.js';
 import { DmlProcessExecutor } from './process-executor.js';
@@ -401,12 +402,7 @@ export class DMLSession {
   private modelCallsThisTurn = 0;
   /** Current budget; grows by maxModelCalls when the user extends it. */
   private modelCallBudget: number;
-  private dmlReference?: string;
-  private dmlAuthoring?: string;
-  private dmlForms?: string;
-  private harnessExamples?: string;
-  private harnessPatterns?: string;
-  private prologSnippets?: string;
+  private referenceDocs = new Map<string, string>();
   private disposed = false;
   /** History recorder; present only when the caller enables it. */
   private history?: HistoryStore;
@@ -1504,63 +1500,6 @@ export class DMLSession {
     await this.persistSessionHarness(this.history?.currentVersion ?? 0);
   }
 
-  /** Load the bundled DML reference once, for inclusion in the meta prompt. */
-  private async loadDmlReference(): Promise<string> {
-    if (this.dmlReference !== undefined) {
-      return this.dmlReference;
-    }
-    try {
-      this.dmlReference = await fs.readFile(getWorkspaceDocAssetPath('dml-reference'), 'utf8');
-    } catch {
-      this.dmlReference = '';
-    }
-    return this.dmlReference;
-  }
-
-  /** Load the curated authoring patterns once, for the meta prompt. */
-  private async loadDmlAuthoring(): Promise<string> {
-    if (this.dmlAuthoring !== undefined) {
-      return this.dmlAuthoring;
-    }
-    try {
-      this.dmlAuthoring = await fs.readFile(getWorkspaceDocAssetPath('dml-authoring'), 'utf8');
-    } catch {
-      this.dmlAuthoring = '';
-    }
-    return this.dmlAuthoring;
-  }
-
-  /** Load a bundled doc asset once (cached by field). */
-  private async loadDocAsset(
-    name: 'harness-examples' | 'harness-patterns' | 'prolog-snippets' | 'dml-forms',
-  ): Promise<string> {
-    if (name === 'dml-forms') {
-      if (this.dmlForms !== undefined) return this.dmlForms;
-      try {
-        this.dmlForms = await fs.readFile(getWorkspaceDocAssetPath('dml-forms'), 'utf8');
-      } catch {
-        this.dmlForms = '';
-      }
-      return this.dmlForms;
-    }
-    const cached = name === 'harness-examples'
-      ? this.harnessExamples
-      : name === 'harness-patterns'
-        ? this.harnessPatterns
-        : this.prologSnippets;
-    if (cached !== undefined) return cached;
-    let text = '';
-    try {
-      text = await fs.readFile(getWorkspaceDocAssetPath(name), 'utf8');
-    } catch {
-      text = '';
-    }
-    if (name === 'harness-examples') this.harnessExamples = text;
-    else if (name === 'harness-patterns') this.harnessPatterns = text;
-    else this.prologSnippets = text;
-    return text;
-  }
-
   /** Predicates replaced by the most recent successful commit ("name/arity, …"). */
   private lastCommitPredicates(): string {
     const result = this.prologQuery(
@@ -2487,28 +2426,24 @@ export class DMLSession {
     return this.editResult(plainValue(result?.Result));
   }
 
-  async reference(topic: string): Promise<string> {
-    switch (topic.trim().toLowerCase()) {
-      case 'language':
-      case 'dml':
-        return this.loadDmlReference();
-      case 'authoring':
-        return this.loadDmlAuthoring();
-      case 'examples':
-        return this.loadDocAsset('harness-examples');
-      case 'patterns':
-      case 'harness-patterns':
-        return this.loadDocAsset('harness-patterns');
-      case 'snippets':
-        return this.loadDocAsset('prolog-snippets');
-      case 'forms':
-      case 'dml-forms':
-        return this.loadDocAsset('dml-forms');
-      case 'tools':
-        return this.hostToolsCatalog ?? '(no host capability tools registered)';
-      default:
-        return `unknown reference topic '${topic}'. Topics: language, authoring, examples, patterns, snippets, forms, tools.`;
+  async reference(topic: string, options: ReferenceOptions = {}): Promise<string> {
+    const key = referenceTopic(topic);
+    if (key === 'index') return referenceIndex();
+    if (key === 'tools') {
+      const catalog = this.hostToolsCatalog ?? '(no host capability tools registered)';
+      const schemas = [...this.tools].map(([name, tool]) =>
+        `## ${name}\n${tool.description}\n\nParameters (source of truth):\n\n\`\`\`json\n${JSON.stringify(tool.parameters, null, 2)}\n\`\`\``);
+      return renderReference(key, `# Current host tools\n${catalog}\n\n${schemas.join('\n\n')}`, options);
     }
+    const entry = REFERENCE_TOPICS.find((item) => item.topic === key);
+    if (!entry) throw new Error(`Unknown reference topic '${topic}'.\n${referenceIndex()}`);
+    let markdown = this.referenceDocs.get(key);
+    if (markdown === undefined) {
+      markdown = await fs.readFile(getWorkspaceDocAssetPath(entry.asset), 'utf8');
+      if (!markdown.trim()) throw new Error(`Reference '${key}' is empty or unavailable.`);
+      this.referenceDocs.set(key, markdown);
+    }
+    return renderReference(key, markdown, options);
   }
 
   async execute(

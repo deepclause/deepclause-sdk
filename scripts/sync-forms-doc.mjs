@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * Keep the bundled forms reference identical to the design doc.
+ * Keep the bundled forms reference identical to the author-facing API doc.
  *
- * `docs/DML_FORMS.md` is the source of truth. The `reference` tool can only serve
+ * `docs/reference/DML_FORMS.md` is the author-facing source of truth.
+ * `docs/DML_FORMS.md` remains an implementation/design history, not runtime instructions. The `reference` tool can only serve
  * files under `src/system/assets/docs/` — those are what `copy:assets` ships — so
  * the doc is copied there. A copy drifts: this repo already had one reference
  * file that fell six sections behind the prompt that was supposed to mirror it.
@@ -15,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
-const source = join(root, 'docs', 'DML_FORMS.md');
+const source = join(root, 'docs', 'reference', 'DML_FORMS.md');
 const target = join(root, 'src', 'system', 'assets', 'docs', 'DML_FORMS.md');
 
 const content = readFileSync(source, 'utf8');
