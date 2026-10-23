@@ -83,6 +83,15 @@ export interface HarnessToolController {
     /** Optional wall-clock bound for host-integrated execute workers (ms). */
     timeoutMs?: number,
   ): Promise<HarnessExecuteResult>;
+  /** Run a workflow goal in the top-level session so forms/input are available. */
+  executeForeground(
+    goal: string,
+    limit?: number,
+    signal?: AbortSignal,
+    onEvent?: (event: DMLEvent) => void,
+    bindingMode?: BindingMode,
+    timeoutMs?: number,
+  ): Promise<HarnessExecuteResult>;
   /** ASCII diagram of a skill and its sub-agent/tool calls. */
   visualize(entry?: string, mode?: DiagramMode): Promise<{ message: string; event?: DMLEvent }>;
   /** Display a workspace image in the terminal. */
@@ -243,7 +252,7 @@ export function createWorkAgentTools(controller: HarnessToolController): Map<str
       description: tool.description || `Run ${usageLine(tool)}`,
       parameters: toolParameters(tool),
       execute: async (args, context) => {
-        const result = await controller.execute(
+        const result = await controller.executeForeground(
           workGoal(tool, args),
           1,
           context?.signal,
@@ -276,7 +285,7 @@ export function createWorkAgentTools(controller: HarnessToolController): Map<str
         const workflow = shell.workflows.find((entry) => entry.name === name);
         if (!workflow) return { ok: false, error: `unknown workflow: ${name}` };
         const values = (args.inputs && typeof args.inputs === 'object' ? args.inputs : {}) as Record<string, unknown>;
-        const result = await controller.execute(
+        const result = await controller.executeForeground(
           workGoal(workflow, values),
           1,
           context?.signal,

@@ -36,6 +36,12 @@ function controller(): HarnessToolController {
       output: '',
       elapsedMs: 1,
     }),
+    executeForeground: async () => ({
+      bindings: [{ name: 'Out1', value: 'result' }],
+      solutions: [[{ name: 'Out1', value: 'result' }]],
+      output: '',
+      elapsedMs: 1,
+    }),
     showImage: async () => ({ message: 'image' }),
   } as unknown as HarnessToolController
 }

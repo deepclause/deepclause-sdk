@@ -2523,6 +2523,22 @@ export class DMLSession {
   }
 
   /**
+   * Run a workflow goal in the top-level session rather than the disposable
+   * `execute` child. Forms and host input are owned by this session and are
+   * therefore available while the workflow is running.
+   */
+  async executeForeground(
+    goal: string,
+    limit?: number,
+    signal?: AbortSignal,
+    onEvent?: (event: DMLEvent) => void,
+    bindingMode: BindingMode = 'full',
+    _timeoutMs?: number,
+  ): Promise<HarnessExecuteResult> {
+    return this.executeGoal(goal, limit ?? 5, onEvent, signal, bindingMode);
+  }
+
+  /**
    * Prompt mode: English request -> meta task -> DML -> commit -> entry run.
    *
    * The meta task runs in a `meta` frame with exactly the host meta tools.
