@@ -245,8 +245,11 @@ text-only — never attach media to them.
   reminder if it is already open. Do not call it again before every edit.
 - `define` is the only edit operation for predicates: it replaces the complete
   clause set in written order, including `doc/2` and other annotation facts.
-- `delete` removes a whole predicate. To remove one clause, `define` the
-  predicate again with the complete remaining clause set.
+- `delete` removes a whole predicate, a `tool:Name` annotation, or one keyed
+  annotation (`doc:Name/Arity`, `schema:Name`, `script_file:Name`). To remove
+  one clause, `define` the predicate again with the complete remaining clause
+  set. Script link names are a separate namespace from predicates: never reuse
+  a predicate name as a `script_file/2` link.
 - Clause order matters: base case before a recursive rule.
 - Verify after changing a predicate: `listing(Name/Arity)`.
 - Bounded iteration only: finite recursion or an explicit bound. `execute` is

@@ -2443,6 +2443,8 @@ export class DMLSession {
   async deletePredicate(nameArity: string): Promise<{ ok: boolean; error?: string }> {
     const closed = this.requireTransaction();
     if (closed) return closed;
+    const quoteAtom = (name: string): string =>
+      /^[a-z][A-Za-z0-9_]*$/.test(name) ? name : `'${name.replace(/'/g, "''")}'`;
     // `tool:name` (optionally `tool:name/arity`) removes one tool annotation and
     // its implementation, and leaves the delegate predicate in place.
     const toolMatch = /^\s*tool\s*:\s*([a-z][A-Za-z0-9_]*)\s*(?:\/\s*\d+\s*)?$/.exec(nameArity);
@@ -2452,14 +2454,35 @@ export class DMLSession {
       );
       return this.editResult(plainValue(result?.Result));
     }
+    // Keyed annotations: delete exactly one entry, leaving all other keys.
+    const docMatch = /^\s*doc\s*:\s*([^\s/]+)\s*\/\s*(\d+)\s*$/.exec(nameArity);
+    if (docMatch) {
+      const result = this.prologQuery(
+        `deepclause_mi:repl_delete_doc('${this.sessionId}', ${quoteAtom(docMatch[1])}, ${Number(docMatch[2])}, Result)`
+      );
+      return this.editResult(plainValue(result?.Result));
+    }
+    const schemaMatch = /^\s*schema\s*:\s*([^\s]+)\s*$/.exec(nameArity);
+    if (schemaMatch) {
+      const result = this.prologQuery(
+        `deepclause_mi:repl_delete_schema('${this.sessionId}', ${quoteAtom(schemaMatch[1])}, Result)`
+      );
+      return this.editResult(plainValue(result?.Result));
+    }
+    const scriptMatch = /^\s*script_file\s*:\s*([^\s]+)\s*$/.exec(nameArity);
+    if (scriptMatch) {
+      const result = this.prologQuery(
+        `deepclause_mi:repl_delete_script('${this.sessionId}', ${quoteAtom(scriptMatch[1])}, Result)`
+      );
+      return this.editResult(plainValue(result?.Result));
+    }
     const match = /^\s*([^\s/]+)\s*\/\s*(\d+)\s*$/.exec(nameArity);
     if (!match) {
-      return { ok: false, error: `expected Name/Arity or tool:Name, got '${nameArity}'` };
+      return { ok: false, error: `expected Name/Arity, tool:Name, doc:Name/Arity, schema:Name or script_file:Name; got '${nameArity}'` };
     }
     const [, name, arityText] = match;
-    const atom = /^[a-z][A-Za-z0-9_]*$/.test(name) ? name : `'${name.replace(/'/g, "''")}'`;
     const result = this.prologQuery(
-      `deepclause_mi:repl_delete_predicate('${this.sessionId}', ${atom}, ${Number(arityText)}, Result)`
+      `deepclause_mi:repl_delete_predicate('${this.sessionId}', ${quoteAtom(name)}, ${Number(arityText)}, Result)`
     );
     return this.editResult(plainValue(result?.Result));
   }

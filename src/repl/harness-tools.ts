@@ -356,7 +356,7 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
   });
 
   tools.set('delete', {
-    description: 'Delete a predicate entirely (abolishes all its clauses), e.g. delete("describe_image/2"), or one tool annotation with delete("tool:describe_image/2"). Requires an open transaction (call begin_turn first).',
+    description: 'Delete a predicate entirely (abolishes all its clauses), e.g. delete("describe_image/2"); a tool annotation with delete("tool:describe_image/2"); or one keyed annotation with delete("doc:describe_image/2"), delete("schema:Name"), or delete("script_file:Name"). Requires an open transaction (call begin_turn first).',
     parameters: {
       type: 'object',
       properties: { predicate: stringProp('The predicate indicator to delete, e.g. "describe_image/2".') },

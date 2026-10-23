@@ -105,7 +105,9 @@ A module is a set of Prolog clauses plus annotations:
   to the nested agent that runs inside `task/N` (see below).
 - `script_file(Name, Path)` — links a workspace file to the module (bundled on
   export). It has no runtime semantics of its own; run the file with
-  `run_script(Name, Args, Value)` (or the host's `exec` tool).
+  `run_script(Name, Args, Value)` (or the host's `exec` tool). Link names are a
+  separate namespace: never reuse a predicate name as a script link; prefer
+  `_py`/`script_` names.
 
 # Inputs are arguments
 
@@ -216,10 +218,11 @@ Editing is a **transaction**:
 - `begin_turn` — open a transaction (snapshot the module). **Required before any
   edit.**
 - `define(head, clauses)` — replace the predicate(s) the clause block defines.
-- `delete("Name/Arity")` — remove a whole predicate. This is the only removal
-  operation: to remove one clause, define the predicate again with the complete
-  remaining clause set. `delete("tool:Name/Arity")` removes a tool annotation
-  and leaves its delegate predicate.
+- `delete("Name/Arity")` — remove a whole predicate. To remove one clause,
+  define the predicate again with the complete remaining clause set.
+  `delete("tool:Name/Arity")` removes a tool annotation and leaves its delegate.
+  `delete("doc:Name/Arity")`, `delete("schema:Name")` and
+  `delete("script_file:Name")` remove exactly one keyed annotation entry.
 - `end_turn` — validate and commit the change (records a version). It also
   probes the predicates you changed and returns a `warnings` list (shown as `⚠`)
   when a helper looks nondeterministic — e.g. yields many solutions on fresh
@@ -248,10 +251,13 @@ define("doc(fs_write/3, _)", "doc(fs_write/3, \"Create or overwrite a file.\")."
 - The block must define the target head; `define` replaces the complete clause
   set for that target. Keyed annotations are merged by key, so defining one
   `doc/2` entry keeps the other doc entries.
-- `delete` removes whole predicates or `tool:Name` annotations; it does not
-  remove an individual keyed `doc/2` entry. Write documentation only after the
-  predicate arity is final, and replace the exact key with `define` rather than
-  creating a stale key.
+- `delete` removes whole predicates, `tool:Name` annotations, or one keyed
+  entry with `doc:Name/Arity`, `schema:Name` or `script_file:Name`. Write
+  documentation only after the predicate arity is final; replace the exact key
+  with `define` or remove it with `delete` rather than leaving a stale key.
+- **Script link names are a separate namespace.** Do not reuse a predicate name
+  as a `script_file/2` link. Prefer a distinct link such as `run_tests_py` or
+  `script_run_tests`; a collision is rejected.
 - **Renaming by arity needs two edits.** A predicate is `name/arity`, so
   `define("web_sources/2", …)` while `web_sources/3` exists *adds* `/2` and leaves
   `/3` behind — a second predicate. `define` only replaces the arities its clause
@@ -831,7 +837,9 @@ schema(score, [field(title, string, required),
 `listing` prints the clause as you wrote it, with your variable names and the
 `schema(...)` wrapper; `listing("scripts")` lists `script_file/2` links.
 `doc/2`, `schema/2` and `script_file/2` are keyed annotations, not skills — they
-are not shown as predicates and cannot be deleted whole.
+are not shown as predicates. Remove one entry with
+`delete("doc:Name/Arity")`, `delete("schema:Name")` or
+`delete("script_file:Name")`; do not reuse a predicate name as a script link.
 
 # Declared output shapes
 

@@ -58,6 +58,10 @@
     repl_retract/3,
     repl_define/4,
     repl_delete_predicate/4,
+    repl_delete_doc/4,
+    repl_delete_schema/3,
+    repl_delete_script/3,
+    repl_delete_annotation_entry/4,
     repl_edit_touched/2,
     repl_edit_touched_text/2,
     repl_edit_touched_clear/1,
@@ -645,6 +649,49 @@ var_to_name(Bindings, Var, Name) :-
     ;   Name = 'Var'  % Fallback if not found
     ).
 
+repl_script_predicate_conflict(SessionId, Name) :-
+    current_predicate(SessionId:script_file/2),
+    SessionId:script_file(Name, _),
+    current_predicate(SessionId:Name/Arity),
+    repl_user_predicate(SessionId, Name, Arity).
+
+repl_reject_existing_predicate_for_script(SessionId, Name) :-
+    (   current_predicate(SessionId:Name/Arity),
+        repl_user_predicate(SessionId, Name, Arity)
+    ->  format(atom(Message),
+            '~w is already a predicate. Rename the predicate or use a distinct script link name (for example ~w_py); script link names and predicate names must not overlap.',
+            [Name, Name]),
+        throw(error(permission_error(modify, script_predicate_collision, Name),
+                    context(script_file/2, Message)))
+    ;   true
+    ).
+
+repl_reject_script_predicate_collision(SessionId, Name, Where) :-
+    (   repl_script_predicate_conflict(SessionId, Name)
+    ->  format(atom(Message),
+            '~w is already a script_file/2 link name. Rename the link (for example ~w_py) or rename the predicate; script link names and predicate names must not overlap.',
+            [Name, Name]),
+        throw(error(permission_error(modify, script_predicate_collision, Name),
+                    context(Where, Message)))
+    ;   true
+    ).
+
+repl_check_script_name_for_head(SessionId, Head) :-
+    (   catch(repl_head_of(Head, H), _, fail),
+        callable(H),
+        functor(H, Name, _Arity)
+    ->  (   current_predicate(SessionId:script_file/2),
+            SessionId:script_file(Name, _)
+        ->  format(atom(Message),
+                '~w is already a script_file/2 link name. Rename the link (for example ~w_py) or rename the predicate; script link names and predicate names must not overlap.',
+                [Name, Name]),
+            throw(error(permission_error(modify, script_predicate_collision, Name),
+                        context(process_clause/2, Message)))
+        ;   true
+        )
+    ;   true
+    ).
+
 %% process_clause(+Term, +SessionId)
 %% Process a single clause and add to session.
 %% Reject reserved-name definitions (third place of the reserved guard, so
@@ -712,6 +759,7 @@ process_clause(tool(_, _, _), _SessionId) :-
 %% live while the export carried the new one. Replacing is `define`'s job, whose
 %% block may carry the tool clause next to the predicate.
 repl_register_tool(SessionId, ToolHead, Description, Types, Body, Names) :-
+    repl_check_script_name_for_head(SessionId, ToolHead),
     ToolHead =.. [ToolName|ToolArgs],
     length(ToolArgs, Arity),
     (   session_user_tools(SessionId, ToolName)
@@ -744,12 +792,25 @@ repl_register_tool(SessionId, ToolHead, Description, Types, Body, Names) :-
 
 process_clause((Head :- Body), SessionId) :-
     !,
+    repl_check_script_name_for_head(SessionId, Head),
     % Expand dict dot-notation (Dict.Key → get_dict), then assert
     (   catch(expand_dict_dots(Body, ExpandedBody), _, fail)
     ->  true
     ;   ExpandedBody = Body
     ),
     assertz(SessionId:(Head :- ExpandedBody)).
+
+%% A script link is a keyed annotation, not a predicate. Refuse a name that is
+%% already a user predicate; a later predicate definition checks the reverse in
+%% process_clause and repl_register_tool.
+process_clause(script_file(Name, Path), SessionId) :-
+    !,
+    (   atom(Name)
+    ->  true
+    ;   throw(error(type_error(atom, Name), context(script_file/2, 'the link name must be an atom')))
+    ),
+    repl_reject_existing_predicate_for_script(SessionId, Name),
+    assertz(SessionId:script_file(Name, Path)).
 
 %% repl_delete/1 is a load-time directive that removes a predicate. It must
 %% be handled before the generic fact clause so it is never asserted itself.
@@ -762,6 +823,7 @@ process_clause(repl_delete(Name/Arity), SessionId) :-
 
 process_clause(Fact, SessionId) :-
     % Simple fact
+    repl_check_script_name_for_head(SessionId, Fact),
     assertz(SessionId:Fact).
 
 %% ============================================================
@@ -2908,6 +2970,56 @@ repl_delete_predicate(SessionId, Name, Arity, Result) :-
         format(atom(Result), 'error(~w)', [DeleteError])
     ).
 
+%% repl_delete_doc(+SessionId, +Name, +Arity, -Result)
+%% Remove one keyed doc/2 entry, leaving every other doc entry alone.
+repl_delete_doc(SessionId, Name, Arity, Result) :-
+    catch(
+        (   guard_not_frozen(SessionId),
+            integer(Arity),
+            Key = Name/Arity,
+            repl_delete_annotation_entry(SessionId, doc, Key, Result)
+        ),
+        DeleteError,
+        format(atom(Result), 'error(~w)', [DeleteError])
+    ).
+
+%% repl_delete_schema(+SessionId, +Key, -Result)
+%% Remove one keyed schema/2 entry.
+repl_delete_schema(SessionId, Key, Result) :-
+    catch(
+        (   guard_not_frozen(SessionId),
+            atom(Key),
+            repl_delete_annotation_entry(SessionId, schema, Key, Result)
+        ),
+        DeleteError,
+        format(atom(Result), 'error(~w)', [DeleteError])
+    ).
+
+%% repl_delete_script(+SessionId, +Key, -Result)
+%% Remove one keyed script_file/2 link.
+repl_delete_script(SessionId, Key, Result) :-
+    catch(
+        (   guard_not_frozen(SessionId),
+            atom(Key),
+            repl_delete_annotation_entry(SessionId, script_file, Key, Result)
+        ),
+        DeleteError,
+        format(atom(Result), 'error(~w)', [DeleteError])
+    ).
+
+repl_delete_annotation_entry(SessionId, Kind, Key, Result) :-
+    functor(Template, Kind, 2),
+    arg(1, Template, Key),
+    (   current_predicate(SessionId:Kind/2),
+        clause(SessionId:Template, _)
+    ->  retractall(SessionId:Template),
+        format(atom(Result), 'ok(removed ~w(~w))', [Kind, Key])
+    ;   format(atom(Annotation), '~w(~w)', [Kind, Key]),
+        throw(error(existence_error(annotation, Annotation),
+                context(repl_delete_annotation_entry/4,
+                    'no such keyed annotation entry; check the key exactly')))
+    ).
+
 %% repl_delete_tool(+SessionId, +ToolName, -Result)
 %% `delete("tool:name/arity")`. Removes the annotation and its implementation,
 %% and leaves the delegate predicate alone — that is a skill in its own right.
@@ -2946,6 +3058,8 @@ repl_define(SessionId, HeadPatternText, ClausesText, Result) :-
                 ( member(Term, Terms), repl_term_indicator(Term, Name/Arity) ),
                 BlockIndicators0),
             sort(BlockIndicators0, BlockIndicators),
+            forall(member(Term, Terms), repl_check_script_name_for_head(SessionId, Term)),
+            repl_reject_script_predicate_collision(SessionId, HeadName, repl_define/4),
             % The head names the predicate being replaced. If it is not one of
             % them the target is almost certainly a typo, and silently replacing
             % a *different* predicate is worse than refusing.
