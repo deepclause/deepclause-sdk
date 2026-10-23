@@ -188,6 +188,27 @@ for line in p.read_text().splitlines()[-60:]:
 Only an authoring REPL session writes these files; a one-shot runner does not.
 The log contains prompts and tool arguments, so treat it as workspace data.
 
+# Python host tool (`exec(python(...))`)
+
+There is no shell. Call Python only through the host tool:
+`exec(python(code: "..."), Result)` or
+`exec(python(script: "scripts/foo.py", argv: [...]), Result)`.
+
+- Supported options are `code`, `script`, `argv`, `timeoutMs` and `packages`.
+  **There is no standard-input option.** Pass data through `argv` or a workspace file.
+- `script` is a workspace-relative or `/workspace/...` path and takes precedence
+  over `code`. The working directory is `/workspace`; do not hardcode host paths.
+- DML’s `/tmp` is not Python’s `/tmp`. If DML must hand bytes to Python, stage
+  them under `/workspace/.staging/` (or another workspace path), pass that path
+  in `argv`, and clean it up afterwards.
+- The result is a dict; read it with `get_dict(exitCode, R, Code)`,
+  `get_dict(stdout, R, Out)` and `get_dict(stderr, R, Err)`.
+- Do not call `sys.exit()` inside a Pyodide script; it can appear as a failed
+  run with a traceback. Return normally and print a JSON result (including any
+  status you need).
+- For nontrivial Python use a `script_file`/workspace `.py` file rather than a
+  heavily escaped `code` string.
+
 # Modify the module
 
 Editing is a **transaction**:
@@ -197,7 +218,8 @@ Editing is a **transaction**:
 - `define(head, clauses)` — replace the predicate(s) the clause block defines.
 - `delete("Name/Arity")` — remove a whole predicate. This is the only removal
   operation: to remove one clause, define the predicate again with the complete
-  remaining clause set.
+  remaining clause set. `delete("tool:Name/Arity")` removes a tool annotation
+  and leaves its delegate predicate.
 - `end_turn` — validate and commit the change (records a version). It also
   probes the predicates you changed and returns a `warnings` list (shown as `⚠`)
   when a helper looks nondeterministic — e.g. yields many solutions on fresh
@@ -208,6 +230,28 @@ Editing is a **transaction**:
   per-call results above it) or the block was identical. `changed` is
   `+f/1` added, `-f/1` removed, `~f/1` rewritten in place; an arity change shows
   as one `+` and one `-`.
+
+### `define` targets and keyed annotations
+
+`head` is the predicate head/indicator being replaced, not a key or a bare
+predicate name:
+
+```text
+define("fs_write/3", "fs_write(Path, Content, Result) :- ... .")
+define("doc(fs_write/3, _)", "doc(fs_write/3, \"Create or overwrite a file.\").")
+```
+
+- For an ordinary predicate, use `"Name/Arity"` (or a matching head pattern).
+- For `doc/2`, `schema/2` and `script_file/2`, include the **second argument** in
+  the head: `doc(Name/Arity, _)`, not `doc(Name/Arity)` (which is `doc/1` and
+  will be rejected).
+- The block must define the target head; `define` replaces the complete clause
+  set for that target. Keyed annotations are merged by key, so defining one
+  `doc/2` entry keeps the other doc entries.
+- `delete` removes whole predicates or `tool:Name` annotations; it does not
+  remove an individual keyed `doc/2` entry. Write documentation only after the
+  predicate arity is final, and replace the exact key with `define` rather than
+  creating a stale key.
 - **Renaming by arity needs two edits.** A predicate is `name/arity`, so
   `define("web_sources/2", …)` while `web_sources/3` exists *adds* `/2` and leaves
   `/3` behind — a second predicate. `define` only replaces the arities its clause
@@ -512,15 +556,29 @@ Before building the shell, ask one clear question:
 
 If the request is a recurring procedure with fixed inputs, use a **workflow-only** shell instead. Do not guess; ask.
 
+## Conversation surface: shell first
+
+For an ordinary conversational agent, use `shell/1` with `kind: agent` and declare
+its tools/workflows. **Do not add a DML `input/1` → `chat/1` loop just to make the
+harness conversational.** Work already supplies the chat surface, transcript,
+cancellation and model loop.
+
+Use a custom `input/1` → `chat/1` loop only when the user explicitly needs custom
+conversation logic that the Work shell cannot express: staged data intake with
+validation between turns, a required multi-step protocol, per-turn persistent
+state, or special routing. A plain “conversational agent with tools” is a shell,
+not a hand-written chat loop.
+
 ## Workflows or tools?
 
 Decide this before adding the shell:
 
 - **Workflow** — a recurring, user-triggered task with a prescribed outcome and typed inputs. Examples: summarise a document, triage a ticket, prepare a weekly report. A workflow may mix deterministic DML with `prompt/N`, `task/N`, `llm/N`, forms, tool calls and nested agent loops. Keep the list focused on real recurring tasks (usually 2–5); arguments are the inputs users provide each time.
-- **Tool-like predicate** — a smaller reusable operation the Work assistant composes through `execute`: lookup, normalize, validate, send, parse, calculate. Do **not** expose every helper as a workflow. Mention tool predicates in `shell.system` with their name/arity, argument shapes and when to use them. The Work assistant receives the generic shell guide automatically; the system prompt supplies the harness-specific tool map.
+- **Tool** — an agent-facing typed capability declared in `shell.tools` with a `description`, `inputs` and `outputs`; the Work assistant calls it directly. Use tools for composable operations (lookup, normalize, validate, send, parse, calculate), not as user-facing workflows. Do not expose every helper.
+- `tool/2` is a different mechanism: it exposes a predicate to a **nested agent inside `task/N`**. Do not confuse it with `shell.tools`, which drives the Work agent. A predicate can be both when both surfaces need it.
 - Leave internal helpers, `doc/N`, `schema/N`, capability records and form plumbing out of the workflow list.
 
-Python is always a host tool, never a shell: call `exec(python(code: "..."), Result)` or `exec(python(script: "scripts/foo.py", argv: [...]), Result)`. Mention Python in the shell system prompt when the harness does computation, files or network work.
+Python remains a DML host tool for the **authoring agent** and harness code through `exec(python(...))`; it is not a Work-agent tool unless a shell tool wraps it.
 
 For complex DML, use the documentation tools rather than guessing:
 `reference("language")`, `reference("authoring")`, `reference("forms")`,
