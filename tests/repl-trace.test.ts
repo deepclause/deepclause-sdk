@@ -55,6 +55,13 @@ describe('full MI execution trace', () => {
     await expect(repl!.session.trace()).resolves.toEqual([]);
   });
 
+  it('clears the trace on request', async () => {
+    await run('leaf(1)');
+    expect((await repl!.session.trace()).length).toBeGreaterThan(0);
+    await repl!.session.clearTrace();
+    await expect(repl!.session.trace()).resolves.toEqual([]);
+  });
+
   it('keeps trace entries across turns', async () => {
     await run('leaf(1)');
     const first = await repl!.session.trace();
