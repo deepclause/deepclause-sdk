@@ -1,7 +1,7 @@
 # The DML REPL
 
-`deepclause repl` is an interactive session that starts with a blank in-memory
-DML module and lets you grow a *living harness* — either by running DML goals
+`deepclause repl` opens the workspace's current harness (blank for a new slot)
+and lets you grow a *living harness* — either by running DML goals
 directly or by describing what you want in plain English and letting the model
 write the DML.
 
@@ -26,7 +26,27 @@ deepclause repl
 
 `deepclause-repl` is a thin alias for `deepclause repl`.
 
+## Develop and Work
+
+Develop is the default authoring conversation. Work is a separate, restricted
+conversation over a declared `shell/1`, shared with the web Work UI:
+
+```bash
+deepclause repl --mode work --harness example
+deepclause repl --mode work --harness example --workflow "Summarise text" --inputs '{"Text":"hello"}' --json
+```
+
+`/mode` opens the TUI mode/harness chooser; `/workflows` chooses a task;
+`/workflow "Name" {"Input":"value"}` runs that exact task; `/details` toggles
+technical events. Work never guesses workflows from internal predicates, and
+manual starts do not ask an assistant to decide what to run. Work and Develop
+retain separate conversation memory and persisted identity. See
+[Work mode](./WORK_MODE.md) for types, migration, snapshots and embedding APIs.
+
 ## Two input modes
+
+The following input classification applies to **Develop**. Work conversation uses
+its declared agent/tools; a workflow-only shell uses its workflow picker.
 
 The classifier is intentionally trivial and unambiguous. **Slash commands** are
 the primary surface; the bare forms (`goal:`, `listing.`, …) remain for

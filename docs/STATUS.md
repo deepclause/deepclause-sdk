@@ -15,6 +15,24 @@ A snapshot of what DeepClause SDK is today.
 CLI commands: `init`, `login`, `logout`, `set-backend`, `set-model`, `show-model`,
 `list-models`, `image-models`, `run`, `repl`, `visualize`.
 
+## Shared Work mode (TUI + web)
+
+- `repl --mode work --harness NAME`, `/mode`, `/workflows`, `/workflow` and
+  `/details` provide Work in the TUI. Develop remains the default.
+- Both hosts use SDK shell validation, prompt/tool policy, safe argument codecs,
+  typed outputs and deterministic manual workflow starts. No shell means no
+  automatic predicate export. Complex Work boundary types are rejected explicitly.
+- Purpose/harness/title/snapshot and workflow results persist in SDK history.
+  Running Work keeps its snapshot; browser workflow-only runs are durable sessions.
+- Foreground form/input cancellation cleans up owned resources; browser proxies
+  propagate cancellation to model, MCP and human requests. Historical events share
+  a decoder and do not reopen old forms.
+- Builds stamp source/artifact identity; web sync and worker startup check compatibility.
+  See [Work mode](./WORK_MODE.md) and [reconciliation status](./TUI_WEB_RECONCILIATION.md).
+- Rich terminal Shell editing, multiple live terminal conversations, richer
+  workspace-transfer UX and background-worker forms remain later work. These
+  changes are local/unreleased until an explicit coordinated release.
+
 ## Runtime
 
 - **Engine**: SWI-Prolog compiled to WebAssembly (`vendor/swipl-wasm`, loaded via
@@ -32,7 +50,7 @@ CLI commands: `init`, `login`, `logout`, `set-backend`, `set-model`, `show-model
 
 - **Author mode** (plain English): a TypeScript authoring agent writes, tests,
   and commits DML through harness tools
-  (`begin_turn`/`end_turn`/`rollback`/`listing`/`define`/`assert`/`retract`/
+  (`begin_turn`/`end_turn`/`rollback`/`listing`/`define`/
   `delete`/`execute`/`reference`/`models`/`write_file`/`show_image`/
   `generate_image`/`visualize`), and can run several
   committed turns in one request.
@@ -46,7 +64,8 @@ CLI commands: `init`, `login`, `logout`, `set-backend`, `set-model`, `show-model
   [`DML_REPL_SUSPEND_RESUME.md`](./DML_REPL_SUSPEND_RESUME.md) §7–§10.
 - **Forms**: a harness asks the human a **structured question** and acts on the
   answer. Always available — no directive, no `use_module`. `form/2` renders,
-  `await_form/2` blocks until the user acts (`submit`/`cancel`/`invalid`), the
+  `await_form/2` blocks until a valid submit or cancellation (invalid submits are
+  re-presented by the host), the
   **host** enforces the spec (`required`/`enum`/ranges) and the harness's
   `form_validate/2` on submit, and `form_update/2`/`form_errors/2` re-render. The
   model-facing tools (`render_form`, `wait_for_form_change`, …) are installed as

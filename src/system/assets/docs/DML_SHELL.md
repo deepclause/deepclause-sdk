@@ -24,7 +24,10 @@ shell(_{
 The Work assistant gets real typed tools plus `run_workflow` if workflows exist.
 It does not get DML/authoring tools such as `execute`, `listing` or `define`.
 Describe persona/domain in `system`; put capability semantics in tool descriptions.
-`welcome` is Markdown. Users can edit this contract in the visual Shell editor.
+`welcome` is Markdown. Users can edit this contract in the web Shell editor or in
+Develop. TUI Work is entered with `deepclause repl --mode work --harness NAME`;
+`/workflows` opens its chooser. Without a shell, use Develop or an explicit Run;
+internal predicates are never automatically exported.
 
 ## Inputs and outputs
 
@@ -34,10 +37,11 @@ inputs, leaving outputs unbound. Bind outputs and return; do not call `answer/1`
 in place of returning them. An output cannot be left unbound just because text
 was printed. Use zero outputs explicitly for a side-effect-only workflow.
 
-Common field types are string, integer, number, boolean and file. A `file` input
-is a workspace-relative path supplied by the picker/upload, not raw bytes.
-Prefer simple types at Work boundaries; verify current marshaling support before
-using complex inputs. Runtime tool schemas are authoritative, not a wish list.
+Supported Work boundary types are string, integer, number, boolean and file.
+A `file` input is a workspace-relative path supplied by the picker/upload, not raw
+bytes or a raw Prolog term. Object/array boundary types are currently rejected;
+use a JSON string or a file instead. General task/schema outputs still support
+complex values. Runtime tool schemas are authoritative, not a wish list.
 Old `args` is legacy input data only; author new shells with `inputs`/`outputs`.
 
 ## Workflows versus tools
@@ -64,7 +68,11 @@ shell(_{kind: workflow, system: "", host_tools: [], tools: [],
                       outputs: [_{name: "Upper", type: string}]}], welcome: "Choose a task."}).
 ```
 
-There is no assistant loop. A UI starts the named goal with the provided inputs.
+There is no assistant loop. A manual start executes exactly the selected workflow
+with validated inputs and no intervening assistant call, for BOTH shell kinds.
+Outputs are named typed values; no solution/unbound output/cancel/suspend is not
+success. Active Work conversations are pinned to their program/script snapshot;
+refresh opens a new one instead of mixing an old shell with new code.
 Interactive workflows must run through foreground form/input handlers. Browser
 scratch `execute` workers and worker-hosted processes do not support forms.
 Test pure validation/headless paths separately from actual foreground form submits.

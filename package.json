@@ -14,6 +14,7 @@
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     },
+    "./runtime-identity": "./dist/runtime-identity.json",
     "./work": {
       "import": "./dist/work/index.js",
       "types": "./dist/work/index.d.ts"
@@ -29,7 +30,9 @@
   },
   "scripts": {
     "prebuild": "npm run check:agent-prompt && npm run check:docs",
-    "build": "tsc && npm run copy:prolog && npm run copy:assets && npm run chmod:bins",
+    "build": "tsc && npm run copy:prolog && npm run copy:assets && npm run chmod:bins && npm run stamp:runtime",
+    "stamp:runtime": "node scripts/runtime-identity.mjs",
+    "check:runtime": "node scripts/runtime-identity.mjs --check",
     "chmod:bins": "chmod +x dist/cli/index.js dist/cli/repl-bin.js",
     "copy:prolog": "mkdir -p dist/prolog-src && cp src/prolog-src/*.pl dist/prolog-src/",
     "copy:assets": "mkdir -p dist/system/assets/docs && cp src/system/assets/docs/*.md dist/system/assets/docs/ && cp src/system/assets/model-database.json dist/system/assets/",

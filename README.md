@@ -76,9 +76,26 @@ dependencies and as conceptual foundations.
 It is likely not worth it when a single prompt or a short script is enough, or
 when there is no structure you would want to reuse, review, or reproduce.
 
+## Develop and Work
+
+The terminal and web share a Work contract. **Develop** authors DML; **Work** uses
+its declared assistant tools and workflows without authoring tools. Manual starts
+run exactly the selected workflow, with validated inputs and typed outputs:
+
+```bash
+deepclause repl --mode work --harness example
+deepclause repl --mode work --harness example --workflow "Summarise text" --inputs '{"Text":"hello"}' --json
+```
+
+No `shell/1` means no inferred Work interface: open Develop or an explicit Run.
+Use `/mode`, `/workflows`, `/workflow` and `/details` in the TUI. Purpose, harness
+and snapshots persist across restart/transfer; Work and Develop are separate
+conversations. See [Work mode](docs/WORK_MODE.md) and the implementation/status
+notes in [TUI/web reconciliation](docs/TUI_WEB_RECONCILIATION.md).
+
 ## The REPL: a living, self-modifying harness
 
-The REPL keeps a persistent DML module ("the harness"). You talk to it in two ways:
+In default Develop mode, the REPL keeps a persistent DML module ("the harness"). You talk to it in two ways:
 
 | Input | Mode |
 |---|---|

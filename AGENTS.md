@@ -19,7 +19,8 @@ Three surfaces: **repl**, **run**, **SDK**.
 deepclause init                 # write .deepclause/config.json
 deepclause login                # sign in via pi, pick a default model
 deepclause repl                 # interactive living-module REPL
-deepclause repl --session last  # resume the most recent session
+deepclause repl --session last  # resume recorded purpose/harness
+deepclause repl --mode work --harness example  # use a declared Work shell
 deepclause run skill.dml "arg"  # run one entry of a DML file / .zip bundle
 deepclause visualize s.dml -g router/2 --presentation -o router.png
 ```
@@ -55,6 +56,14 @@ Useful commands: `help.`, `listing.`, `listing(Name/Arity).`, `reset.`,
 `params.`, `halt.`.
 
 ---
+
+### Develop versus Work
+
+The default REPL is Develop (authoring). Work uses an explicit `shell/1`; it never
+exposes all predicates or guesses outputs. `/mode` switches conversations;
+`/workflows` chooses a declared task. Manual starts execute exactly that task with
+validated inputs and typed outputs, without an assistant decision. Work agents do
+not receive authoring tools. See `docs/WORK_MODE.md` before changing this boundary.
 
 ## 3. DML Reference for Agents
 

@@ -173,6 +173,9 @@ argument order; arity = inputs + outputs. UI/manual starts bind only inputs,
 leaving output variables unbound. Work gets `run_workflow` only when workflows
 exist, and no authoring/DML tools. `shell.system` supplies persona/domain rules;
 tool descriptions supply capabilities. Do not teach Work `execute` or DML.
+Work requires a declared shell; no helpers or outputs are inferred. Manual workflow
+starts execute exactly the selected task without an assistant decision. Work boundary
+types are string/integer/number/boolean/file; use a JSON string/file for complex data.
 
 Minimal complete shell (a normal agent needs no custom loop):
 
