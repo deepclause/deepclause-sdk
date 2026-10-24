@@ -39,6 +39,15 @@ export interface CompactionSettings {
 
 export { DEFAULT_COMPACTION_SETTINGS };
 
+/** Keep configured defaults useful for small local-model context windows too. */
+export function boundCompactionSettings(settings: CompactionSettings, contextWindow?: number): CompactionSettings {
+  if (!contextWindow || contextWindow < 4) return { ...settings };
+  const reserveTokens = settings.reserveTokens >= contextWindow ? Math.max(1, Math.floor(contextWindow / 4)) : settings.reserveTokens;
+  const available = contextWindow - reserveTokens;
+  const keepRecentTokens = settings.keepRecentTokens >= available ? Math.max(1, Math.floor(available / 2)) : settings.keepRecentTokens;
+  return { ...settings, reserveTokens, keepRecentTokens };
+}
+
 /** Leading marker of a compacted checkpoint message. */
 export const SUMMARY_PREFIX = '[Context summary]';
 

@@ -109,9 +109,11 @@ const ReplConfigSchema = z.object({
   frozen: z.boolean().optional().default(false),
   locked: z.boolean().optional().default(false),
   editMode: z.enum(['transactional', 'direct']).optional().default('transactional'),
+  gasLimit: z.number().int().min(-1).optional(),
   maxDepth: z.number().int().positive().optional().default(3),
   // 0 means unlimited.
   maxModelCalls: z.number().int().nonnegative().optional().default(100),
+  providerConcurrency: z.number().int().nonnegative().optional().default(4),
   writeDepth: z.number().int().positive().optional().default(20),
   /** Harness to edit by default (a project can hold several; default `main`). */
   harness: z.string().optional().default('main'),
@@ -225,6 +227,7 @@ const DEFAULT_CONFIG: Config = {
     editMode: 'transactional',
     maxDepth: 3,
     maxModelCalls: 100,
+    providerConcurrency: 4,
     writeDepth: 20,
     promptPrefix: 'dml> ',
     harness: 'main',

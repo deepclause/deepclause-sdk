@@ -2,7 +2,36 @@
 import type { ShellSpec, ShellWorkflow, ToolDefinition } from '../types.js';
 import type { HarnessExecuteResult } from '../repl/harness-tools.js';
 
+export { historyEventFromRecord } from '../repl/event-history.js';
 export const WORK_CONTRACT_VERSION = 1;
+
+/** Non-secret execution policy read identically from a workspace by both hosts. */
+export function resolveWorkbenchPolicy(config: unknown = {}) {
+  const root = config && typeof config === 'object' ? config as Record<string, unknown> : {};
+  const repl = root.repl && typeof root.repl === 'object' ? root.repl as Record<string, unknown> : {};
+  const compaction = repl.compaction && typeof repl.compaction === 'object' ? repl.compaction as Record<string, unknown> : {};
+  const integer = (object: Record<string, unknown>, name: string, fallback: number, zero: boolean) => {
+    const value = object[name] ?? fallback;
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < (zero ? 0 : 1)) throw new Error(`Invalid workspace runtime setting: ${name}`);
+    return value;
+  };
+  const boolean = (name: string, fallback: boolean) => {
+    const value = compaction[name] ?? fallback;
+    if (typeof value !== 'boolean') throw new Error(`Invalid compaction setting: ${name}`);
+    return value;
+  };
+  const gasLimit = repl.gasLimit;
+  if (gasLimit !== undefined && (typeof gasLimit !== 'number' || !Number.isSafeInteger(gasLimit) || gasLimit < -1)) throw new Error('Invalid workspace runtime setting: gasLimit');
+  return {
+    gasLimit: gasLimit as number | undefined,
+    maxDepth: integer(repl, 'maxDepth', 3, false),
+    maxModelCalls: integer(repl, 'maxModelCalls', 100, true),
+    providerConcurrency: integer(repl, 'providerConcurrency', 4, true),
+    compaction: { auto: boolean('auto', true), settings: { enabled: boolean('enabled', true),
+      reserveTokens: integer(compaction, 'reserveTokens', 16384, false), keepRecentTokens: integer(compaction, 'keepRecentTokens', 20000, false) } },
+  };
+}
+
 export const WORK_TYPES = ['string', 'integer', 'number', 'boolean', 'file'] as const;
 export type WorkValue = string | number | boolean;
 export type WorkStatus = 'succeeded' | 'failed' | 'cancelled' | 'suspended';
@@ -21,6 +50,8 @@ export interface WorkSpec {
   version?: number;
   hash: string;
   diagnostics: string[];
+  /** Initial program for a fresh conversation; excludes mutable private state. */
+  snapshot?: WorkSnapshot;
 }
 export interface WorkRunOptions { signal?: AbortSignal }
 export interface WorkSessionPort {
@@ -28,6 +59,7 @@ export interface WorkSessionPort {
   runWorkflow(name: string, inputs?: Record<string, unknown>, options?: WorkRunOptions): AsyncGenerator<import('../types.js').DMLEvent>;
   sessionInfo(): Promise<import('../repl/history.js').SessionMetadata & { id: string }>;
   resumeSuspension(options?: WorkRunOptions): AsyncGenerator<import('../types.js').DMLEvent>;
+  suspension(): Promise<{ continuation: string; at?: string } | undefined>;
 }
 export interface WorkSnapshot { source: string; version?: number; hash?: string }
 export interface WorkPredicate { name: string; arity: number }
@@ -139,6 +171,7 @@ export function workResult(entry: ShellWorkflow, result: HarnessExecuteResult, s
   if (result.outcome === 'suspended') return { ...base, ok: false, status: 'suspended' };
   if (result.error) return { ...base, ok: false, status: 'failed', error: result.error };
   if (!result.solutions.length) return { ...base, ok: false, status: 'failed', error: 'Workflow failed: no solution was returned' };
+  if (result.outcome === 'failed') return { ...base, ok: false, status: 'failed', error: 'Workflow failed' };
   const byName = new Map(result.solutions[0].map(binding => [binding.name, binding.value]));
   const outputs: Record<string, WorkValue> = {};
   try {
@@ -189,6 +222,13 @@ export async function executeWorkEntry(
   } catch (error) {
     return { ok: false, status: signal?.aborted ? 'cancelled' : 'failed', outputs: {}, output: '', elapsedMs: 0, error: (error as Error).message };
   }
+}
+
+export function renderWorkShell(shell: ShellSpec): string {
+  const q = JSON.stringify;
+  const fields = (args: ShellWorkflow['inputs']) => args.map(arg => `_{name: ${q(arg.name)}, type: ${q(arg.type)}}`).join(', ');
+  const entry = (flow: ShellWorkflow, description?: string) => `_{name: ${q(flow.name)}, goal: ${q(flow.goal)}, inputs: [${fields(flow.inputs)}], outputs: [${fields(flow.outputs)}]${description === undefined ? '' : `, description: ${q(description)}`}}`;
+  return `shell(_{kind: ${q(shell.kind)}, system: ${q(shell.system)}, host_tools: [${shell.hostTools.filter(name => name !== 'execute').map(name => q(name)).join(', ')}], tools: [${shell.tools.map(tool => entry(tool, tool.description)).join(', ')}], workflows: [${shell.workflows.map(flow => entry(flow)).join(', ')}], welcome: ${q(shell.welcome)}}).`;
 }
 
 export function formatWorkResult(name: string, result: WorkResult): string {

@@ -29,6 +29,7 @@ export interface StatusBarOptions {
   isFrozen?: () => boolean;
   /** True while a turn is running (so the user knows they can steer). */
   isRunning?: () => boolean;
+  canSteer?: () => boolean;
   /** Compact subagent status, e.g. `⚙ desk 2/3`; omitted when none run. */
   processLabel?: () => string | undefined;
 }
@@ -98,7 +99,7 @@ export class StatusBarComponent implements Component {
     // The long steering hint only on a wide terminal; `running` alone still says
     // what matters, and the dock's loader shows that work is happening.
     const running = this.options.isRunning?.()
-      ? (width >= 100 ? 'running (type to steer)' : 'running')
+      ? (width >= 100 && (this.options.canSteer?.() ?? true) ? 'running (type to steer)' : 'running')
       : undefined;
     const frozen = this.options.isFrozen?.() ? 'FROZEN' : undefined;
     const name = typeof this.options.harness === 'function' ? this.options.harness() : this.options.harness;

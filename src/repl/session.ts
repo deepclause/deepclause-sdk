@@ -35,6 +35,7 @@ import { pidKey } from './processes.js';
 import type { HarnessSnapshot, HarnessPredicate } from './tui/harness-view.js';
 import {
   compactMemory,
+  boundCompactionSettings,
   estimateMemoryTokens,
   shouldCompact,
   toCompactionEvent,
@@ -52,6 +53,7 @@ import type {
   LLMBackendResponse,
   FormEventPayload,
   FormSubmitPayload,
+  HumanInputHandler,
   MemoryMessage,
   ToolDefinition,
   ToolPolicy,
@@ -64,6 +66,8 @@ import {
 } from './export.js';
 import {
   HistoryStore,
+  assertHarnessName,
+  assertSessionId,
   harnessHash,
   moduleVersion,
   type HistoryChangedPredicate,
@@ -87,7 +91,8 @@ import { FormRegistry } from '../forms/registry.js';
 import type { Provider } from '../system/config/model-slots.js';
 import type { ModelResolver } from './model-resolver.js';
 import { formatModelCatalogEntry } from './model-resolver.js';
-import { buildWorkSystemPrompt, executeWorkEntry, formatWorkResult, validateWorkShell, workShellDiagnostics, type WorkSpec, type WorkResult, type SessionPurpose } from '../work/index.js';
+import { historyEventFromRecord } from './event-history.js';
+import { buildWorkSystemPrompt, executeWorkEntry, formatWorkResult, renderWorkShell, validateWorkShell, workShellDiagnostics, type WorkSpec, type WorkResult, type SessionPurpose } from '../work/index.js';
 import type { SessionMetadata } from './history.js';
 
 /** A generated diagram of one harness entry predicate. */
@@ -140,11 +145,11 @@ export interface DMLSessionOptions {
   toolPolicy?: ToolPolicy | null;
   /** Legacy harness-only input handler (prefer onInput). */
   onInputRequired?: (prompt: string) => Promise<string>;
-  /** Unified human-in-the-loop channel for meta ask_user and harness input/2. */
-  onInput?: (prompt: string, options?: string[]) => Promise<string | undefined>;
+  /** Unified input channel; signal cancels this particular human request. */
+  onInput?: HumanInputHandler;
   /**
-   * Called when a form opens, so an interactive host can collect values and
-   * call `submitForm` (docs/DML_FORMS.md §9). Awaited inside the turn.
+   * Form presentation/updates and close notifications. Inspect `op` before
+   * collecting values; operation cleanup may close an abandoned form. Awaited.
    */
   onForm?: (form: FormEventPayload) => void | Promise<void>;
   initialHarnessMemory?: MemoryMessage[];
@@ -258,7 +263,7 @@ export interface DMLQueryOptions {
   toolPolicy?: ToolPolicy | null;
   onInputRequired?: (prompt: string) => Promise<string>;
   /** Per-run override of the unified input channel. */
-  onInput?: (prompt: string, options?: string[]) => Promise<string | undefined>;
+  onInput?: HumanInputHandler;
   /** Process primitives (spawn/send/receive/...) resolve through this host. */
   process?: ProcessBinding;
   signal?: AbortSignal;
@@ -274,65 +279,6 @@ let sessionCounter = 0;
  * subagent are served strictly in order (see `requireInput`).
  */
 let sharedInputQueue: Promise<void> = Promise.resolve();
-
-/** Rebuild a `DMLEvent` from a persisted history record, or undefined. */
-function historyEventFromRecord(record: Record<string, unknown>): DMLEvent | undefined {
-  const type = typeof record.type === 'string' ? (record.type as DMLEvent['type']) : undefined;
-  if (!type) return undefined;
-  const frameKind = typeof record.frame === 'string' ? (record.frame as DMLEvent['frameKind']) : undefined;
-  const content = typeof record.content === 'string' ? record.content : undefined;
-  switch (type) {
-    case 'stream':
-      return content ? { type, frameKind, content } : undefined;
-    case 'output':
-    case 'answer':
-    case 'error':
-      return { type, frameKind, content };
-    case 'html':
-      return {
-        type,
-        frameKind,
-        html: {
-          path: typeof (record.html as { path?: unknown } | undefined)?.path === 'string'
-            ? (record.html as { path: string }).path
-            : '',
-        },
-      };
-    case 'log':
-      return { type, frameKind, content, level: record.level as DMLEvent['level'] };
-    case 'tool_call':
-      return {
-        type,
-        frameKind,
-        toolName: typeof record.toolName === 'string' ? record.toolName : undefined,
-        toolState: record.toolState as DMLEvent['toolState'],
-        toolSummary: typeof record.toolSummary === 'string' ? record.toolSummary : undefined,
-        toolArgs: record.toolArgs as Record<string, unknown> | undefined,
-        toolResult: record.toolResult,
-        toolError: typeof record.toolError === 'string' ? record.toolError : undefined,
-        toolDurationMs: typeof record.toolDurationMs === 'number' ? record.toolDurationMs : undefined,
-        toolExitCode: typeof record.toolExitCode === 'number' ? record.toolExitCode : undefined,
-      };
-    case 'solution':
-      return {
-        type,
-        frameKind,
-        solution: {
-          bindings: (Array.isArray(record.bindings) ? record.bindings : []) as NonNullable<DMLEvent['solution']>['bindings'],
-          deterministic: false,
-        },
-      };
-    case 'task_activity':
-      return {
-        type,
-        frameKind,
-        taskState: record.taskState as DMLEvent['taskState'],
-        taskDescription: typeof record.taskDescription === 'string' ? record.taskDescription : undefined,
-      };
-    default:
-      return undefined;
-  }
-}
 
 /** The log-view line for an event, or undefined for per-tick noise. */
 function processLogText(event: ProcessEvent): string | undefined {
@@ -377,7 +323,7 @@ export class DMLSession {
   private tools: Map<string, ToolDefinition>;
   private authoringTools: Map<string, ToolDefinition>;
   private toolPolicy: ToolPolicy | null;
-  private inputHandler?: (prompt: string, options?: string[]) => Promise<string | undefined>;
+  private inputHandler?: HumanInputHandler;
   /** Host-side interaction for an opened form (docs/DML_FORMS.md). */
   private formHandler?: (form: FormEventPayload) => void | Promise<void>;
   private maxDepth: number;
@@ -411,10 +357,16 @@ export class DMLSession {
   private modelCallBudget: number;
   private referenceDocs = new Map<string, string>();
   private disposed = false;
+  private readonly lifetime = new AbortController();
+  private activeRequestSignal?: AbortSignal;
   readonly purpose: SessionPurpose;
   private activeOperation?: string;
   private pinnedWorkHash?: string;
   private pinnedWorkVersion?: number;
+  private pinnedWorkShell?: ShellSpec;
+  private pinnedWorkSource?: string;
+  private baseSourceHash?: string;
+  private pinnedWorkScripts?: Array<{ path: string; sha256: string }>;
   /** History recorder; present only when the caller enables it. */
   private history?: HistoryStore;
   private historyOptions?: HistoryOptions;
@@ -454,7 +406,7 @@ export class DMLSession {
     this.swipl = swipl;
     this.sessionId = options.sessionId ?? nextSessionId();
     this.workspacePath = options.workspacePath;
-    this.gasLimit = options.gasLimit;
+    this.gasLimit = options.gasLimit ?? ((options.mode ?? (options.workMode ? 'work' : 'develop')) === 'work' ? 1_000_000 : undefined);
     this.model = options.runnerOptions.model;
     this.provider = String(options.runnerOptions.provider);
     this.tools = options.tools ?? new Map();
@@ -487,7 +439,7 @@ export class DMLSession {
     this.autoLoadHarness = options.autoLoadHarness ?? true;
     this.openOptions = options;
     this.purpose = options.mode ?? (options.workMode ? 'work' : 'develop');
-    this.compactionSettings = options.compaction?.settings;
+    this.compactionSettings = options.compaction ? boundCompactionSettings(options.compaction.settings, options.contextWindow) : undefined;
     this.compactionAuto = options.compaction?.auto ?? false;
     this.contextWindow = options.contextWindow;
     this.llmBackend = options.runnerOptions.llmBackend;
@@ -528,11 +480,16 @@ export class DMLSession {
       const meta = await store.readSessionMetadata();
       const explicit = options.mode ?? (options.workMode === undefined ? undefined : options.workMode ? 'work' : 'develop');
       if (!meta?.mode && !explicit) throw new Error('Legacy session has no recorded mode. Resume with explicit mode develop or work and the original harness name.');
+      if (!meta?.harness && !options.harnessName) throw new Error('Legacy session has no recorded harness. Specify the original harness explicitly.');
       if (meta?.mode && explicit && meta.mode !== explicit) throw new Error(`Session is ${meta.mode}; open a separate ${explicit} conversation instead of changing its purpose.`);
       if (meta?.harness && options.harnessName && meta.harness !== options.harnessName) throw new Error(`Session belongs to harness '${meta.harness}', not '${options.harnessName}'.`);
       options = { ...options, mode: meta?.mode ?? explicit, harnessName: meta?.harness ?? options.harnessName,
         sessionKind: meta?.kind ?? options.sessionKind, origin: options.origin ?? meta?.origin };
     }
+    if (options.mode !== undefined && options.mode !== 'develop' && options.mode !== 'work') throw new Error('Invalid session purpose');
+    if (options.gasLimit !== undefined && (!Number.isSafeInteger(options.gasLimit) || options.gasLimit < -1)) throw new Error('gasLimit must be an integer >= -1');
+    if (options.sessionId) assertSessionId(options.sessionId);
+    if (options.harnessName) assertHarnessName(options.harnessName);
     const swipl = await loadProlog();
     const session = new DMLSession(swipl, options);
 
@@ -574,8 +531,8 @@ export class DMLSession {
       sandbox: session.executionBackend.replace(/-/g, '_'),
       ...options.params,
     };
-    if (options.gasLimit !== undefined) {
-      sessionParams.gas_limit = options.gasLimit;
+    if (session.gasLimit !== undefined) {
+      sessionParams.gas_limit = session.gasLimit;
     }
 
     const harnessMemory = snapshot?.memory?.harness?.trim()
@@ -629,13 +586,23 @@ export class DMLSession {
       }
     }
     if (session.purpose === 'work') {
+      try { await session.materializeMissingEmbeddedScripts(); } catch (error) { await session.dispose(); throw error; }
       session.pinnedWorkVersion = snapshot?.version ?? options.harnessSnapshot?.version ?? session.history?.currentVersion;
-      session.pinnedWorkHash = snapshot?.hash ?? options.harnessSnapshot?.hash;
+      session.pinnedWorkShell = snapshot?.workIdentity?.shell;
+      session.pinnedWorkSource = snapshot?.workIdentity?.source;
+      session.pinnedWorkScripts = snapshot?.workIdentity?.scripts ?? snapshot?.scripts;
       if (!session.isEmpty()) {
-        const spec = await session.workSpec();
-        if (session.pinnedWorkHash && spec.hash !== session.pinnedWorkHash) {
+        const scripts = await session.scriptHashes();
+        const stateHash = harnessHash(session.moduleSource(), scripts);
+        const programHash = harnessHash(session.canonicalSource(), scripts);
+        const expected = snapshot?.hash ?? options.harnessSnapshot?.hash;
+        // Session snapshots hash their human-readable state. Work specs hash a
+        // canonical program so anonymous variable ids cannot create false drift.
+        if (expected && expected !== (snapshot ? stateHash : programHash) && expected !== stateHash) {
           await session.dispose(); throw new Error('Saved Work snapshot or linked scripts changed. Refresh before starting a new run.');
         }
+        session.pinnedWorkHash = snapshot?.workIdentity?.hash ?? programHash;
+        await session.workSpec();
       }
     }
     if (!session.isEmpty()) await session.persistSessionHarness(snapshot?.version ?? session.history?.currentVersion ?? 0);
@@ -645,6 +612,8 @@ export class DMLSession {
   getSessionId(): string {
     return this.sessionId;
   }
+
+  async setTitle(title: string): Promise<void> { await this.history?.updateSessionMetadata({ title: title.trim().slice(0, 120) }); }
 
   async sessionInfo(): Promise<SessionMetadata & { id: string }> {
     return { ...(await this.history?.readSessionMetadata() ?? {}), id: this.sessionId, harness: this.harnessName,
@@ -656,19 +625,34 @@ export class DMLSession {
     const diagnostics = workShellDiagnostics(shell);
     const errors = shell ? validateWorkShell(shell, this.harnessView().predicates) : [];
     diagnostics.push(...errors);
-    const hash = harnessHash(this.moduleSource(), await this.scriptHashes());
-    if (this.purpose === 'work' && shell && !errors.length && !this.pinnedWorkHash) {
-      this.pinnedWorkHash = hash;
+    const scripts = await this.scriptHashes();
+    const stateHash = harnessHash(this.canonicalSource(), scripts);
+    const scriptsChanged = this.purpose === 'work' && this.pinnedWorkScripts && JSON.stringify(this.pinnedWorkScripts) !== JSON.stringify(scripts);
+    if (scriptsChanged) diagnostics.push('Linked scripts changed. Refresh into a new Work snapshot.');
+    if (this.purpose === 'work' && shell && !errors.length) {
+      this.pinnedWorkHash ??= stateHash;
+      this.pinnedWorkShell ??= structuredClone(shell);
+      this.pinnedWorkSource ??= this.moduleSource();
+      this.pinnedWorkScripts ??= scripts;
       this.pinnedWorkVersion ??= this.history?.currentVersion;
     }
-    return { harness: this.harnessName, shell: errors.length ? null : shell, diagnostics,
-      version: this.purpose === 'work' ? this.pinnedWorkVersion : this.history?.currentVersion, hash };
+    return { harness: this.harnessName, shell: errors.length || scriptsChanged ? null : shell, diagnostics,
+      version: this.purpose === 'work' ? this.pinnedWorkVersion : this.history?.currentVersion,
+      hash: this.purpose === 'work' ? this.pinnedWorkHash ?? stateHash : stateHash,
+      snapshot: { source: this.purpose === 'work' ? this.pinnedWorkSource ?? this.moduleSource() : this.moduleSource(),
+        hash: this.purpose === 'work' ? this.pinnedWorkHash ?? stateHash : stateHash,
+        version: this.purpose === 'work' ? this.pinnedWorkVersion : this.history?.currentVersion } }; 
   }
 
-  private async *exclusive(label: string, operation: () => AsyncGenerator<DMLEvent>): AsyncGenerator<DMLEvent> {
+  private requestSignal(signal?: AbortSignal): AbortSignal {
+    return signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal;
+  }
+
+  private async *exclusive(label: string, operation: () => AsyncGenerator<DMLEvent>, signal?: AbortSignal): AsyncGenerator<DMLEvent> {
     if (this.activeOperation) { yield { type: 'error', content: `Session is busy (${this.activeOperation}); finish or cancel it first.` }; return; }
     this.activeOperation = label;
-    try { yield* operation(); } finally { this.activeOperation = undefined; }
+    this.activeRequestSignal = this.requestSignal(signal);
+    try { yield* operation(); } finally { this.activeOperation = undefined; this.activeRequestSignal = undefined; }
   }
 
   /**
@@ -680,6 +664,7 @@ export class DMLSession {
    */
   /** The harness's Work-mode presentation (`shell/1`), or null. */
   shell(): ShellSpec | null {
+    if (this.purpose === 'work' && this.pinnedWorkShell) return structuredClone(this.pinnedWorkShell);
     const result = this.prologQuery(
       `deepclause_mi:repl_shell_json('${this.sessionId}', Json)`,
     );
@@ -1157,6 +1142,7 @@ export class DMLSession {
    * `embedded_file/2` facts back into the workspace.
    */
   async load(file: string): Promise<{ error?: string; warnings?: string[] }> {
+    const conflict = await this.persistentConflict(); if (conflict) return { error: conflict };
     const before = this.predicateList();
     // On a fresh harness the loaded file *is* the baseline, not a version.
     const recordLoad = this.purpose !== 'work' && (this.history?.hasCommits ?? false);
@@ -1187,8 +1173,12 @@ export class DMLSession {
    * any `-l` files are loaded). A no-op once the harness has a baseline.
    */
   async finalizeHarnessBaseline(): Promise<void> {
-    if (!this.history || this.purpose === 'work') return;
+    if (!this.history) return;
+    // Explicit CLI -l may import a NEW slot, but Work never overwrites an
+    // existing harness. Normal Work opens/runs do not call this bootstrap hook.
+    if (this.purpose === 'work' && (await this.history.readHeadModule())?.module.trim()) return;
     await this.history.setInitialBaseline(this.moduleSource());
+    this.baseSourceHash = moduleVersion((await this.history.readHeadModule())?.module ?? '');
   }
 
   /** Workspace-relative files linked by `script_file/2` facts. */
@@ -1213,6 +1203,7 @@ export class DMLSession {
         this.harnessName,
       );
       await store.init();
+      this.baseSourceHash = moduleVersion((await store.readHeadModule())?.module ?? '');
       const existing = await store.readFacts();
       if (existing.trim()) {
         this.prologQuery(`deepclause_mi:repl_history_load('${this.sessionId}', ${quoteString(existing)})`);
@@ -1250,6 +1241,7 @@ export class DMLSession {
    * is not recorded as a new change.
    */
   private async restoreHarnessFromHistory(snapshot: SessionHarnessSnapshot): Promise<void> {
+    this.baseSourceHash = snapshot.baseSourceHash ?? this.baseSourceHash;
     this.turnCounter = (await this.history?.lastTurn(this.sessionId)) ?? 0;
     const module = snapshot.module.trim();
     if (module) {
@@ -1277,13 +1269,17 @@ export class DMLSession {
       const module = this.moduleSource();
       const scripts = await this.scriptHashes();
       const hash = harnessHash(module, scripts);
-      if (this.purpose === 'work' && this.pinnedWorkHash && hash !== this.pinnedWorkHash) return;
-      const isClean = clean
-        ?? (this.history.currentHash ? hash === this.history.currentHash : version === 0);
+      if (this.purpose === 'work' && this.pinnedWorkScripts && JSON.stringify(this.pinnedWorkScripts) !== JSON.stringify(scripts)) return;
+      const isClean = clean ?? (this.purpose === 'work' && this.pinnedWorkHash
+        ? (harnessHash(this.canonicalSource(), scripts) === this.pinnedWorkHash || hash === this.pinnedWorkHash)
+        : this.history.currentHash ? hash === this.history.currentHash : version === 0);
       await this.history.updateSessionMetadata({ mode: this.purpose, harness: this.harnessName,
-        shellKind: this.shell()?.kind, harnessHash: hash,
+        shellKind: this.shell()?.kind, harnessHash: this.purpose === 'work' ? this.pinnedWorkHash ?? hash : hash, sessionStateHash: hash,
         harnessVersion: this.purpose === 'work' ? this.pinnedWorkVersion : version });
       await this.history.writeSessionHarness({
+        ...(this.purpose === 'work' && this.pinnedWorkHash && this.pinnedWorkShell && this.pinnedWorkScripts
+          ? { workIdentity: { hash: this.pinnedWorkHash, source: this.pinnedWorkSource, shell: this.pinnedWorkShell, scripts: this.pinnedWorkScripts } } : {}),
+        baseSourceHash: this.baseSourceHash,
         sessionId: this.sessionId,
         version: this.purpose === 'work' ? this.pinnedWorkVersion ?? version : version,
         hash,
@@ -1350,6 +1346,27 @@ export class DMLSession {
     return String(plainValue(result?.Text) ?? '');
   }
 
+  private embeddedScripts(): Array<{ path: string; content: string }> {
+    const result = this.prologQuery(`(current_predicate(${this.sessionId}:embedded_file/2) -> findall(_{path:P,content:C}, ${this.sessionId}:embedded_file(P,C), Files) ; Files=[]), deepclause_mi:atom_json_dict(Json, Files, [])`);
+    try { return JSON.parse(String(plainValue(result?.Json) ?? '[]')); } catch { return []; }
+  }
+
+  private async materializeMissingEmbeddedScripts(): Promise<void> {
+    for (const script of this.embeddedScripts()) {
+      if (typeof script.path !== 'string' || typeof script.content !== 'string') throw new Error('Invalid embedded script');
+      const target = this.resolveWorkspacePath(script.path);
+      try { await fs.access(target); continue; } catch { /* missing: bootstrap only */ }
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      try { await fs.writeFile(target, script.content, { encoding: 'utf8', flag: 'wx' }); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    }
+  }
+
+  private canonicalSource(): string {
+    const result = this.prologQuery(`deepclause_mi:export_harness('${this.sessionId}', none, Text)`);
+    return String(plainValue(result?.Text) ?? '');
+  }
+
   private async scriptHashes(): Promise<Array<{ path: string; sha256: string }>> {
     const { createHash } = await import('crypto');
     const out: Array<{ path: string; sha256: string }> = [];
@@ -1358,7 +1375,8 @@ export class DMLSession {
         const content = await fs.readFile(this.resolveWorkspacePath(rel));
         out.push({ path: rel, sha256: createHash('sha256').update(content).digest('hex') });
       } catch {
-        out.push({ path: rel, sha256: 'missing' });
+        const embedded = this.embeddedScripts().find(script => script.path === rel)?.content;
+        out.push({ path: rel, sha256: typeof embedded === 'string' ? createHash('sha256').update(embedded).digest('hex') : 'missing' });
       }
     }
     return out;
@@ -1408,6 +1426,7 @@ export class DMLSession {
         manifest: this.manifestText(),
       });
       this.assertHistoryFacts(facts);
+      this.baseSourceHash = moduleVersion(this.moduleSource());
       await this.persistSessionHarness(version, true);
       return version;
     } catch (error) {
@@ -1505,7 +1524,7 @@ export class DMLSession {
    */
   async *query(goal: string, options: DMLQueryOptions = {}): AsyncGenerator<DMLEvent> {
     if (this.purpose === 'work') { yield { type: 'error', content: 'Raw goals are a Develop operation. In Work, start a declared workflow.' }; return; }
-    yield* this.exclusive('query', () => this.queryInner(goal, options));
+    yield* this.exclusive('query', () => this.queryInner(goal, { ...options, signal: this.requestSignal(options.signal) }), options.signal);
   }
 
   private async *queryInner(goal: string, options: DMLQueryOptions = {}): AsyncGenerator<DMLEvent> {
@@ -1546,6 +1565,7 @@ export class DMLSession {
       for await (const event of this.runner.runFrame(frame.id, this.buildRunOptions(options))) {
         this.recordHistoryEvent(historyTurn, event);
         if (event.type === 'error') historyOutcome = 'failed';
+        if (event.type === 'suspend') historyOutcome = 'suspended';
         yield event;
       }
     } finally {
@@ -1635,6 +1655,8 @@ export class DMLSession {
 
   /** Clear the living module and memories (the `reset.` command). */
   async reset(): Promise<void> {
+    if (this.purpose === 'work') throw new Error('Reset is a Develop operation.');
+    const conflict = await this.persistentConflict(); if (conflict) throw new Error(conflict);
     if (this.isFrozen()) {
       throw new Error('harness is frozen; reset is disabled');
     }
@@ -1650,6 +1672,8 @@ export class DMLSession {
    * rollback itself is recorded as a change (harness_rollback/5).
    */
   async rollback(): Promise<{ ok: boolean; from?: number; to?: number; error?: string }> {
+    if (this.purpose === 'work') return { ok: false, error: 'Rollback is a Develop operation.' };
+    const conflict = await this.persistentConflict(); if (conflict) return { ok: false, error: conflict };
     if (this.disposed) return { ok: false, error: 'Session has been disposed' };
     if (!this.history) return { ok: false, error: 'history is not enabled; rollback is unavailable' };
     if (this.isFrozen()) return { ok: false, error: 'harness is frozen; rollback is disabled' };
@@ -1665,6 +1689,7 @@ export class DMLSession {
     this.assertHistoryFacts(
       await this.history.recordRollback(plan.from, plan.to, this.turnCounter, this.sessionId, plan.module)
     );
+    this.baseSourceHash = moduleVersion(plan.module);
     return { ok: true, from: plan.from, to: plan.to };
   }
 
@@ -1794,6 +1819,7 @@ export class DMLSession {
     process?: ProcessBinding,
     preserveMemory = false,
   ): Promise<HarnessExecuteResult> {
+    signal = this.requestSignal(signal);
     const startedAt = Date.now();
     const elapsed = (): number => Date.now() - startedAt;
     const childDepth = this.frameDepth + 1;
@@ -1878,11 +1904,12 @@ export class DMLSession {
    * `finish`. It runs one or more committed turns per request.
    */
   async *agentPrompt(request: string, options: DMLQueryOptions = {}): AsyncGenerator<DMLEvent> {
-    yield* this.exclusive('prompt', () => this.agentPromptInner(request, options));
+    yield* this.exclusive('prompt', () => this.agentPromptInner(request, { ...options, signal: this.requestSignal(options.signal) }), options.signal);
   }
 
   private async *agentPromptInner(request: string, options: DMLQueryOptions = {}): AsyncGenerator<DMLEvent> {
     if (this.purpose === 'work') {
+      await this.materializeMissingEmbeddedScripts();
       const spec = await this.workSpec();
       if (!spec.shell || spec.shell.kind !== 'agent') { yield { type: 'error', content: spec.diagnostics.join('\n') || 'This is a workflow-only shell; choose a workflow.' }; return; }
       if (spec.hash !== this.pinnedWorkHash) { yield { type: 'error', content: 'Work snapshot or linked scripts changed. Refresh into a new Work session.' }; return; }
@@ -1943,13 +1970,17 @@ export class DMLSession {
       await this.rollbackTurn();
     } else if (this.transactionBefore !== null) {
       // Last resort after the nudges: commit so nothing is lost, and show it.
-      await this.endTurn();
+      const result = await this.endTurn();
+      if (result.error) {
+        failed = true;
+        const error: DMLEvent = { type: 'error', content: result.error };
+        this.recordHistoryEvent(turn, error);
+        yield error;
+      }
       const marker: DMLEvent = {
-        type: 'tool_call',
-        toolName: 'end_turn',
-        toolArgs: {},
-        toolState: 'completed',
-        toolSummary: 'commit transaction (host; agent did not end_turn)',
+        type: 'tool_call', toolName: 'end_turn', toolArgs: {},
+        toolState: result.error ? 'failed' : 'completed', toolError: result.error,
+        toolSummary: result.error ?? (result.committed ? 'commit transaction (host; agent did not end_turn)' : 'no edit committed'),
       };
       this.recordHistoryEvent(turn, marker);
       yield marker;
@@ -2161,7 +2192,15 @@ export class DMLSession {
     return undefined;
   }
 
+  private async persistentConflict(): Promise<string | undefined> {
+    if (this.purpose !== 'develop' || !this.history || !this.baseSourceHash) return undefined;
+    const current = moduleVersion((await this.history.readHeadModule())?.module ?? '');
+    return current !== this.baseSourceHash ? 'Harness changed in another session. Export any private edits and reopen a fresh Develop conversation before committing.' : undefined;
+  }
+
   async beginTurn(): Promise<{ ok: boolean; error?: string; message?: string }> {
+    if (this.purpose === 'work') return { ok: false, error: 'Work cannot author the harness. Open a separate Develop conversation.' };
+    const conflict = await this.persistentConflict(); if (conflict) return { ok: false, error: conflict };
     // A second begin_turn must not re-snapshot the *mid-transaction* state:
     // `rollback` would stop meaning "the last committed harness" and the
     // recorded diff would lose edits made before it. Treat it as an idempotent
@@ -2180,6 +2219,7 @@ export class DMLSession {
   }
 
   async endTurn(): Promise<HarnessCommitResult> {
+    const conflict = await this.persistentConflict(); if (conflict) return { committed: false, error: conflict };
     if (this.transactionBefore === null) {
       return { committed: false, changed: [], error: 'no open transaction' };
     }
@@ -2239,9 +2279,35 @@ export class DMLSession {
    * the editor's text is the source of truth. The result is an ordinary commit:
    * a history version, the persisted harness, and the same contract warnings.
    */
+  async updateWorkShell(shell: ShellSpec, expectedHash?: string): Promise<HarnessCommitResult> {
+    if (this.activeOperation || this.transactionBefore !== null) return { committed: false, error: 'Finish the active operation/edit transaction before saving the shell.' };
+    this.activeOperation = 'shell-edit';
+    try { return await this.updateWorkShellInner(shell, expectedHash); } finally { this.activeOperation = undefined; }
+  }
+
+  private async updateWorkShellInner(shell: ShellSpec, expectedHash?: string): Promise<HarnessCommitResult> {
+    if (this.purpose === 'work') return { committed: false, error: 'Save the shell through an idle Develop session.' };
+    const conflict = await this.persistentConflict(); if (conflict) return { committed: false, error: conflict };
+    const errors = validateWorkShell(shell, this.harnessView().predicates);
+    if (errors.length) return { committed: false, error: errors.join('; ') };
+    if (expectedHash && (await this.workSpec()).hash !== expectedHash) return { committed: false, error: 'Harness changed since the editor opened. Refresh before saving.' };
+    const started = await this.beginTurn();
+    if (!started.ok) return { committed: false, error: started.error };
+    try {
+      for (const arity of [1, 3]) if (this.predicateArities('shell').includes(arity)) {
+        const removed = await this.deletePredicate(`shell/${arity}`);
+        if (!removed.ok) throw new Error(removed.error);
+      }
+      const defined = await this.define('shell(_)', renderWorkShell(shell));
+      if (!defined.ok) throw new Error(defined.error);
+      return await this.endTurn();
+    } catch (error) { await this.rollbackTurn(); return { committed: false, error: (error as Error).message }; }
+  }
+
   async replaceHarness(source: string, expectedHash?: string): Promise<HarnessCommitResult> {
     if (this.purpose === 'work') return { committed: false, error: 'Edit the shell in a separate Develop session.' };
     if (this.activeOperation) return { committed: false, error: 'Session is busy; finish or cancel before editing.' };
+    const conflict = await this.persistentConflict(); if (conflict) return { committed: false, error: conflict };
     if (expectedHash && (await this.workSpec()).hash !== expectedHash) return { committed: false, error: 'Harness changed since the editor opened; refresh before saving.' };
     if (this.disposed) return { committed: false, error: 'Session has been disposed' };
     if (this.isFrozen()) return { committed: false, error: 'harness is frozen; editing is disabled' };
@@ -2559,17 +2625,28 @@ export class DMLSession {
     bindingMode: BindingMode = 'full',
     _timeoutMs?: number,
   ): Promise<HarnessExecuteResult> {
-    return this.executeGoal(goal, limit ?? 5, onEvent, signal, bindingMode, undefined, true);
+    if (this.purpose === 'work' && this.pendingSuspensionValue) return { bindings: [], solutions: [], output: '', elapsedMs: 0, outcome: 'failed', error: 'Resume the pending continuation or open a new Work conversation before starting another operation.' };
+    const existing = new Set(this.forms.list().map(form => form.formId));
+    try { return await this.executeGoal(goal, limit ?? 5, onEvent, signal, bindingMode, undefined, true); }
+    finally {
+      for (const form of this.forms.list()) if (!existing.has(form.formId) && form.state === 'open') {
+        this.forms.close(form.formId, 'cancelled', 'Foreground operation ended');
+        const payload: FormEventPayload = { op: 'close', formId: form.formId, revision: form.revision, state: 'cancelled', reason: 'Foreground operation ended' };
+        onEvent?.({ type: 'form', form: payload });
+        await this.formHandler?.(payload);
+      }
+    }
   }
 
   /** Deterministic named invocation. This never asks a model which goal to run. */
   async *runWorkflow(name: string, inputs: Record<string, unknown> = {}, options: DMLQueryOptions = {}): AsyncGenerator<DMLEvent> {
-    yield* this.exclusive('workflow', () => this.runWorkflowInner(name, inputs, options));
+    yield* this.exclusive('workflow', () => this.runWorkflowInner(name, inputs, options), options.signal);
   }
 
   private async *runWorkflowInner(name: string, inputs: Record<string, unknown>, options: DMLQueryOptions): AsyncGenerator<DMLEvent> {
     if (this.disposed) { yield { type: 'error', content: 'Session has been disposed' }; return; }
     if (this.purpose !== 'work') { yield { type: 'error', content: 'Start workflows in a separate Work conversation.' }; return; }
+    await this.materializeMissingEmbeddedScripts();
     const spec = await this.workSpec();
     if (!spec.shell) { yield { type: 'error', content: spec.diagnostics.join('\n') }; return; }
     if (this.pinnedWorkHash !== spec.hash) { yield { type: 'error', content: 'Work snapshot or linked scripts changed; refresh into a new Work session.' }; return; }
@@ -2582,7 +2659,7 @@ export class DMLSession {
     const request = `Workflow: ${name}`;
     await this.recordHistoryTurnStart({ turn, mode: 'goal', request, workflow: { name, inputs } });
     const local = new AbortController();
-    const signal = options.signal ? AbortSignal.any([local.signal, options.signal]) : local.signal;
+    const signal = this.requestSignal(options.signal ? AbortSignal.any([local.signal, options.signal]) : local.signal);
     const queue: DMLEvent[] = [];
     let wake: (() => void) | undefined;
     let result: WorkResult | undefined;
@@ -2621,13 +2698,16 @@ export class DMLSession {
     yield* this.exclusive('resume', async function* (this: DMLSession) {
       const pending = this.pendingSuspension();
       if (!pending) return;
-      if (this.purpose === 'work' && (await this.workSpec()).hash !== this.pinnedWorkHash) {
-        yield { type: 'error', content: 'Work snapshot changed; cannot resume this continuation.' } as DMLEvent;
-        return;
+      if (this.purpose === 'work') {
+        const spec = await this.workSpec();
+        if (!spec.shell || spec.hash !== this.pinnedWorkHash) {
+          yield { type: 'error', content: 'Work snapshot or scripts changed; cannot resume this continuation.' } as DMLEvent;
+          return;
+        }
       }
       await this.clearSuspension();
-      yield* this.queryInner(pending.continuation, options);
-    }.bind(this));
+      yield* this.queryInner(pending.continuation, { ...options, signal: this.requestSignal(options.signal) });
+    }.bind(this), options.signal);
   }
 
   /**
@@ -2647,6 +2727,8 @@ export class DMLSession {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.lifetime.abort(new Error('Session closed'));
+    for (const form of this.forms.list()) if (form.state === 'open') this.forms.close(form.formId, 'cancelled', 'Session closed');
     if (this.processBackend) {
       try {
         await this.processBackend.shutdown();
@@ -2668,14 +2750,14 @@ export class DMLSession {
   }
 
   private buildRunOptions(options: DMLQueryOptions): InternalRunOptions {
-    const inputHandler = options.onInput ?? this.inputHandler;
+    const inputHandler = options.onInput ?? options.onInputRequired ?? this.inputHandler;
     return {
       workspacePath: this.workspacePath,
       gasLimit: options.gasLimit ?? this.gasLimit,
       tools: options.tools ?? this.tools,
       toolPolicy: options.toolPolicy ?? this.toolPolicy,
       onInputRequired: inputHandler
-        ? (prompt) => this.requireInput(prompt)
+        ? (prompt) => this.requireInput(prompt, undefined, this.requestSignal(options.signal), inputHandler)
         : async () => undefined,
       onForm: this.formHandler,
       // A turn that called suspend/1 stops here; the record is what --session
@@ -2844,7 +2926,7 @@ export class DMLSession {
    * this to route input through the REPL's own readline interface instead of a
    * second interface on the same stdin.
    */
-  setInputHandler(handler: ((prompt: string, options?: string[]) => Promise<string | undefined>) | undefined): void {
+  setInputHandler(handler: HumanInputHandler | undefined): void {
     this.inputHandler = handler;
   }
 
@@ -2857,16 +2939,27 @@ export class DMLSession {
   }
 
   /** Resolve a human answer, or undefined when no channel is configured. */
-  private async requireInput(prompt: string, options?: string[]): Promise<string | undefined> {
-    if (!this.inputHandler) {
-      return undefined;
-    }
-    // Serialize human-channel requests across every session in this process: a
-    // background subagent's input/2 must not clobber a foreground prompt (one
-    // editor, one human). Child process sessions share this module-level queue.
-    const value = sharedInputQueue.then(() => this.inputHandler!(prompt, options));
-    sharedInputQueue = value.then(() => undefined, () => undefined);
-    return value;
+  private async requireInput(prompt: string, options?: string[], signal = this.activeRequestSignal, handler = this.inputHandler): Promise<string | undefined> {
+    if (!handler) return undefined;
+    const effective = this.requestSignal(signal);
+    const abortable = (promise: Promise<string | undefined>): Promise<string | undefined> => new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (value: string | undefined, error?: unknown) => {
+        if (settled) return;
+        settled = true;
+        effective.removeEventListener('abort', aborted);
+        if (error) reject(error); else resolve(value);
+      };
+      const aborted = () => finish(undefined);
+      effective.addEventListener('abort', aborted, { once: true });
+      promise.then(value => finish(value), error => finish(undefined, error));
+      if (effective.aborted) aborted();
+    });
+    // Keep queued requests serialized even if one is cancelled before its turn.
+    // An active cancelled handler need not resolve before the next owner can ask.
+    const scheduled = sharedInputQueue.then(() => effective.aborted ? undefined : abortable(Promise.resolve().then(() => handler(prompt, options, effective))));
+    sharedInputQueue = scheduled.then(() => undefined, () => undefined);
+    return abortable(scheduled);
   }
 
   /**
@@ -2894,7 +2987,7 @@ export class DMLSession {
     if (!this.inputHandler) {
       return false;
     }
-    const answer = await this.inputHandler(
+    const answer = await this.requireInput(
       `Max model-call budget reached (${this.modelCallBudget}). Continue for another ${this.maxModelCalls} calls? (yes/no)\n`
       + 'change the limit: repl.maxModelCalls in .deepclause/config.json '
       + '("repl": { "maxModelCalls": N }), or pass --max-model-calls N; 0 means unlimited',

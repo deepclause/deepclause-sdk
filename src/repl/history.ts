@@ -23,6 +23,13 @@ import * as path from 'path';
 
 export type HistoryTrace = 'off' | 'summary' | 'full';
 
+export function assertSessionId(id: string): void {
+  if (typeof id !== 'string' || !/^[A-Za-z0-9_.-]+$/.test(id) || id === '.' || id === '..') throw new Error('Invalid session id');
+}
+export function assertHarnessName(name: string): void {
+  if (typeof name !== 'string' || !name || name === '.' || name === '..' || /[\\/\\\\:\u0000-\u001f]/.test(name)) throw new Error('Harness name must be a workspace directory name, not a path');
+}
+
 export interface HistoryOptions {
   /** Workspace-relative root (default `.deepclause/repl`). */
   dir?: string;
@@ -92,6 +99,9 @@ export interface HistoryScriptRef {
  * scratch bundle is gone. See `docs/DML_REPL_SESSION_HISTORY.md`.
  */
 export interface SessionHarnessSnapshot {
+  /** Fixed model-facing Work contract, separate from mutable private DML state. */
+  workIdentity?: { hash: string; source?: string; scripts: HistoryScriptRef[]; shell: import('../types.js').ShellSpec };
+  baseSourceHash?: string;
   sessionId: string;
   /** Last recorded harness version for the session (0 = none). */
   version: number;
@@ -119,6 +129,7 @@ export interface SessionMetadata {
   shellKind?: 'agent' | 'workflow';
   harnessVersion?: number;
   harnessHash?: string;
+  sessionStateHash?: string;
   title?: string;
   origin?: 'tui' | 'web';
   parentSessionId?: string;
@@ -179,6 +190,7 @@ export class HistoryStore {
   private readonly redactions: RegExp[];
   private eventBuffer: string[] = [];
   private flushTimer?: ReturnType<typeof setTimeout>;
+  private metadataChain: Promise<void> = Promise.resolve();
   /** Current HEAD version (0 = empty harness) and the highest ever issued. */
   private headVersion = 0;
   private maxVersion = 0;
@@ -192,6 +204,8 @@ export class HistoryStore {
     /** Harness this session edits (a project can hold several). */
     readonly harnessName: string = 'main',
   ) {
+    assertSessionId(sessionId);
+    assertHarnessName(harnessName);
     this.rootRel = (options.dir ?? DEFAULT_DIR).replace(/\\/g, '/').replace(/\/+$/, '');
     this.rootAbs = path.resolve(workspacePath, this.rootRel);
     this.sessionDirRel = `${this.rootRel}/sessions/${sessionId}`;
@@ -371,6 +385,7 @@ export class HistoryStore {
 
   /** The turns recorded for a session, oldest first (used for input history). */
   async readTurns(sessionId: string = this.sessionId): Promise<HistoryTurnRecord[]> {
+    assertSessionId(sessionId);
     const file = path.join(this.sessionsDir(), sessionId, 'turns.jsonl');
     let text: string;
     try {
@@ -476,6 +491,14 @@ export class HistoryStore {
    * Record a harness version. Returns the facts to assert and the new version.
    */
   async recordChange(record: HistoryChangeRecord): Promise<{ facts: string[]; version: number }> {
+    // Refresh cached counters before a sequential writer publishes a new version.
+    // Cross-process/multi-tab leases remain a separate storage-host concern.
+    try {
+      const head = JSON.parse(await fs.readFile(this.headFile, 'utf8')) as { version: number; maxVersion?: number; hash?: string };
+      this.headVersion = head.version;
+      this.maxVersion = Math.max(this.maxVersion, head.maxVersion ?? head.version);
+      this.headHash = head.hash;
+    } catch { /* new harness */ }
     const ts = nowIso();
     const hash = harnessHash(record.module, record.scripts);
     // Committing content identical to HEAD is a no-op: do not burn a version.
@@ -605,10 +628,12 @@ export class HistoryStore {
   }
 
   private sessionHarnessFile(sessionId: string): string {
+    assertSessionId(sessionId);
     return path.join(this.sessionsDir(), sessionId, 'harness.json');
   }
 
   private sessionSuspendFile(sessionId: string): string {
+    assertSessionId(sessionId);
     return path.join(this.sessionsDir(), sessionId, 'suspend.json');
   }
 
@@ -665,6 +690,7 @@ export class HistoryStore {
 
   /** True when a session directory exists for `sessionId`. */
   async sessionExists(sessionId: string): Promise<boolean> {
+    assertSessionId(sessionId);
     try {
       return (await fs.stat(path.join(this.sessionsDir(), sessionId))).isDirectory();
     } catch {
@@ -704,6 +730,7 @@ export class HistoryStore {
   }
 
   async readSessionMetadata(sessionId: string = this.sessionId): Promise<SessionMetadata | null> {
+    assertSessionId(sessionId);
     try {
       const data = JSON.parse(await fs.readFile(path.join(this.sessionsDir(), sessionId, 'session.json'), 'utf8'));
       return data && typeof data === 'object' ? data : null;
@@ -711,8 +738,12 @@ export class HistoryStore {
   }
 
   async updateSessionMetadata(patch: SessionMetadata): Promise<void> {
-    const previous = await this.readSessionMetadata() ?? {};
-    await this.writeJson(path.join(this.sessionDirAbs, 'session.json'), { ...previous, ...patch, schemaVersion: 2 });
+    const operation = this.metadataChain.then(async () => {
+      const previous = await this.readSessionMetadata() ?? {};
+      await this.writeJson(path.join(this.sessionDirAbs, 'session.json'), { ...previous, ...patch, schemaVersion: 2 });
+    });
+    this.metadataChain = operation.catch(() => undefined);
+    return operation;
   }
 
   /** The most recently started session, or null when there is none. */
@@ -723,6 +754,7 @@ export class HistoryStore {
 
   /** The highest turn number recorded for a session (0 when none). */
   async lastTurn(sessionId: string = this.sessionId): Promise<number> {
+    assertSessionId(sessionId);
     const file = path.join(this.sessionsDir(), sessionId, 'turns.jsonl');
     let text: string;
     try {
@@ -747,6 +779,7 @@ export class HistoryStore {
    * `limit`. Used to render a resumed session on load.
    */
   async readEvents(sessionId: string = this.sessionId, limit = 400): Promise<HistoryEventRecord[]> {
+    assertSessionId(sessionId);
     let text: string;
     try {
       text = await fs.readFile(path.join(this.sessionsDir(), sessionId, 'events.jsonl'), 'utf8');
@@ -839,6 +872,14 @@ export class HistoryStore {
       if (value !== undefined && value !== null) base[key] = this.scrub(value);
     };
     switch (event.type) {
+      case 'workflow_result': put('workflow', event.workflow); put('content', event.content); break;
+      case 'suspend': put('suspend', event.suspend); put('content', event.content); break;
+      case 'html': put('html', event.html); break;
+      case 'media': {
+        const media = event.media as { path?: string; mimeType?: string } | undefined;
+        if (media?.path) put('media', { path: media.path, mimeType: media.mimeType });
+        break;
+      }
       case 'stream':
         if (this.trace === 'full') put('content', event.content);
         break;
@@ -846,6 +887,7 @@ export class HistoryStore {
       case 'answer':
       case 'error':
       case 'log':
+        put('level', event.level);
         put('content', event.content);
         break;
       case 'tool_call':
@@ -862,6 +904,8 @@ export class HistoryStore {
         put('bindings', (event.solution as { bindings?: unknown } | undefined)?.bindings);
         break;
       case 'usage':
+        put('usageSource', event.usageSource);
+        put('usageModel', event.usageModel);
         put('usage', event.usage);
         break;
       case 'task_activity':

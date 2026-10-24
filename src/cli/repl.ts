@@ -11,7 +11,7 @@ import type { Command } from 'commander';
 import { readFileSync } from 'fs';
 import { readdir } from 'fs/promises';
 import { parseWorkflowCommand, runDeclaredWorkflow } from './work.js';
-import type { SessionPurpose, WorkSpec } from '../work/index.js';
+import { resolveWorkbenchPolicy, type SessionPurpose, type WorkSpec } from '../work/index.js';
 import * as path from 'path';
 import * as readline from 'readline';
 import { fileURLToPath } from 'url';
@@ -57,7 +57,7 @@ import type { DMLEvent, FormEventPayload, ImageBackend } from '../types.js';
 import type { JsonObject } from '../forms/spec.js';
 import { pickForm } from '../repl/form-widget.js';
 import { parseModelId, resolveModelSlotConfig, type Provider } from '../system/config/model-slots.js';
-import { loadReplConfig, resolveReplCompactionConfig, updateConfig } from './config.js';
+import { loadReplConfig, updateConfig } from './config.js';
 import {
   renderDiagramImage,
   resolveMedia,
@@ -596,7 +596,7 @@ const PROVIDER_ENV_KEYS: Record<string, string> = {
 export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRuntime> {
   const workspace = path.resolve(options.workspace ?? './');
   const config = await loadReplConfig(workspace);
-  const replCompaction = resolveReplCompactionConfig(config);
+  const runtimePolicy = resolveWorkbenchPolicy(config);
   // One harness per name within a project: `--harness`, else the `-l` file's
   // name, else the configured default (`main`).
   let harnessName = normalizeHarnessName(options.harness)
@@ -783,6 +783,7 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
   let currentInput = buildCliOnInput(options);
   const replOptions: HarnessReplOptions = {
     mode: options.mode ?? (options.workflow ? 'work' : undefined),
+    sessionKind: options.workflow ? 'workflow-run' : undefined,
     origin: 'tui',
     sessionId,
     resume,
@@ -791,9 +792,10 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
     provider: harnessProvider,
     temperature: options.temperature ?? config.temperatures.run,
     params: options.param ?? {},
-    gasLimit: options.gasLimit,
-    maxDepth: options.depth ?? config.repl.maxDepth,
-    maxModelCalls: options.maxModelCalls ?? config.repl.maxModelCalls,
+    gasLimit: options.gasLimit ?? runtimePolicy.gasLimit,
+    maxDepth: options.depth ?? runtimePolicy.maxDepth,
+    maxModelCalls: options.maxModelCalls ?? runtimePolicy.maxModelCalls,
+    providerConcurrency: runtimePolicy.providerConcurrency,
     tools: toolset.tools,
     hostToolsCatalog: toolset.catalog,
     executionBackend: toolset.environment.kind,
@@ -814,7 +816,7 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
     harness: resume && !options.harness ? undefined : harnessName,
     execution: options.execution,
     autoLoadHarness: !(options.load?.length),
-    compaction: { settings: replCompaction, auto: replCompaction.auto },
+    compaction: runtimePolicy.compaction,
     contextWindow,
     onInput: currentInput,
   };
@@ -1657,6 +1659,7 @@ export async function runTui(
     backend: runtime.backend,
     isFrozen: () => runtime.repl.isFrozen(),
     isRunning: () => runState.running,
+    canSteer: () => runState.steerable,
     processLabel: () => {
       const active = runtime.repl.session
         .processes()
@@ -2015,7 +2018,7 @@ export async function runTui(
     const current = runtime.model.includes(':') ? runtime.model : undefined;
     const picked = await choose((done) => new ChoicePicker({
       title: 'Model',
-      hint: 'The default for this workspace (applies to the next session)',
+      hint: 'The default for this workspace (applies on the next CLI start)',
       current,
       items: catalog.map((entry) => ({
         value: entry.model,

@@ -209,7 +209,7 @@ export function createWorkAgentTools(controller: HarnessToolController): Map<str
       description: tool.description || `Run ${usageLine(tool)}`,
       parameters: workToolParameters(tool),
       execute: (args, context) => executeWorkEntry(tool, args,
-        goal => controller.executeForeground(goal, 1, context?.signal, context?.onEvent, 'full'),
+        goal => controller.executeForeground(goal, 1, context?.signal, event => { if (event.type !== 'solution') context?.onEvent?.(event); }, 'full'),
         context?.signal),
     });
   }
@@ -233,10 +233,10 @@ export function createWorkAgentTools(controller: HarnessToolController): Map<str
       execute: async (args, context) => {
         const name = String(args.name ?? '');
         const workflow = shell.workflows.find((entry) => entry.name === name);
-        if (!workflow) return { ok: false, error: `unknown workflow: ${name}` };
+        if (!workflow) return { ok: false, status: 'failed', outputs: {}, output: '', elapsedMs: 0, error: `unknown workflow: ${name}` };
         const values = (args.inputs && typeof args.inputs === 'object' ? args.inputs : {}) as Record<string, unknown>;
         return executeWorkEntry(workflow, values,
-          goal => controller.executeForeground(goal, 1, context?.signal, context?.onEvent, 'full'),
+          goal => controller.executeForeground(goal, 1, context?.signal, event => { if (event.type !== 'solution') context?.onEvent?.(event); }, 'full'),
           context?.signal);
       },
     });

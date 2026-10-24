@@ -66,7 +66,13 @@ describe('tool cancellation', () => {
 
     const controller = new AbortController();
     await collect(repl.query('run', { signal: controller.signal }));
-    expect(seen).toBe(controller.signal);
+    // The host also binds session lifetime; identity need not be the original
+    // signal, but cancellation and its reason must still propagate.
+    expect(seen).toBeDefined();
+    expect(seen!.aborted).toBe(false);
+    controller.abort('stop');
+    expect(seen!.aborted).toBe(true);
+    expect(seen!.reason).toBe('stop');
   });
 
   it('the bash tool kills its child when the per-call signal aborts', async () => {

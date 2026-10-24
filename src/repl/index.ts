@@ -9,6 +9,7 @@
 import type {
   DMLEvent,
   FormEventPayload,
+  HumanInputHandler,
   ImageBackend,
   LLMBackend,
   MemoryMessage,
@@ -60,7 +61,7 @@ export interface HarnessReplOptions {
   /** Legacy harness-only input handler (prefer onInput). */
   onInputRequired?: (prompt: string) => Promise<string>;
   /** Unified human-in-the-loop channel for meta ask_user and harness input/2. */
-  onInput?: (prompt: string, options?: string[]) => Promise<string | undefined>;
+  onInput?: HumanInputHandler;
   initialHarnessMemory?: MemoryMessage[];
   /** Maximum nested frame depth (default 3). */
   maxDepth?: number;
@@ -92,7 +93,7 @@ export interface HarnessReplOptions {
   createProcessSession?: import('./session.js').DMLSessionOptions['createProcessSession'];
   /** Human-in-the-loop channel for DML `input/2` / `exec(ask_user(...))`. */
   askUser?: (prompt: string, options?: string[]) => Promise<{ answer: string } | { cancelled: true }>;
-  /** Called when a form opens (docs/DML_FORMS.md). */
+  /** Form presentation/updates and operation-owned close notifications. */
   onForm?: (form: FormEventPayload) => void | Promise<void>;
   /** Explicit judgment backend registry. When omitted, an `llm` backend is built from the active model. */
   judgeSelection?: JudgeSelection;
@@ -130,16 +131,18 @@ export interface RollbackResult {
 }
 
 export interface HarnessRepl extends WorkSessionPort {
+  setTitle(title: string): Promise<void>;
   /** Goal mode: run a goal, enumerating solutions/events. */
   query(goal: string, opts?: RunOpts): AsyncGenerator<DMLQueryEvent>;
   /** Prompt mode (M3): NL -> task -> DML -> commit -> run. */
   prompt(request: string, opts?: RunOpts): AsyncGenerator<ReplEvent>;
+  updateWorkShell(shell: import('../types.js').ShellSpec, expectedHash?: string): Promise<import('./harness-tools.js').HarnessCommitResult>;
   /** Load a DML file into the living module. */
   load(file: string): Promise<{ error?: string; warnings?: string[] }>;
   /** Read-only listing of the living module. */
   list(filter?: string): Promise<string>;
   /** Replace the human-in-the-loop channel (used by the CLI's shared readline). */
-  setOnInput(handler: ((prompt: string, options?: string[]) => Promise<string | undefined>) | undefined): void;
+  setOnInput(handler: HumanInputHandler | undefined): void;
   /** Read-only lock (M2). */
   freeze(): Promise<void>;
   /** Irreversible freeze: `unfreeze.` is refused (--locked). */
@@ -171,12 +174,15 @@ class HarnessReplImpl implements HarnessRepl {
     this.session = session;
   }
 
-  setOnInput(handler: ((prompt: string, options?: string[]) => Promise<string | undefined>) | undefined): void {
+  setOnInput(handler: HumanInputHandler | undefined): void {
     this.session.setInputHandler(handler);
   }
 
+  updateWorkShell(shell: import('../types.js').ShellSpec, expectedHash?: string) { return this.session.updateWorkShell(shell, expectedHash); }
+  setTitle(title: string) { return this.session.setTitle(title); }
   workSpec() { return this.session.workSpec(); }
   sessionInfo() { return this.session.sessionInfo(); }
+  async suspension() { return this.session.pendingSuspension(); }
   runWorkflow(name: string, inputs: Record<string, unknown> = {}, options: RunOpts = {}) { return this.session.runWorkflow(name, inputs, options); }
   resumeSuspension(options: RunOpts = {}) { return this.session.resumeSuspension(options); }
 

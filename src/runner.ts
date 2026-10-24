@@ -797,6 +797,9 @@ export class DMLRunner {
           // Request user input
           yield { type: 'input_required', prompt: step.prompt };
           const input = await options.onInputRequired(step.prompt ?? '');
+          // An aborted frame will never consume an input response. Posting a
+          // cancellation here would poison the next foreground frame's input/2.
+          if (options.signal?.aborted) break;
           if (input === undefined || input === null) {
             this.cancelInput();
           } else {

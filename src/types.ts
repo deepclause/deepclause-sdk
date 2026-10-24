@@ -404,6 +404,8 @@ export interface DMLEvent extends FrameEventMeta {
  * Tool definition for registering external tools
  */
 /** Per-call context handed to a tool's `execute`. */
+export type HumanInputHandler = (prompt: string, options?: string[], signal?: AbortSignal) => Promise<string | undefined>;
+
 export interface ToolExecutionContext {
   /** Abort signal for the current turn; long-running tools should honor it. */
   signal?: AbortSignal;

@@ -21,7 +21,7 @@ import type {
   MemoryMessage,
   ToolDefinition,
 } from '../types.js';
-import { compactMemory, shouldCompact, type CompactionSettings, type CompactMemoryResult } from './compaction.js';
+import { compactMemory, shouldCompact, estimateMemoryTokens, type CompactionSettings, type CompactMemoryResult } from './compaction.js';
 import { formatModelCatalogEntry, type ModelCatalogEntry } from './model-resolver.js';
 
 export interface HarnessAgentOptions {
@@ -211,6 +211,7 @@ function stringifyToolResult(result: unknown): string {
 function toolResultFailure(result: unknown): string | undefined {
   if (!result || typeof result !== 'object') return undefined;
   const record = result as Record<string, unknown>;
+  if (record.status === 'suspended') return undefined; // call returned a resumable pause, not an execution error
   if (record.ok === false) {
     return typeof record.error === 'string' && record.error ? record.error : 'failed';
   }
@@ -311,7 +312,7 @@ export class HarnessAgent {
     }
     const perChunk = this.options.maxModelCalls ?? 0;
     const answer = await ask(
-      `The authoring turn has reached its model-call budget (${used} calls).\n`
+      `The turn has reached its model-call budget (${used} calls).\n`
       + `Continue for another ${perChunk} calls? [yes/no]\n`
       + 'change the limit: repl.maxModelCalls in .deepclause/config.json '
       + '("repl": { "maxModelCalls": N }), or pass --max-model-calls N; 0 means unlimited',
@@ -360,7 +361,7 @@ export class HarnessAgent {
         if (!extend) {
           yield {
             type: 'error',
-            content: `authoring turn stopped: model-call budget exhausted (${budget} calls). `
+            content: `turn stopped: model-call budget exhausted (${budget} calls). `
               + 'Raise repl.maxModelCalls in .deepclause/config.json (or pass --max-model-calls); 0 = unlimited.',
           };
           break;
@@ -375,7 +376,7 @@ export class HarnessAgent {
       }
 
       if (autoCompact && settings?.enabled && this.options.contextWindow) {
-        if (shouldCompact(lastInputTokens ?? 0, this.options.contextWindow, settings)) {
+        if (shouldCompact(lastInputTokens ?? estimateMemoryTokens(toMemoryMessages(this.messages)), this.options.contextWindow, settings)) {
           const result = await this.compactMemory(true, options.signal);
           if (result.applied) {
             yield {

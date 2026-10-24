@@ -26,6 +26,7 @@ describe('foreground workflow goals', () => {
       model: 'test-model',
       provider: 'openai',
       onForm: (form: FormEventPayload) => {
+        if (form.op !== 'open') return
         const id = (form as FormEventPayload & { formId?: string }).formId
         setTimeout(() => {
           if (!id) return
