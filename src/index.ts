@@ -6,6 +6,7 @@
  */
 
 export { createDeepClause } from './sdk.js';
+export * from './work/index.js';
 // Engine host seam: lets a non-Node embedding (the browser) supply the SWI-Prolog
 // loader and workspace mount. See docs/DML_FORMS.md-adjacent embedding notes.
 export { setPrologHost, getPrologHost, recordPrologMessage } from './prolog/loader.js';

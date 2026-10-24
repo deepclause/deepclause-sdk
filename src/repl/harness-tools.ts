@@ -6,9 +6,10 @@
  * the live harness through a `HarnessToolController` implemented by `DMLSession`.
  */
 
-import type { DMLEvent, ShellSpec, ShellTool, ShellWorkflow, ToolDefinition } from '../types.js';
+import type { DMLEvent, ShellSpec, ShellWorkflow, ToolDefinition } from '../types.js';
 import type { DiagramMode } from '../visualize/index.js';
 import type { ReferenceOptions } from './reference.js';
+import { executeWorkEntry, validateWorkShell, workToolParameters } from '../work/index.js';
 
 import type { Pid, ProcessInfo, SpawnOptions } from './processes.js';
 import { pidTermText } from './processes.js';
@@ -20,6 +21,8 @@ export interface HarnessExecuteResult {
   error?: string;
   /** Wall-clock duration of the goal, in milliseconds. */
   elapsedMs: number;
+  /** Explicit terminal outcome; an ended iterator is not necessarily success. */
+  outcome?: 'succeeded' | 'failed' | 'cancelled' | 'suspended';
   /**
    * What was left out of the bindings, when not all of them were returned.
    * Without it a shortened value is indistinguishable from a short one, and an
@@ -178,55 +181,6 @@ export function formatProcessCode(source: ProcessCodeSource, target: string): st
 
 const stringProp = (description: string): { type: string; description: string } => ({ type: 'string', description });
 
-function workArgValue(type: string, value: unknown): string {
-  if (type === 'integer') {
-    const number = Number(value);
-    return Number.isInteger(number) ? String(number) : '0';
-  }
-  if (type === 'number') {
-    const number = Number(value);
-    return Number.isFinite(number) ? String(number) : '0';
-  }
-  if (type === 'boolean') return value === true || value === 'true' ? 'true' : 'false';
-  return JSON.stringify(value == null ? '' : String(value));
-}
-
-function workArgSchema(type: string): { type: string } {
-  if (type === 'integer' || type === 'number') return { type: 'number' };
-  if (type === 'boolean') return { type: 'boolean' };
-  if (type === 'object') return { type: 'object' };
-  if (type === 'array') return { type: 'array' };
-  return { type: 'string' };
-}
-
-function workGoal(entry: { goal: string; inputs: ShellWorkflow['inputs']; outputs: ShellWorkflow['outputs'] }, values: Record<string, unknown>): string {
-  const inputs = entry.inputs.map((arg, index) => workArgValue(arg.type, values[arg.name] ?? values[`arg${index + 1}`]));
-  const outputs = entry.outputs.map((_, index) => `Out${index + 1}`);
-  const all = [...inputs, ...outputs];
-  return all.length > 0 ? `${entry.goal}(${all.join(', ')})` : entry.goal;
-}
-
-function workResult(entry: { outputs: ShellWorkflow['outputs'] }, result: HarnessExecuteResult): Record<string, unknown> {
-  const solution = result.solutions[0] ?? result.bindings;
-  const byName = new Map(solution.map((binding) => [binding.name, binding.value]));
-  const outputs: Record<string, string> = {};
-  entry.outputs.forEach((arg, index) => {
-    outputs[arg.name] = byName.get(`Out${index + 1}`) ?? '';
-  });
-  return { ok: !result.error, outputs, output: result.output, ...(result.error ? { error: result.error } : {}) };
-}
-
-function toolParameters(tool: ShellTool): ToolDefinition['parameters'] {
-  const properties: Record<string, { type: string; description: string }> = {};
-  for (const input of tool.inputs) {
-    properties[input.name || `arg${Object.keys(properties).length + 1}`] = {
-      type: workArgSchema(input.type).type,
-      description: `Input (${input.type}).`,
-    };
-  }
-  return { type: 'object', properties, required: tool.inputs.map((input) => input.name).filter(Boolean) };
-}
-
 function usageLine(entry: ShellWorkflow): string {
   const args = [
     ...entry.inputs.map((arg) => `${arg.name}: ${arg.type}`),
@@ -243,6 +197,8 @@ export function createWorkAgentTools(controller: HarnessToolController): Map<str
   const shell = controller.shell();
   const tools = new Map<string, ToolDefinition>();
   if (!shell) return tools;
+  const invalid = validateWorkShell(shell);
+  if (invalid.length) throw new Error(`Invalid Work shell: ${invalid.join('; ')}`);
   const base = createHarnessTools(controller);
   const showImage = base.get('show_image');
   if (showImage && shell.hostTools.includes('show_image')) tools.set('show_image', showImage);
@@ -251,17 +207,10 @@ export function createWorkAgentTools(controller: HarnessToolController): Map<str
     if (tools.has(tool.name)) continue;
     tools.set(tool.name, {
       description: tool.description || `Run ${usageLine(tool)}`,
-      parameters: toolParameters(tool),
-      execute: async (args, context) => {
-        const result = await controller.executeForeground(
-          workGoal(tool, args),
-          1,
-          context?.signal,
-          context?.onEvent,
-          'full',
-        );
-        return workResult(tool, result);
-      },
+      parameters: workToolParameters(tool),
+      execute: (args, context) => executeWorkEntry(tool, args,
+        goal => controller.executeForeground(goal, 1, context?.signal, context?.onEvent, 'full'),
+        context?.signal),
     });
   }
 
@@ -286,14 +235,9 @@ export function createWorkAgentTools(controller: HarnessToolController): Map<str
         const workflow = shell.workflows.find((entry) => entry.name === name);
         if (!workflow) return { ok: false, error: `unknown workflow: ${name}` };
         const values = (args.inputs && typeof args.inputs === 'object' ? args.inputs : {}) as Record<string, unknown>;
-        const result = await controller.executeForeground(
-          workGoal(workflow, values),
-          1,
-          context?.signal,
-          context?.onEvent,
-          'full',
-        );
-        return workResult(workflow, result);
+        return executeWorkEntry(workflow, values,
+          goal => controller.executeForeground(goal, 1, context?.signal, context?.onEvent, 'full'),
+          context?.signal);
       },
     });
   }

@@ -42,6 +42,8 @@ export interface HistoryEventContext {
 }
 
 export interface HistoryTurnRecord {
+  /** Explicit invocation metadata; mode remains backward-compatible goal/prompt. */
+  workflow?: { name: string; inputs: Record<string, unknown>; status?: string; outputs?: Record<string, unknown> };
   turn: number;
   mode: 'goal' | 'prompt';
   request: string;
@@ -109,8 +111,23 @@ export interface SessionHarnessSnapshot {
   module: string;
 }
 
+export interface SessionMetadata {
+  schemaVersion?: number;
+  harness?: string;
+  mode?: 'develop' | 'work';
+  kind?: 'conversation' | 'workflow-run';
+  shellKind?: 'agent' | 'workflow';
+  harnessVersion?: number;
+  harnessHash?: string;
+  title?: string;
+  origin?: 'tui' | 'web';
+  parentSessionId?: string;
+  model?: string;
+  backend?: string;
+}
+
 /** Metadata about a past REPL session, for `--session` resolution. */
-export interface SessionSummary {
+export interface SessionSummary extends SessionMetadata {
   id: string;
   startedAt?: string;
   endedAt?: string | null;
@@ -378,7 +395,7 @@ export class HistoryStore {
   }
 
   async startSession(
-    info: { model: string; backend: string },
+    info: SessionMetadata & { model: string; backend: string },
     options: { resume?: boolean } = {},
   ): Promise<string[]> {
     const sessionFile = path.join(this.sessionDirAbs, 'session.json');
@@ -398,8 +415,9 @@ export class HistoryStore {
       await this.writeJson(sessionFile, {
         ...existing,
         sessionId: this.sessionId,
-        model: info.model,
-        backend: info.backend,
+        schemaVersion: 2,
+        ...info,
+        harness: info.harness ?? existing.harness ?? this.harnessName,
         traceDir: this.sessionDirRel,
         endedAt: null,
         exit: null,
@@ -419,8 +437,9 @@ export class HistoryStore {
       startedAt,
       endedAt: null,
       exit: null,
-      model: info.model,
-      backend: info.backend,
+      schemaVersion: 2,
+      ...info,
+      harness: info.harness ?? this.harnessName,
       traceDir: this.sessionDirRel,
     });
     return facts;
@@ -672,6 +691,7 @@ export class HistoryStore {
         // session without metadata (e.g. history disabled mid-way)
       }
       summaries.push({
+        ...(meta as SessionMetadata),
         id,
         startedAt: typeof meta.startedAt === 'string' ? meta.startedAt : undefined,
         endedAt: typeof meta.endedAt === 'string' ? meta.endedAt : null,
@@ -681,6 +701,18 @@ export class HistoryStore {
     }
     summaries.sort((a, b) => (a.startedAt ?? '').localeCompare(b.startedAt ?? ''));
     return summaries;
+  }
+
+  async readSessionMetadata(sessionId: string = this.sessionId): Promise<SessionMetadata | null> {
+    try {
+      const data = JSON.parse(await fs.readFile(path.join(this.sessionsDir(), sessionId, 'session.json'), 'utf8'));
+      return data && typeof data === 'object' ? data : null;
+    } catch { return null; }
+  }
+
+  async updateSessionMetadata(patch: SessionMetadata): Promise<void> {
+    const previous = await this.readSessionMetadata() ?? {};
+    await this.writeJson(path.join(this.sessionDirAbs, 'session.json'), { ...previous, ...patch, schemaVersion: 2 });
   }
 
   /** The most recently started session, or null when there is none. */

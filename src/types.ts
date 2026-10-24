@@ -315,7 +315,7 @@ export interface FormSubmitPayload {
 }
 
 export interface DMLEvent extends FrameEventMeta {
-  type: 'output' | 'log' | 'diagnostic' | 'answer' | 'input_required' | 'error' | 'finished' | 'stream' | 'reasoning' | 'tool_call' | 'model_call' | 'usage' | 'memory_compaction' | 'task_activity' | 'solution' | 'meta_result' | 'media' | 'html' | 'form' | 'suspend';
+  type: 'output' | 'log' | 'diagnostic' | 'answer' | 'input_required' | 'error' | 'finished' | 'stream' | 'reasoning' | 'tool_call' | 'model_call' | 'usage' | 'memory_compaction' | 'task_activity' | 'solution' | 'meta_result' | 'media' | 'html' | 'form' | 'suspend' | 'workflow_result';
   content?: string;
   /**
    * Severity of a `log` event. Prolog's own stderr arrives this way; `warning`
@@ -327,6 +327,8 @@ export interface DMLEvent extends FrameEventMeta {
   channel?: 'stdout' | 'stderr';
   /** Media produced by a step (path in the workspace, optional inline base64). */
   media?: { path?: string; mimeType: string; data?: string; kind?: string };
+  /** A declared workflow's truthful, typed terminal result. */
+  workflow?: { name: string; result: import('./work/index.js').WorkResult; harness: string; hash: string; version?: number };
   /** Workspace HTML miniapp produced by `output(html(Path))`. */
   html?: { path: string };
   /** Form interaction (only for 'form' events). See docs/DML_FORMS.md. */
@@ -423,6 +425,7 @@ export interface ToolDefinition {
  */
 export interface JsonSchema {
   type: 'object';
+  additionalProperties?: boolean;
   properties: Record<string, {
     type: string;
     description?: string;

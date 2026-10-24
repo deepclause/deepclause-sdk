@@ -26,6 +26,7 @@ import type { CompactionSettings } from './compaction.js';
 import type { DiagramMode } from '../visualize/index.js';
 import type { ModelResolver } from './model-resolver.js';
 import type { ExecutionBackendKind } from '../system/runtime/shell-manager.js';
+import type { SessionPurpose, WorkSessionPort, WorkSnapshot } from '../work/index.js';
 
 export type RunOpts = DMLQueryOptions;
 
@@ -34,6 +35,11 @@ export type DMLQueryEvent = DMLEvent;
 export type ReplEvent = DMLEvent;
 
 export interface HarnessReplOptions {
+  mode?: SessionPurpose;
+  sessionKind?: 'conversation' | 'workflow-run';
+  origin?: 'tui' | 'web';
+  parentSessionId?: string;
+  harnessSnapshot?: WorkSnapshot;
   sessionId?: string;
   /** Resume the session identified by `sessionId` (restore its saved harness). */
   resume?: boolean;
@@ -123,7 +129,7 @@ export interface RollbackResult {
   error?: string;
 }
 
-export interface HarnessRepl {
+export interface HarnessRepl extends WorkSessionPort {
   /** Goal mode: run a goal, enumerating solutions/events. */
   query(goal: string, opts?: RunOpts): AsyncGenerator<DMLQueryEvent>;
   /** Prompt mode (M3): NL -> task -> DML -> commit -> run. */
@@ -168,6 +174,11 @@ class HarnessReplImpl implements HarnessRepl {
   setOnInput(handler: ((prompt: string, options?: string[]) => Promise<string | undefined>) | undefined): void {
     this.session.setInputHandler(handler);
   }
+
+  workSpec() { return this.session.workSpec(); }
+  sessionInfo() { return this.session.sessionInfo(); }
+  runWorkflow(name: string, inputs: Record<string, unknown> = {}, options: RunOpts = {}) { return this.session.runWorkflow(name, inputs, options); }
+  resumeSuspension(options: RunOpts = {}) { return this.session.resumeSuspension(options); }
 
   query(goal: string, opts?: RunOpts): AsyncGenerator<DMLQueryEvent> {
     return this.session.query(goal, opts);
@@ -254,6 +265,11 @@ export async function createHarnessRepl(options: HarnessReplOptions): Promise<Ha
     : undefined;
 
   const session = await DMLSession.open({
+    mode: options.mode,
+    sessionKind: options.sessionKind,
+    origin: options.origin,
+    parentSessionId: options.parentSessionId,
+    harnessSnapshot: options.harnessSnapshot,
     sessionId: options.sessionId,
     resume: options.resume,
     workspacePath: options.workspacePath,

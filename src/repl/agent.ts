@@ -250,6 +250,9 @@ export class HarnessAgent {
       : [];
   }
 
+  /** Record a user-triggered external workflow result without fabricating tool calls. */
+  addContext(text: string): void { this.messages.push({ role: 'user', content: text }); }
+
   /** The persisted conversation (real user/assistant turns only, no host nudges). */
   getMessages(): MemoryMessage[] {
     return this.messages
