@@ -596,9 +596,11 @@ export class DMLSession {
         const stateHash = harnessHash(session.moduleSource(), scripts);
         const programHash = harnessHash(session.canonicalSource(), scripts);
         const expected = snapshot?.hash ?? options.harnessSnapshot?.hash;
-        // Session snapshots hash their human-readable state. Work specs hash a
-        // canonical program so anonymous variable ids cannot create false drift.
-        if (expected && expected !== (snapshot ? stateHash : programHash) && expected !== stateHash) {
+        const offeredSource = snapshot?.module ?? options.harnessSnapshot?.source;
+        // Validate the exact source carried over the host boundary. Re-rendering
+        // can reorder annotations without changing a valid, untouched snapshot.
+        const offeredHash = offeredSource === undefined ? undefined : harnessHash(offeredSource, scripts);
+        if (expected && expected !== offeredHash && expected !== (snapshot ? stateHash : programHash) && expected !== stateHash) {
           await session.dispose(); throw new Error('Saved Work snapshot or linked scripts changed. Refresh before starting a new run.');
         }
         session.pinnedWorkHash = snapshot?.workIdentity?.hash ?? programHash;
@@ -636,12 +638,13 @@ export class DMLSession {
       this.pinnedWorkScripts ??= scripts;
       this.pinnedWorkVersion ??= this.history?.currentVersion;
     }
+    const snapshotSource = this.purpose === 'work' ? this.pinnedWorkSource ?? this.moduleSource() : this.moduleSource();
+    const snapshotScripts = this.purpose === 'work' ? this.pinnedWorkScripts ?? scripts : scripts;
     return { harness: this.harnessName, shell: errors.length || scriptsChanged ? null : shell, diagnostics,
       version: this.purpose === 'work' ? this.pinnedWorkVersion : this.history?.currentVersion,
       hash: this.purpose === 'work' ? this.pinnedWorkHash ?? stateHash : stateHash,
-      snapshot: { source: this.purpose === 'work' ? this.pinnedWorkSource ?? this.moduleSource() : this.moduleSource(),
-        hash: this.purpose === 'work' ? this.pinnedWorkHash ?? stateHash : stateHash,
-        version: this.purpose === 'work' ? this.pinnedWorkVersion : this.history?.currentVersion } }; 
+      snapshot: { source: snapshotSource, hash: harnessHash(snapshotSource, snapshotScripts),
+        version: this.purpose === 'work' ? this.pinnedWorkVersion : this.history?.currentVersion } };
   }
 
   private requestSignal(signal?: AbortSignal): AbortSignal {

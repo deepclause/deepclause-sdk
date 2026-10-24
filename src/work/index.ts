@@ -61,7 +61,12 @@ export interface WorkSessionPort {
   resumeSuspension(options?: WorkRunOptions): AsyncGenerator<import('../types.js').DMLEvent>;
   suspension(): Promise<{ continuation: string; at?: string } | undefined>;
 }
-export interface WorkSnapshot { source: string; version?: number; hash?: string }
+export interface WorkSnapshot {
+  source: string;
+  version?: number;
+  /** Checksum of this exact encoded source and its linked scripts, not WorkSpec.hash. */
+  hash?: string;
+}
 export interface WorkPredicate { name: string; arity: number }
 const GOAL = /^[a-z][A-Za-z0-9_]*$/;
 const RESERVED = new Set(['run_workflow', 'show_image', 'finish', 'define', 'delete', 'execute', 'listing', 'reference', 'begin_turn', 'end_turn', 'rollback', 'write_file']);
