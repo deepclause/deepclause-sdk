@@ -1355,6 +1355,20 @@ export class DMLSession {
     for (const script of this.embeddedScripts()) {
       if (typeof script.path !== 'string' || typeof script.content !== 'string') throw new Error('Invalid embedded script');
       const target = this.resolveWorkspacePath(script.path);
+      const root = await fs.realpath(path.resolve(this.workspacePath ?? process.cwd()));
+      let probe = target;
+      for (;;) {
+        try {
+          const actual = await fs.realpath(probe);
+          if (actual !== root && !actual.startsWith(root + path.sep)) throw new Error('Embedded script path escapes the workspace through a symlink');
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          const parent = path.dirname(probe);
+          if (parent === probe) throw error;
+          probe = parent;
+        }
+      }
       try { await fs.access(target); continue; } catch { /* missing: bootstrap only */ }
       await fs.mkdir(path.dirname(target), { recursive: true });
       try { await fs.writeFile(target, script.content, { encoding: 'utf8', flag: 'wx' }); }

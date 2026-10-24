@@ -162,6 +162,16 @@ describe('Work lifecycle and reconciliation', () => {
     expect((await consume(fresh.runWorkflow('Read'))).find(event => event.workflow)?.workflow?.result.outputs.Text).toBe('user-owned');
   });
 
+  it.skipIf(process.platform === 'win32')('does not bootstrap embedded files outside the workspace through a symlink', async () => {
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'dc-embedded-outside-'));
+    try {
+      await fs.symlink(outside, path.join(workspace, 'scripts'), 'dir');
+      await fs.writeFile(path.join(workspace, '.deepclause/repl/harnesses/support/harness.dml'), `embedded_file("scripts/created.py","unwanted"). ok. shell(_{kind:workflow,host_tools:[],tools:[],system:"",welcome:"",workflows:[_{name:"OK",goal:"ok",inputs:[],outputs:[]}]}).`);
+      await expect(open()).rejects.toThrow('symlink');
+      await expect(fs.stat(path.join(outside, 'created.py'))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally { await fs.rm(outside, { recursive: true, force: true }); }
+  });
+
   it('bounds CPU-only Work goals and recovers after gas exhaustion', async () => {
     await fs.writeFile(path.join(workspace, '.deepclause/repl/harnesses/support/harness.dml'), `spin :- spin. ok.
       shell(_{kind:workflow,host_tools:[],tools:[],system:"",welcome:"",workflows:[
