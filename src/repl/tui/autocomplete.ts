@@ -20,6 +20,10 @@ import {
 
 /** The REPL's slash commands, with the argument each takes. */
 export const REPL_COMMANDS: SlashCommand[] = [
+  { name: 'mode', description: 'Choose Develop or Work and a harness', argumentHint: '[develop|work] [harness]' },
+  { name: 'workflows', description: 'Choose a declared workflow' },
+  { name: 'workflow', description: 'Run a declared workflow with typed inputs', argumentHint: '"Name" [{"Input":"value"}]' },
+  { name: 'details', description: 'Show or hide technical execution detail', argumentHint: '[on|off]' },
   { name: 'goal', description: 'Run a DML goal', argumentHint: '<dml>' },
   { name: 'help', description: 'Show help' },
   { name: 'listing', description: 'List predicates', argumentHint: '[all|Name/Arity|prefix]' },

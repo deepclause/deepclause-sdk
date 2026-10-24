@@ -20,9 +20,11 @@ import { dim } from './theme.js';
 export interface StatusBarOptions {
   getSnapshot: () => ReplStatusSnapshot;
   workspace: string;
-  sessionId: string;
+  sessionId: string | (() => string);
+  mode?: () => 'develop' | 'work';
+  workVersion?: () => string | undefined;
   /** Harness this session edits. */
-  harness?: string;
+  harness?: string | (() => string);
   backend: string;
   isFrozen?: () => boolean;
   /** True while a turn is running (so the user knows they can steer). */
@@ -99,7 +101,10 @@ export class StatusBarComponent implements Component {
       ? (width >= 100 ? 'running (type to steer)' : 'running')
       : undefined;
     const frozen = this.options.isFrozen?.() ? 'FROZEN' : undefined;
-    const harness = this.options.harness ? `harness ${this.options.harness}` : undefined;
+    const name = typeof this.options.harness === 'function' ? this.options.harness() : this.options.harness;
+    const harness = name ? `harness ${name}` : undefined;
+    const session = typeof this.options.sessionId === 'function' ? this.options.sessionId() : this.options.sessionId;
+    const mode = this.options.mode?.();
     const processes = this.options.processLabel?.();
 
     // Priority order, most useful first: where we are, what state we are in, what
@@ -107,6 +112,8 @@ export class StatusBarComponent implements Component {
     // footer, and the backend is only interesting when debugging, so they go last.
     const line = spread(
       [
+        mode ? mode === 'work' ? 'WORK' : 'DEVELOP' : undefined,
+        this.options.workVersion?.(),
         shortenPath(this.options.workspace),
         running,
         processes,
@@ -115,7 +122,7 @@ export class StatusBarComponent implements Component {
         formatContextSegment(snapshot),
         harness,
         `backend ${this.options.backend}`,
-        `session ${this.options.sessionId}`,
+        `session ${session}`,
       ],
       formatModelSegment(snapshot),
       width,

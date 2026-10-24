@@ -9,11 +9,14 @@
 
 import type { Command } from 'commander';
 import { readFileSync } from 'fs';
+import { readdir } from 'fs/promises';
+import { parseWorkflowCommand, runDeclaredWorkflow } from './work.js';
+import type { SessionPurpose, WorkSpec } from '../work/index.js';
 import * as path from 'path';
 import * as readline from 'readline';
 import { fileURLToPath } from 'url';
 
-import { createHarnessRepl, type HarnessRepl } from '../repl/index.js';
+import { createHarnessRepl, type HarnessRepl, type HarnessReplOptions } from '../repl/index.js';
 import { HistoryStore } from '../repl/history.js';
 import { resolveReplJudgeSelection } from '../repl/judge.js';
 import { ReplRenderer, type RenderMode, type ReplEventRenderer } from '../repl/render.js';
@@ -23,6 +26,7 @@ import { formatProcessCode, formatProcessTable } from '../repl/harness-tools.js'
 import { openPiRuntime, type PiAuthInteractionLike } from '../repl/backend.js';
 import { listLoginProviders, loginToProvider, type LoginProviderOption } from '../repl/auth.js';
 import { HarnessView } from '../repl/tui/harness-view.js';
+import { WorkView } from '../repl/tui/work-view.js';
 import { TuiRenderer } from '../repl/tui/renderer.js';
 import { WorkingLine } from '../repl/tui/working-line.js';
 import { createReplAutocomplete } from '../repl/tui/autocomplete.js';
@@ -62,6 +66,9 @@ import {
 } from '../visualize/index.js';
 
 export interface ReplCliOptions {
+  mode?: SessionPurpose;
+  workflow?: string;
+  inputs?: string;
   goal?: string[];
   load?: string[];
   /** Resume a previous session by id (or `last`). */
@@ -124,6 +131,10 @@ export type ReplInput =
   | { kind: 'comment' }
   | { kind: 'halt' }
   | { kind: 'help' }
+  | { kind: 'mode'; mode?: SessionPurpose; harness?: string }
+  | { kind: 'workflows' }
+  | { kind: 'workflow'; name: string; inputs?: Record<string, unknown> }
+  | { kind: 'details'; show?: boolean }
   | { kind: 'listing'; filter?: string }
   | { kind: 'reset' }
   | { kind: 'rollback' }
@@ -188,7 +199,8 @@ export function parseVizArgs(arg: string): { entry?: string; mode: DiagramMode; 
 }
 
 /** Render a recorded turn as the line the user would retype (goals get `/goal`). */
-export function formatTurnInput(turn: { mode: 'goal' | 'prompt'; request: string }): string {
+export function formatTurnInput(turn: { mode: 'goal' | 'prompt'; request: string; workflow?: { name: string; inputs: Record<string, unknown> } }): string {
+  if (turn.workflow) return `/workflow ${JSON.stringify(turn.workflow.name)} ${JSON.stringify(turn.workflow.inputs)}`;
   return turn.mode === 'goal' ? `/goal ${turn.request}` : turn.request;
 }
 
@@ -223,6 +235,18 @@ export function classifyReplInput(line: string): ReplInput {
     const name = (spaceIndex === -1 ? withoutSlash : withoutSlash.slice(0, spaceIndex)).toLowerCase();
     const arg = (spaceIndex === -1 ? '' : withoutSlash.slice(spaceIndex)).trim();
     switch (name) {
+      case 'mode': {
+        const [mode, harness, extra] = arg.split(/\s+/);
+        if (!arg) return { kind: 'mode' };
+        return (mode === 'work' || mode === 'develop') && !extra ? { kind: 'mode', mode, harness } : { kind: 'unknown-command', name: 'mode (use /mode work|develop [harness])' };
+      }
+      case 'workflows': return { kind: 'workflows' };
+      case 'workflow': {
+        if (!arg) return { kind: 'workflows' };
+        try { return { kind: 'workflow', ...parseWorkflowCommand(arg) }; }
+        catch { return { kind: 'unknown-command', name: 'workflow (use /workflow "Name" {"Input":"value"})' }; }
+      }
+      case 'details': return { kind: 'details', show: arg === 'on' ? true : arg === 'off' ? false : undefined };
       case 'goal':
         return arg ? { kind: 'goal', goal: arg } : { kind: 'unknown-command', name: 'goal (missing goal)' };
       case 'listing':
@@ -507,6 +531,13 @@ function resolveModel(modelId: string): { provider: Provider; model: string } {
 }
 
 export interface ReplRuntime {
+  mode?: SessionPurpose;
+  details?: boolean;
+  workSpec?: WorkSpec;
+  askInput?: (prompt: string, choices?: string[]) => Promise<string | undefined>;
+  switchMode?: (mode: SessionPurpose, harness?: string) => Promise<void>;
+  harnesses?: () => Promise<string[]>;
+  onSessionChanged?: () => void;
   repl: HarnessRepl;
   /** String renderer for plain/json output, or the TUI's component renderer. */
   renderer: ReplEventRenderer;
@@ -568,7 +599,7 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
   const replCompaction = resolveReplCompactionConfig(config);
   // One harness per name within a project: `--harness`, else the `-l` file's
   // name, else the configured default (`main`).
-  const harnessName = normalizeHarnessName(options.harness)
+  let harnessName = normalizeHarnessName(options.harness)
     ?? (options.load?.length ? harnessNameFromFile(options.load[0]) : undefined)
     ?? normalizeHarnessName(config.repl.harness)
     ?? 'main';
@@ -749,7 +780,10 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
     }
   }
 
-  const repl = await createHarnessRepl({
+  let currentInput = buildCliOnInput(options);
+  const replOptions: HarnessReplOptions = {
+    mode: options.mode ?? (options.workflow ? 'work' : undefined),
+    origin: 'tui',
     sessionId,
     resume,
     workspacePath: workspace,
@@ -777,13 +811,17 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
         : presentForm(repl, form);
     },
     history: historyOptions,
-    harness: harnessName,
+    harness: resume && !options.harness ? undefined : harnessName,
     execution: options.execution,
     autoLoadHarness: !(options.load?.length),
     compaction: { settings: replCompaction, auto: replCompaction.auto },
     contextWindow,
-    onInput: buildCliOnInput(options),
-  });
+    onInput: currentInput,
+  };
+  let repl = await createHarnessRepl(replOptions);
+  const identity = await repl.sessionInfo();
+  harnessName = identity.harness ?? harnessName;
+  const purpose = identity.mode ?? 'develop';
 
   // Terminal images (agent `visualize` and `/viz`) are painted through the
   // renderer; the TUI installs an image sink later, which this follows.
@@ -791,7 +829,7 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
 
   let missingCredential: string | undefined;
 
-  const statusTracker = new ReplStatusTracker({
+  let statusTracker = new ReplStatusTracker({
     model: {
       id: harnessModel,
       provider: String(harnessProvider),
@@ -812,10 +850,46 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
   }
 
   const runtime: ReplRuntime = {
+    mode: purpose,
+    details: options.json ? options.events !== false : purpose !== 'work' && options.events !== false,
+    askInput: async (prompt, choices) => currentInput?.(prompt, choices),
+    harnesses: async () => {
+      try { return (await readdir(path.resolve(workspace, config.repl.history.dir, 'harnesses'), { withFileTypes: true })).filter(entry => entry.isDirectory()).map(entry => entry.name).sort(); }
+      catch { return []; }
+    },
+    switchMode: async (mode, harness) => {
+      const target = normalizeHarnessName(harness) ?? runtime.harnessName;
+      const active = repl.session.processes().filter(process => ['running', 'runnable', 'waiting', 'input'].includes(process.state));
+      if (active.length) throw new Error('Stop active services before switching conversations; they will not be silently disposed.');
+      let counterpart: string | undefined;
+      if (historyOptions && (mode !== runtime.mode || target !== runtime.harnessName)) {
+        const store = new HistoryStore(workspace, '__session_lookup__', historyOptions);
+        counterpart = (await store.sessionSummaries()).filter(row => row.mode === mode && row.harness === target && row.kind !== 'workflow-run').at(-1)?.id;
+      }
+      const next = await createHarnessRepl({ ...replOptions, mode, harness: target, sessionId: counterpart, resume: Boolean(counterpart), autoLoadHarness: true, onInput: currentInput });
+      const spec = mode === 'work' ? await next.workSpec() : undefined;
+      if (mode === 'work' && !spec?.shell) { await next.dispose(); throw new Error(spec?.diagnostics.join('\n') || 'No Work shell defined.'); }
+      await repl.dispose();
+      repl = next;
+      runtime.repl = next;
+      runtime.mode = mode;
+      runtime.harnessName = target;
+      runtime.sessionId = next.session.getSessionId();
+      runtime.resumedSession = counterpart;
+      runtime.promptPrefix = mode === 'work' ? 'work> ' : config.repl.promptPrefix ?? 'dml> ';
+      runtime.workSpec = spec;
+      runtime.details = mode !== 'work';
+      runtime.renderer.setDetails?.(runtime.details);
+      statusTracker = new ReplStatusTracker({ model: { id: harnessModel, provider: String(harnessProvider), reasoning, thinkingLevel }, contextWindow });
+      statusHolder.tracker = statusTracker;
+      wireProcesses(next);
+      next.session.setImageHandler(lines => runtime.renderer.image(lines));
+      runtime.onSessionChanged?.();
+    },
     repl,
     renderer,
     workspace,
-    promptPrefix: config.repl.promptPrefix ?? 'dml> ',
+    promptPrefix: purpose === 'work' ? 'work> ' : config.repl.promptPrefix ?? 'dml> ',
     toolset,
     version: PACKAGE_VERSION,
     imageBackend,
@@ -836,13 +910,13 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
     statusSnapshot: () => statusTracker.snapshot(),
     observeEvent: (event) => statusTracker.observe(event),
     tuiMode: options.tui ?? config.repl.tui ?? 'auto',
-    setOnInput: (handler) => repl.setOnInput(handler),
+    setOnInput: (handler) => { currentInput = handler; repl.setOnInput(handler); },
     missingCredential,
   };
 
   // Session-scoped subagents render their lifecycle and output through the
   // active renderer (the TUI swaps it in after this runtime is built).
-  repl.session.setProcessEventSink((event) => {
+  const wireProcesses = (current: HarnessRepl): void => current.session.setProcessEventSink((event) => {
     const label = `⚙ ${event.name}`;
     const sink = runtime.renderer;
     if (event.type === 'output' && event.content) {
@@ -854,7 +928,8 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
       sink.writeLine(`${label} ${event.state}${reason}`);
     }
   });
-
+  wireProcesses(repl);
+  runtime.renderer.setDetails?.(runtime.details ?? true);
   return runtime;
 }
 
@@ -871,6 +946,15 @@ export const PACKAGE_VERSION: string = (() => {
 
 /** Startup banner for the interactive REPL (proposal §2.1). */
 async function printBanner(runtime: ReplRuntime, loaded: string[]): Promise<void> {
+  if (runtime.mode === 'work') {
+    const spec = runtime.workSpec ?? await runtime.repl.workSpec();
+    runtime.workSpec = spec;
+    runtime.renderer.writeLine(`DeepClause · WORK · ${runtime.harnessName} · ${spec.shell?.kind ?? 'no shell'} · ${runtime.model}`);
+    if (spec.shell?.welcome) runtime.renderer.writeLine(spec.shell.welcome);
+    for (const diagnostic of spec.diagnostics) runtime.renderer.writeLine(diagnostic);
+    runtime.renderer.writeLine('/workflows — choose a task · /mode — switch conversation · /details — execution detail');
+    return;
+  }
   const rich = runtime.renderer.mode === 'rich';
   const paint = (text: string, code: string): string => (rich ? `\u001b[${code}m${text}\u001b[0m` : text);
   const dim = (text: string): string => paint(text, '2');
@@ -977,9 +1061,8 @@ async function resumeSuspendedContinuation(runtime: ReplRuntime): Promise<void> 
   const pending = runtime.repl.session.pendingSuspension?.();
   if (!pending) return;
   runtime.renderer.writeLine(`resuming the suspended continuation: ${pending.continuation}`);
-  await runtime.repl.session.clearSuspension?.();
   try {
-    await runGoalWithRenderer(runtime.repl, pending.continuation, { renderer: runtime.renderer });
+    for await (const event of runtime.repl.resumeSuspension()) runtime.renderer.render(event);
   } catch (error) {
     runtime.renderer.writeLine(`could not resume ${pending.continuation}: ${String((error as Error).message)}`);
   }
@@ -1002,7 +1085,40 @@ export async function dispatchReplInput(
 ): Promise<boolean> {
   const { repl, renderer } = runtime;
   const print = options.print ?? ((text: string) => renderer.writeLine(text));
+  if (runtime.mode === 'work' && ['goal', 'reset', 'rollback', 'spawn', 'send', 'call', 'freeze', 'unfreeze'].includes(input.kind)) {
+    print('This is a Develop operation. Use /mode develop to open a separate authoring conversation.');
+    return true;
+  }
   switch (input.kind) {
+    case 'mode': {
+      if (!input.mode) { print(`mode: ${runtime.mode ?? 'develop'}; use /mode work|develop [harness]`); return true; }
+      try {
+        await runtime.switchMode?.(input.mode, input.harness);
+        print(`${runtime.mode} · ${runtime.harnessName} · session ${runtime.sessionId}`);
+        if (runtime.workSpec?.shell?.welcome) print(runtime.workSpec.shell.welcome);
+        await renderResumedSession(runtime);
+      } catch (error) { print(`ERROR: ${(error as Error).message}`); }
+      return true;
+    }
+    case 'details':
+      runtime.details = input.show ?? !runtime.details;
+      renderer.setDetails?.(runtime.details);
+      print(`details ${runtime.details ? 'on' : 'off'}`);
+      return true;
+    case 'workflows': {
+      const spec = await repl.workSpec();
+      if (!spec.shell) print(spec.diagnostics.join('\n'));
+      else {
+        for (const flow of spec.shell.workflows) print(`${flow.name} — ${flow.inputs.map(arg => `${arg.name}: ${arg.type}`).join(', ') || 'no inputs'} → ${flow.outputs.map(arg => `${arg.name}: ${arg.type}`).join(', ') || 'no outputs'}`);
+        if (spec.shell.tools.length) print(`Assistant tools (not directly runnable): ${spec.shell.tools.map(tool => tool.name).join(', ')}`);
+      }
+      return true;
+    }
+    case 'workflow':
+      if (runtime.mode !== 'work') { print('Use /mode work before starting a declared workflow.'); return true; }
+      try { await runDeclaredWorkflow({ repl, name: input.name, inputs: input.inputs, signal: options.signal, ask: runtime.askInput, render: event => renderer.render(event) }); }
+      catch (error) { print(`ERROR: ${(error as Error).message}`); }
+      return true;
     case 'empty':
     case 'comment':
       return true;
@@ -1057,7 +1173,7 @@ export async function dispatchReplInput(
     case 'halt':
       return false;
     case 'help':
-      print(helpText());
+      print(helpText(runtime.mode));
       return true;
     case 'listing': {
       const text = await repl.list(input.filter);
@@ -1197,6 +1313,10 @@ export async function dispatchReplInput(
       await runGoalWithRenderer(repl, input.goal, { first: options.first, renderer, signal: options.signal });
       return true;
     case 'prompt': {
+      if (runtime.mode === 'work') {
+        const spec = await repl.workSpec();
+        if (!spec.shell || spec.shell.kind === 'workflow') { print(spec.diagnostics.join('\n') || 'Choose a declared workflow with /workflows.'); return true; }
+      }
       if (runtime.missingCredential) {
         print(`ERROR: ${runtime.missingCredential}`);
         return true;
@@ -1211,8 +1331,20 @@ export async function dispatchReplInput(
   }
 }
 
-function helpText(): string {
+function helpText(mode?: SessionPurpose): string {
+  if (mode === 'work') return [
+    'Work runs a declared harness; it does not author DML.',
+    '  /mode work|develop [harness]  choose another conversation',
+    '  /workflows                   choose/list declared workflows',
+    '  /workflow "Name" {"Input":"value"}  execute exactly that workflow',
+    '  /details [on|off]            show technical events',
+    '  /model · /reasoning · /show-reasoning · /compact · /ps · /stop · /halt',
+    'An agent shell accepts conversation. A workflow-only shell uses /workflow.',
+    'Use /mode work <harness> again to refresh into a new snapshot.'
+  ].join('\n');
   return [
+    '    /mode [develop|work] [harness]  switch conversation purpose',
+    '    /workflows /workflow /details  declared Work tasks and presentation',
     'DeepClause REPL — a living DML harness you author by talking to it.',
     '',
     '  Modes',
@@ -1500,6 +1632,7 @@ export async function runTui(
   const working = new WorkingLine(tui);
   const renderer = new TuiRenderer({
     document,
+    events: runtime.details ?? true,
     // The TUI draws through its own switch, but the status tracker must still see
     // every event (usage, model_call, …) or the footer loses its counters.
     onEvent: (event) => runtime.observeEvent(event),
@@ -1517,8 +1650,10 @@ export async function runTui(
   const statusBar = new StatusBarComponent({
     getSnapshot: () => runtime.statusSnapshot(),
     workspace: runtime.workspace,
-    sessionId: runtime.sessionId,
-    harness: runtime.harnessName,
+    sessionId: () => runtime.sessionId,
+    harness: () => runtime.harnessName,
+    mode: () => runtime.mode ?? 'develop',
+    workVersion: () => runtime.mode === 'work' && runtime.workSpec ? `${runtime.workSpec.version !== undefined ? `v${runtime.workSpec.version} ` : ''}${runtime.workSpec.hash.slice(0, 6)}` : undefined,
     backend: runtime.backend,
     isFrozen: () => runtime.repl.isFrozen(),
     isRunning: () => runState.running,
@@ -1978,6 +2113,7 @@ export async function runTui(
     },
   });
   harnessView.refresh();
+  const workView = new WorkView(() => runtime.workSpec);
   let harnessVisible = options.harnessView ?? false;
   let servicesVisible = false;
   let servicesLogs = false;
@@ -2034,12 +2170,12 @@ export async function runTui(
     const columns = new HStack([
       { component: scroll, basis: 0, grow: 1, shrink: 1, minSize: 20 },
       {
-        component: harnessView,
+        component: runtime.mode === 'work' ? workView : harnessView,
         basis: harnessWidth,
         grow: 0,
         shrink: 0,
         minSize: 20,
-        visible: (viewport) => harnessVisible && viewport.width >= 96,
+        visible: (viewport) => (runtime.mode === 'work' || harnessVisible) && viewport.width >= 96,
       },
     ], { gap: 1 });
     tui.setLayoutRoot(new VStack([
@@ -2052,7 +2188,7 @@ export async function runTui(
 
   // A form opened by the running turn is shown in the dock and edited field by
   // field through the editor; the plain-TTY path uses the raw widget instead.
-  runtime.repl.session.setFormHandler(async (form) => {
+  const presentTuiForm = async (form: FormEventPayload): Promise<void> => {
     const spec = form.spec;
     if (!spec) return;
     let state = initialState(spec, form.values ?? {}, form.issues ?? []);
@@ -2079,7 +2215,16 @@ export async function runTui(
       formView.setState(undefined);
       tui.requestRender();
     }
-  });
+  };
+  runtime.repl.session.setFormHandler(presentTuiForm);
+  runtime.onSessionChanged = () => {
+    runtime.repl.session.setFormHandler(presentTuiForm);
+    runtime.repl.session.setImageHandler(lines => runtime.renderer.image(lines));
+    harnessView.refresh();
+    applyLayout();
+    tui.invalidate();
+    tui.requestRender();
+  };
 
   tui.start();
 
@@ -2100,14 +2245,41 @@ export async function runTui(
         line = await ask(runtime.promptPrefix);
         if (line === null) break;
       }
-      const input = classifyReplInput(line);
+      let input = classifyReplInput(line);
       if (input.kind === 'halt') break;
+      if (input.kind === 'mode' && !input.mode) {
+        const mode = await choose(done => new ChoicePicker({ title: 'Conversation mode', items: [
+          { value: 'develop', label: 'Develop', description: 'Author and edit a harness' },
+          { value: 'work', label: 'Work', description: 'Use declared tools and workflows' },
+        ], onSelect: item => done(item.value), onCancel: () => done() }));
+        if (!mode) continue;
+        let harness: string | undefined;
+        if (mode === 'work') {
+          const names = await runtime.harnesses?.() ?? [];
+          if (!names.length) { renderer.writeLine('No harnesses yet. Create one in Develop first.'); continue; }
+          harness = await choose(done => new ChoicePicker({ title: 'Work harness', current: runtime.harnessName,
+            items: names.map(name => ({ value: name, label: name })), onSelect: item => done(item.value), onCancel: () => done() }));
+          if (!harness) continue;
+        }
+        input = { kind: 'mode', mode: mode as SessionPurpose, harness };
+      }
+      if (input.kind === 'workflows' && runtime.mode === 'work') {
+        const spec = await runtime.repl.workSpec();
+        runtime.workSpec = spec;
+        if (!spec.shell?.workflows.length) { renderer.writeLine(spec.diagnostics.join('\n') || 'No workflows; use the Work assistant.'); continue; }
+        const name = await choose(done => new ChoicePicker({ title: 'Workflows', items: spec.shell!.workflows.map(flow => ({
+          value: flow.name, label: flow.name, description: `${flow.inputs.length} inputs · ${flow.outputs.length} outputs`,
+        })), onSelect: item => done(item.value), onCancel: () => done() }));
+        if (!name) continue;
+        input = { kind: 'workflow', name };
+      }
       // The pickers are overlays over the transcript, so they need the TUI and are
       // handled here rather than in the command dispatcher the readline path shares.
       if (input.kind === 'model' && !input.model) { await pickModel(); continue; }
       if (input.kind === 'reasoning') { await pickReasoningLevel(input.level); continue; }
       if (input.kind === 'show-reasoning') { await pickReasoningMode(); continue; }
       if (input.kind === 'harness') {
+        if (runtime.mode === 'work') { renderer.writeLine('The source side view is in Develop; use /workflows here.'); continue; }
         await handleHarnessCommand(input.width);
         continue;
       }
@@ -2198,7 +2370,7 @@ export async function startRepl(options: ReplCliOptions): Promise<number> {
   // saved, or when the harness has no predicates.
   let exitSaved = false;
   const saveHarnessOnExit = async (): Promise<void> => {
-    if (exitSaved || options.exportPath || options.saveOnExit === false) return;
+    if (runtime.mode === 'work' || exitSaved || options.exportPath || options.saveOnExit === false) return;
     exitSaved = true;
     try {
       if (runtime.repl.session.isEmpty()) return;
@@ -2217,6 +2389,19 @@ export async function startRepl(options: ReplCliOptions): Promise<number> {
     // A harness file loaded into a fresh harness becomes its baseline.
     if (options.load?.length) {
       await runtime.repl.session.finalizeHarnessBaseline();
+    }
+
+    if (runtime.mode === 'work') runtime.workSpec = await runtime.repl.workSpec();
+    if (options.workflow) {
+      const controller = new AbortController();
+      const removeSigint = installSigint({ turn: controller });
+      try {
+        const inputs = options.inputs === undefined ? undefined : JSON.parse(options.inputs);
+        const ok = await runDeclaredWorkflow({ repl: runtime.repl, name: options.workflow, inputs,
+          signal: controller.signal, ask: runtime.askInput, render: event => runtime.renderer.render(event) });
+        return ok ? 0 : 1;
+      } catch (error) { runtime.renderer.writeErrorLine(`ERROR: ${(error as Error).message}`); return 1; }
+      finally { removeSigint(); }
     }
 
     // Freeze/lock only after all `-l` loads succeed (load before lock).
@@ -2295,6 +2480,12 @@ export function registerReplCommand(program: Command): void {
     .option('-g, --goal <goal>', 'run one goal and exit (repeatable)', collect)
     .option('-l, --load <file>', 'load a DML file before starting (repeatable)', collect)
     .option('--session <id>', 'resume a previous session by id (or "last")')
+    .option('--mode <mode>', 'conversation purpose: develop (default) or work', (value: string) => {
+      if (value !== 'develop' && value !== 'work') throw new Error('mode must be develop or work');
+      return value;
+    })
+    .option('--workflow <name>', 'run exactly this declared Work workflow and exit')
+    .option('--inputs <json>', 'workflow inputs as a JSON object')
     .option('--harness <name>', 'harness to edit (a project can hold several; default main)')
     .option('--first', 'with a goal, print only the first solution')
     .option('--plain', 'no TUI formatting (auto when stdout is not a TTY)')
@@ -2350,6 +2541,9 @@ export function registerReplCommand(program: Command): void {
     .option('--no-color', 'disable ANSI color')
     .action(async (options) => {
       const exitCode = await startRepl({
+        mode: options.mode,
+        workflow: options.workflow,
+        inputs: options.inputs,
         goal: options.goal,
         load: options.load,
         session: options.session,

@@ -304,6 +304,7 @@ export interface ReplEventRenderer {
   writeErrorLine(text: string): void;
   listing(text: string): string;
   image(lines: string[]): void;
+  setDetails?(show: boolean): void;
   /** Change the reasoning display mode at runtime (TUI picker). */
   setReasoningMode?(mode: 'off' | 'summary' | 'full'): void;
   /** The current reasoning display mode, when the renderer tracks one. */
@@ -323,7 +324,7 @@ export class ReplRenderer implements ReplEventRenderer {
   private readonly color: boolean;
   private readonly verbose: boolean;
   private readonly showStream: boolean;
-  private readonly showEvents: boolean;
+  private showEvents: boolean;
   private reasoningMode: 'off' | 'summary' | 'full';
   private readonly markdownEnabled: boolean;
   private readonly markdown = new MarkdownStream();
@@ -606,6 +607,8 @@ export class ReplRenderer implements ReplEventRenderer {
     this.currentBlock = key;
   }
 
+  setDetails(show: boolean): void { this.showEvents = show; }
+
   /** Render one runtime event. */
   render(event: DMLEvent): void {    this.eventSink?.(event);
     if (!this.showStream && (event.type === 'stream' || event.type === 'reasoning')) {
@@ -616,6 +619,12 @@ export class ReplRenderer implements ReplEventRenderer {
     }
     if (this.mode === 'json') {
       this.sink(`${JSON.stringify(event)}\n`);
+      return;
+    }
+
+    if (event.type === 'workflow_result') {
+      this.stopSpinner(); this.flushStream();
+      this.writeLine(event.content ?? '');
       return;
     }
 

@@ -79,7 +79,7 @@ export class TuiRenderer {
   private readonly text: ReplRenderer;
   private readonly onWorking?: (label: string | null) => void;
   /** Whether activity events (and therefore frame labels) are shown. */
-  private readonly showEvents: boolean;
+  private showEvents: boolean;
   /** Tool panes in order, so the last one can be expanded on demand. */
   private readonly panes: DmlToolPane[] = [];
   private currentPane?: DmlToolPane;
@@ -146,12 +146,15 @@ export class TuiRenderer {
     return true;
   }
 
+  setDetails(show: boolean): void { this.showEvents = show; this.text.setDetails(show); }
+
   render(event: DMLEvent): void {
     // Every event is observed before the switch: the status tracker needs the
     // `usage`/`model_call` stream, most of which the TUI never draws.
     this.onEvent?.(event);
     switch (event.type) {
       case 'tool_call':
+        if (!this.showEvents) { this.onWorking?.(['starting', 'running'].includes(event.toolState ?? '') ? `${event.toolName ?? 'tool'}…` : null); return; }
         this.renderToolCall(event);
         return;
       case 'model_call':
@@ -166,6 +169,7 @@ export class TuiRenderer {
         }
         return;
       case 'answer':
+      case 'workflow_result':
       case 'error':
         this.endStream();
         // An aborted run may never report the model call as completed, so clear
