@@ -103,6 +103,8 @@ export interface HarnessReplOptions {
   jev?: JevJudgeOptions;
   /** Receives startup diagnostics, e.g. a skipped `jev` backend. */
   onDiagnostic?: (message: string) => void;
+  /** Enable the full MI execution trace for this session. */
+  trace?: boolean;
   /** Persistent session/trace/harness history. Off unless provided. */
   history?: HistoryOptions;
   /** Harness this session edits (a project can hold several). Default `main`. */
@@ -158,6 +160,10 @@ export interface HarnessRepl extends WorkSessionPort {
   compact(customInstructions?: string): Promise<{ applied: boolean; beforeTokens: number; afterTokens: number; error?: string }>;
   /** Generate a diagram of an entry predicate (Mermaid → ASCII tree + SVG). */
   diagram(entry?: string, mode?: DiagramMode, options?: { signal?: AbortSignal }): Promise<DiagramResult>;
+  /** Read the full MI execution trace captured for this session. */
+  trace(): Promise<import('../types.js').TraceEntry[]>;
+  /** Delete the captured MI trace for this session. */
+  clearTrace(): Promise<void>;
   /** Deliver a steering message into the running authoring turn. */
   steer(text: string): void;
   /** All persisted events from a resumed session, oldest first (resumed sessions only). */
@@ -246,6 +252,14 @@ class HarnessReplImpl implements HarnessRepl {
     return this.session.resumedTranscript(limit);
   }
 
+  trace(): Promise<import('../types.js').TraceEntry[]> {
+    return this.session.trace();
+  }
+
+  clearTrace(): Promise<void> {
+    return this.session.clearTrace();
+  }
+
   dispose(): Promise<void> {
     return this.session.dispose();
   }
@@ -301,6 +315,7 @@ export async function createHarnessRepl(options: HarnessReplOptions): Promise<Ha
     beforeProcessSpawn: options.beforeProcessSpawn,
     createProcessSession: options.createProcessSession,
     askUser: options.askUser,
+    trace: options.trace,
     history: options.history,
     harnessName: options.harness,
     autoLoadHarness: options.autoLoadHarness,

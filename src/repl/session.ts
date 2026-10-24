@@ -57,6 +57,7 @@ import type {
   MemoryMessage,
   ToolDefinition,
   ToolPolicy,
+  TraceEntry,
 } from '../types.js';
 import { buildParamsTerm, plainValue, quotePrologString } from './frames.js';
 import {
@@ -2613,6 +2614,23 @@ export class DMLSession {
       `deepclause_mi:repl_delete_predicate('${this.sessionId}', ${quoteAtom(name)}, ${Number(arityText)}, Result)`
     );
     return this.editResult(plainValue(result?.Result));
+  }
+
+  /** Read the full MI execution trace captured for this session. */
+  /** Delete the captured MI trace for this session. */
+  async clearTrace(): Promise<void> {
+    this.prologQuery(`deepclause_mi:repl_trace_clear('${this.sessionId}')`);
+  }
+
+  async trace(): Promise<TraceEntry[]> {
+    try {
+      const result = this.prologQuery(`deepclause_mi:repl_trace_json('${this.sessionId}', Json)`);
+      const text = String(plainValue(result?.Json) ?? '[]');
+      const parsed: unknown = JSON.parse(text);
+      return Array.isArray(parsed) ? parsed as TraceEntry[] : [];
+    } catch {
+      return [];
+    }
   }
 
   async reference(topic: string, options: ReferenceOptions = {}): Promise<string> {

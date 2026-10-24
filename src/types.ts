@@ -237,6 +237,10 @@ export interface TraceEntry {
   predicate?: string;
   /** Arguments or details */
   args?: unknown[];
+  /** JSON-safe rendering of arguments; populated by the trace endpoint. */
+  argsText?: string;
+  /** JSON-safe rendering of the result; populated by the trace endpoint. */
+  resultText?: string;
   /** Result or additional info */
   result?: unknown;
   /** Call depth for indentation */

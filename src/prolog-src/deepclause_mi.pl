@@ -62,6 +62,8 @@
     repl_delete_schema/3,
     repl_delete_script/3,
     repl_delete_annotation_entry/4,
+    repl_trace_json/2,
+    repl_trace_clear/1,
     repl_edit_touched/2,
     repl_edit_touched_text/2,
     repl_edit_touched_clear/1,
@@ -167,7 +169,9 @@
 :- dynamic session_sample_token_result/2. % session_sample_token_result(SessionId, Result)
 :- dynamic session_llm_result/2. % session_llm_result(SessionId, Result)
 :- dynamic session_judgment_result/2. % session_judgment_result(SessionId, Result)
-:- dynamic session_trace_log/2.    % session_trace_log(SessionId, TraceLog) - accumulated trace entries
+:- dynamic session_trace_entry/3.  % session_trace_entry(SessionId, Index, Entry) - bounded trace
+:- dynamic session_trace_count/2.  % session_trace_count(SessionId, Count)
+:- dynamic session_trace_log/2.    % legacy list; retained for compatibility
 :- dynamic session_trace_enabled/2. % session_trace_enabled(SessionId, true/false)
 :- dynamic session_pending_signal/2. % session_pending_signal(SessionId, Signal) - fallback for engine_fetch
 :- dynamic session_proc_result/3.  % session_proc_result(SessionId, Key, Value) - process primitive results
@@ -1233,7 +1237,7 @@ create_engine(SessionId, _MemoryId, Args, Params, InitialMemory, Engine) :-
     % Check if tracing is enabled and store in session state
     (get_dict(trace, Params, true) -> TraceEnabled = true ; TraceEnabled = false),
     assertz(session_trace_enabled(SessionId, TraceEnabled)),
-    assertz(session_trace_log(SessionId, [])),
+    reset_trace_store(SessionId),
     % Check for gas limit in params
     (get_dict(gas_limit, Params, GasLimit) -> true ; GasLimit = -1),
     % Create initial state with provided memory, params, context stack, trace depth and gas
@@ -1305,9 +1309,9 @@ step_engine_handle(SessionId, Engine, Status, Content, Payload) :-
         ;   % Engine finished - return trace if enabled
             Status = finished,
             Content = '',
-            (   session_trace_enabled(SessionId, true),
-                session_trace_log(SessionId, TraceLog)
-            ->  Payload = payload{trace: TraceLog}
+            (   session_trace_enabled(SessionId, true)
+            ->  session_trace_list(SessionId, TraceLog),
+                Payload = payload{trace: TraceLog}
             ;   Payload = none
             )
         ),
@@ -1319,9 +1323,9 @@ step_engine_handle(SessionId, Engine, Status, Content, Payload) :-
         ;   format(atom(ErrMsg), 'Engine error: ~w', [Error]),
             Status = error,
             Content = ErrMsg,
-            (   session_trace_enabled(SessionId, true),
-                session_trace_log(SessionId, TraceLog)
-            ->  Payload = payload{trace: TraceLog}
+            (   session_trace_enabled(SessionId, true)
+            ->  session_trace_list(SessionId, TraceLog),
+                Payload = payload{trace: TraceLog}
             ;   Payload = none
             )
         )
@@ -1361,8 +1365,7 @@ create_session(SessionId, Params, HarnessMemory, MetaMemory) :-
     ),
     retractall(session_trace_enabled(SessionId, _)),
     assertz(session_trace_enabled(SessionId, TraceEnabled)),
-    retractall(session_trace_log(SessionId, _)),
-    assertz(session_trace_log(SessionId, [])),
+    reset_trace_store(SessionId),
     retractall(session_repl_memory(SessionId, _)),
     assertz(session_repl_memory(SessionId, HarnessMemory)),
     retractall(session_meta_memory(SessionId, _)),
@@ -1447,7 +1450,7 @@ destroy_session(SessionId) :-
     retractall(repl_snapshot(SessionId, _)),
     retractall(session_params(SessionId, _)),
     retractall(session_trace_enabled(SessionId, _)),
-    retractall(session_trace_log(SessionId, _)).
+    reset_trace_store(SessionId).
 
 %% load_code(+SessionId, +Code, -Error)
 %% Parses DML source into the session module, running the normal source
@@ -4219,7 +4222,7 @@ destroy_engine(SessionId) :-
     retractall(session_sample_token_result(SessionId, _)),
     retractall(session_llm_result(SessionId, _)),
     retractall(session_judgment_result(SessionId, _)),
-    retractall(session_trace_log(SessionId, _)),
+    reset_trace_store(SessionId),
     retractall(session_trace_enabled(SessionId, _)),
     (   current_module(SessionId)
     ->  catch(
@@ -4512,29 +4515,95 @@ set_depth(StateIn, Depth, StateOut) :-
 %% add_trace_entry(+SessionId, +Type, +Predicate, +Args, +Depth)
 %% Add a trace entry if tracing is enabled
 add_trace_entry(SessionId, Type, Predicate, Args, Depth) :-
+    add_trace_entry_result(SessionId, Type, Predicate, Args, none, Depth).
+
+%% add_trace_entry_result(+SessionId, +Type, +Predicate, +Args, +ResultOrNone, +Depth)
+%% Indexed, constant-time append with a hard cap. The list-backed log was
+%% quadratic for long loops; this keeps a bounded store and can still be
+%% serialized in order.
+add_trace_entry_result(SessionId, Type, Predicate, Args, ResultOpt, Depth) :-
     (   session_trace_enabled(SessionId, true)
-    ->  get_time(Now),
-        Timestamp is round(Now * 1000),  % Convert to milliseconds
-        Entry = trace{timestamp: Timestamp, type: Type, predicate: Predicate, args: Args, depth: Depth},
-        session_trace_log(SessionId, OldLog),
-        retract(session_trace_log(SessionId, OldLog)),
-        append(OldLog, [Entry], NewLog),
-        assertz(session_trace_log(SessionId, NewLog))
+    ->  (   session_trace_count(SessionId, Count)
+        ->  true
+        ;   Count = 0,
+            assertz(session_trace_count(SessionId, 0))
+        ),
+        Max = 50000,
+        (   Count < Max
+        ->  get_time(Now),
+            Timestamp is round(Now * 1000),
+            (   ResultOpt = none
+            ->  Entry = trace{timestamp: Timestamp, type: Type, predicate: Predicate, args: Args, depth: Depth}
+            ;   ResultOpt = some(Result),
+                Entry = trace{timestamp: Timestamp, type: Type, predicate: Predicate, args: Args, result: Result, depth: Depth}
+            ),
+            assertz(session_trace_entry(SessionId, Count, Entry)),
+            Next is Count + 1,
+            retractall(session_trace_count(SessionId, _)),
+            assertz(session_trace_count(SessionId, Next))
+        ;   true
+        )
     ;   true
     ).
+
+%% reset_trace_store(+SessionId)
+reset_trace_store(SessionId) :-
+    retractall(session_trace_entry(SessionId, _, _)),
+    retractall(session_trace_count(SessionId, _)),
+    retractall(session_trace_log(SessionId, _)).
+
+%% session_trace_list(+SessionId, -Entries)
+session_trace_list(SessionId, Entries) :-
+    findall(Entry, session_trace_entry(SessionId, _, Entry), Entries).
 
 %% add_trace_with_result(+SessionId, +Type, +Predicate, +Args, +Result, +Depth)
 %% Add a trace entry with a result field
 add_trace_with_result(SessionId, Type, Predicate, Args, Result, Depth) :-
-    (   session_trace_enabled(SessionId, true)
-    ->  get_time(Now),
-        Timestamp is round(Now * 1000),
-        Entry = trace{timestamp: Timestamp, type: Type, predicate: Predicate, args: Args, result: Result, depth: Depth},
-        session_trace_log(SessionId, OldLog),
-        retract(session_trace_log(SessionId, OldLog)),
-        append(OldLog, [Entry], NewLog),
-        assertz(session_trace_log(SessionId, NewLog))
-    ;   true
+    add_trace_entry_result(SessionId, Type, Predicate, Args, some(Result), Depth).
+
+%% goal_trace_parts(+Goal, -Predicate, -Args)
+goal_trace_parts(Goal, Predicate, Args) :-
+    (   compound(Goal)
+    ->  Goal =.. [Predicate|Args]
+    ;   Predicate = Goal, Args = []
+    ).
+
+trace_goal_call(SessionId, Goal, Depth) :-
+    goal_trace_parts(Goal, Predicate, Args),
+    add_trace_entry(SessionId, call, Predicate, Args, Depth).
+
+trace_goal_exit(SessionId, Goal, Depth) :-
+    goal_trace_parts(Goal, Predicate, Args),
+    copy_term(Goal, GoalOut),
+    add_trace_with_result(SessionId, exit, Predicate, Args, GoalOut, Depth).
+
+trace_goal_fail(SessionId, Goal, Depth) :-
+    goal_trace_parts(Goal, Predicate, Args),
+    add_trace_entry(SessionId, fail, Predicate, Args, Depth).
+
+%% repl_trace_clear(+SessionId)
+repl_trace_clear(SessionId) :-
+    reset_trace_store(SessionId).
+
+%% JSON-safe trace. Terms are rendered as text; arbitrary DML terms/variables
+%% are not JSON values.
+repl_trace_json(SessionId, Json) :-
+    session_trace_list(SessionId, Log),
+    maplist(trace_entry_json, Log, Entries),
+    atom_json_dict(Json, Entries, []).
+
+trace_entry_json(Trace, Dict) :-
+    is_dict(Trace),
+    get_dict(timestamp, Trace, Timestamp),
+    get_dict(type, Trace, Type),
+    get_dict(predicate, Trace, Predicate),
+    get_dict(args, Trace, Args),
+    get_dict(depth, Trace, Depth),
+    term_string(Args, ArgsText),
+    (   get_dict(result, Trace, Result)
+    ->  term_string(Result, ResultText),
+        Dict = _{timestamp: Timestamp, type: Type, predicate: Predicate, depth: Depth, argsText: ArgsText, resultText: ResultText}
+    ;   Dict = _{timestamp: Timestamp, type: Type, predicate: Predicate, depth: Depth, argsText: ArgsText}
     ).
 
 %% ============================================================
@@ -4874,6 +4943,7 @@ mi_call(task(Desc), StateIn, StateOut) :-
     interpolate_desc(Desc, Params, InterpDesc),
     get_session_id(SessionId),
     get_depth(StateIn, Depth),
+    add_trace_entry(SessionId, call, task, [InterpDesc], Depth),
     add_trace_entry(SessionId, llm_call, task, [InterpDesc], Depth),
     collect_user_tools(SessionId, UserTools),
     get_memory(StateIn, Memory),
@@ -4894,6 +4964,7 @@ mi_call(task(Desc), StateIn, StateOut) :-
         ->  format(atom(WarnMsg), 'Warning: task/1 failed: ~w', [ErrorMsg])
         ;   format(atom(WarnMsg), 'Warning: task/1 failed (success=false)', [])
         ),
+        add_trace_entry(SessionId, fail, task, [InterpDesc], Depth),
         engine_yield(output(WarnMsg)),
         fail
     ),
@@ -4950,6 +5021,7 @@ mi_call(prompt(Desc), StateIn, StateOut) :-
     interpolate_desc(Desc, Params, InterpDesc),
     get_session_id(SessionId),
     get_depth(StateIn, Depth),
+    add_trace_entry(SessionId, call, prompt, [InterpDesc], Depth),
     add_trace_entry(SessionId, llm_call, prompt, [InterpDesc], Depth),
     % prompt/N is a simple LLM call - no tools, no tool scope
     get_model_spec(StateIn, ModelSpec),
@@ -5035,6 +5107,7 @@ mi_call(chat(Message, Reply), StateIn, StateOut) :-
     interpolate_desc(Message, Params, InterpMessage),
     get_session_id(SessionId),
     get_depth(StateIn, Depth),
+    add_trace_entry(SessionId, call, chat, [InterpMessage], Depth),
     add_trace_entry(SessionId, llm_call, chat, [InterpMessage], Depth),
     collect_user_tools(SessionId, UserTools),
     % The message is NOT added to memory here: the loop appends it as the turn's
@@ -5370,6 +5443,7 @@ mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     interpolate_desc(Desc, Params, InterpDesc),
     get_session_id(SessionId),
     get_depth(StateIn, Depth),
+    add_trace_entry(SessionId, call, task, [InterpDesc], Depth),
     add_trace_entry(SessionId, llm_call, task, [InterpDesc], Depth),
     collect_user_tools(SessionId, UserTools),
     get_memory(StateIn, Memory),
@@ -5392,6 +5466,7 @@ mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
         ->  format(atom(WarnMsg), 'Warning: task/~w failed: ~w', [ActualArity, ErrorMsg])
         ;   format(atom(WarnMsg), 'Warning: task/~w failed (success=false)', [ActualArity])
         ),
+        add_trace_entry(SessionId, fail, task, [InterpDesc], Depth),
         engine_yield(output(WarnMsg)),
         fail
     ),
@@ -8099,7 +8174,7 @@ consume_gas(StateIn, StateOut) :-
 %% `deepclause_strings:dc_interp_value/2`, which the interpolation rewrite emits)
 %% must run natively. Interpreting its body here would resolve *its* unqualified
 %% helper calls against this module and fail with `deepclause_mi:helper/2`.
-mi_call_dispatch(Goal, StateIn, StateIn) :-
+mi_call_dispatch(Goal, StateIn, StateOut) :-
     get_session_id(SessionId),
     nonvar(Goal),
     Goal = Module:Inner,
@@ -8109,20 +8184,36 @@ mi_call_dispatch(Goal, StateIn, StateIn) :-
     % interpreter so task/N, exec/2 and gas accounting keep working.
     Module \== user,
     !,
-    call(Module:Inner).
+    get_depth(StateIn, Depth),
+    trace_goal_call(SessionId, Goal, Depth),
+    (   call(Module:Inner)
+    *-> trace_goal_exit(SessionId, Goal, Depth), StateOut = StateIn
+    ;   trace_goal_fail(SessionId, Goal, Depth), fail
+    ).
 
-mi_call_dispatch(Goal, StateIn, StateIn) :-
+mi_call_dispatch(Goal, StateIn, StateOut) :-
     get_session_id(SessionId),
     callable(Goal),
     predicate_property(SessionId:Goal, defined),
     predicate_property(Goal, built_in),
     !,
-    call(SessionId:Goal).
+    get_depth(StateIn, Depth),
+    trace_goal_call(SessionId, Goal, Depth),
+    (   call(SessionId:Goal)
+    *-> trace_goal_exit(SessionId, Goal, Depth), StateOut = StateIn
+    ;   trace_goal_fail(SessionId, Goal, Depth), fail
+    ).
 
-mi_call_dispatch(Goal, StateIn, StateIn) :-
+mi_call_dispatch(Goal, StateIn, StateOut) :-
     predicate_property(Goal, built_in),
     !,  % Commit: it's built-in, no backtracking needed
-    call(Goal).
+    get_session_id(SessionId),
+    get_depth(StateIn, Depth),
+    trace_goal_call(SessionId, Goal, Depth),
+    (   call(Goal)
+    *-> trace_goal_exit(SessionId, Goal, Depth), StateOut = StateIn
+    ;   trace_goal_fail(SessionId, Goal, Depth), fail
+    ).
 
 %% `script_file/2` is a fact annotation, not a helper. Calling it before the
 %% fact exists used to fail as `existence_error(procedure, ...)` with no hint.
@@ -8139,41 +8230,51 @@ mi_call_dispatch(Goal, StateIn, StateOut) :-
     predicate_property(SessionId:Goal, defined),
     % If it's a library/imported predicate, call it directly
     (   (predicate_property(SessionId:Goal, imported_from(_)) ; predicate_property(SessionId:Goal, foreign))
-    ->  StateOut = StateIn,
-        call(SessionId:Goal)
+    ->  get_depth(StateIn, Depth),
+        trace_goal_call(SessionId, Goal, Depth),
+        (   call(SessionId:Goal)
+        *-> trace_goal_exit(SessionId, Goal, Depth), StateOut = StateIn
+        ;   trace_goal_fail(SessionId, Goal, Depth), fail
+        )
     ;   % User-defined predicate - use clause/2 for backtracking
-        % Add trace entry for call
         get_depth(StateIn, Depth),
-        Goal =.. [Functor|Args],
-        add_trace_entry(SessionId, call, Functor, Args, Depth),
+        trace_goal_call(SessionId, Goal, Depth),
         % Find a matching clause - allows backtracking to try multiple clauses
         clause(SessionId:Goal, Body),
         NewDepth is Depth + 1,
         set_depth(StateIn, NewDepth, State1),
-        % Soft cut: execute the body for every solution (so findall/backtracking
-        % works), but still record a fail trace when the body has none.
         (   mi_call(Body, State1, State2)
-        *-> add_trace_entry(SessionId, exit, Functor, Args, Depth),
+        *-> trace_goal_exit(SessionId, Goal, Depth),
             set_depth(State2, Depth, StateOut)
-        ;   add_trace_entry(SessionId, fail, Functor, Args, Depth),
+        ;   trace_goal_fail(SessionId, Goal, Depth),
             fail
         )
     ).
 
-mi_call_dispatch(Goal, StateIn, StateIn) :-
+mi_call_dispatch(Goal, StateIn, StateOut) :-
     % Fallback for external/library predicates
     get_session_id(SessionId),
     % Check if this predicate exists in the session module but not as user-defined
     \+ predicate_property(SessionId:Goal, defined),
-    catch(call(SessionId:Goal), _, fail),
+    get_depth(StateIn, Depth),
+    trace_goal_call(SessionId, Goal, Depth),
+    (   catch(call(SessionId:Goal), _, fail)
+    ->  trace_goal_exit(SessionId, Goal, Depth), StateOut = StateIn
+    ;   trace_goal_fail(SessionId, Goal, Depth), fail
+    ),
     !.
 
-mi_call_dispatch(Goal, StateIn, StateIn) :-
+mi_call_dispatch(Goal, StateIn, StateOut) :-
     % Final fallback: call without module
     % Only for predicates not defined in session
     get_session_id(SessionId),
     \+ predicate_property(SessionId:Goal, defined),
-    call(Goal).
+    get_depth(StateIn, Depth),
+    trace_goal_call(SessionId, Goal, Depth),
+    (   call(Goal)
+    *-> trace_goal_exit(SessionId, Goal, Depth), StateOut = StateIn
+    ;   trace_goal_fail(SessionId, Goal, Depth), fail
+    ).
 
 %% ============================================================
 %% Helper Predicates
