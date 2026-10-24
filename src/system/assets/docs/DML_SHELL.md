@@ -29,6 +29,18 @@ Develop. TUI Work is entered with `deepclause repl --mode work --harness NAME`;
 `/workflows` opens its chooser. Without a shell, use Develop or an explicit Run;
 internal predicates are never automatically exported.
 
+## Metadata names must be text, not variables
+
+Write `name: "Query"`, `name: "Url"`, `name: "Report"` (or quoted atoms).
+Bare capitalized `Query`, `Url`, `Report` are Prolog variables, not labels. They
+produce unbound/empty runtime parameter names. The visual editor quotes names
+for you; when authoring DML directly, include the quotes.
+
+`end_turn` refuses an invalid shell before publishing a version. Keep the
+transaction open, correct the declarations, then commit again. Full-source
+editor saves are checked too. This validates the Work interface; executing a
+backing predicate alone is not a substitute for validating its tool declaration.
+
 ## Inputs and outputs
 
 For EVERY tool/workflow, actual predicate arguments are inputs followed by outputs,

@@ -50,6 +50,7 @@ export interface WorkSpec {
   version?: number;
   hash: string;
   diagnostics: string[];
+  status?: 'ready' | 'missing' | 'invalid';
   /** Initial program for a fresh conversation; excludes mutable private state. */
   snapshot?: WorkSnapshot;
 }
@@ -86,11 +87,12 @@ export function validateWorkShell(shell: ShellSpec, predicates?: WorkPredicate[]
       if (predicates && !predicates.some(p => p.name === entry.goal && p.arity === entry.inputs.length + entry.outputs.length)) {
         errors.push(`${entry.name}: ${entry.goal}/${entry.inputs.length + entry.outputs.length} is not defined; declare inputs and outputs explicitly`);
       }
-      for (const fields of [entry.inputs, entry.outputs]) {
+      for (const [direction, fields] of [['input', entry.inputs], ['output', entry.outputs]] as const) {
         const fieldNames = new Set<string>();
-        for (const field of fields) {
-          if (!field.name.trim() || fieldNames.has(field.name)) errors.push(`${entry.name}: empty or duplicate argument name '${field.name}'`);
-          fieldNames.add(field.name);
+        for (const [index, field] of fields.entries()) {
+          if (!field.name.trim()) errors.push(`${entry.name}: ${direction} ${index + 1} has an empty/unbound name. Use a quoted string such as name: "${direction === 'input' ? 'Query' : 'Report'}"; bare capitalized names are Prolog variables.`);
+          else if (fieldNames.has(field.name)) errors.push(`${entry.name}: duplicate ${direction} name '${field.name}'`);
+          if (field.name) fieldNames.add(field.name);
           if (!(WORK_TYPES as readonly string[]).includes(field.type)) errors.push(`${entry.name}: unsupported Work type '${field.type}'; supported: ${WORK_TYPES.join(', ')}`);
         }
       }

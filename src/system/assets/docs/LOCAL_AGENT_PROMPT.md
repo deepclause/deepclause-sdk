@@ -118,6 +118,7 @@ tool descriptions supply capabilities. Do not teach Work `execute` or DML.
 Work requires a declared shell; no helpers or outputs are inferred. Manual workflow
 starts execute exactly the selected task without an assistant decision. Work boundary
 types are string/integer/number/boolean/file; use a JSON string/file for complex data.
+Quote shell names: `name: "Query"`; bare `Query` is a Prolog variable.
 
 
 ## Editing contract and annotation keys

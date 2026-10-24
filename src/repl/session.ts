@@ -622,10 +622,17 @@ export class DMLSession {
       mode: this.purpose, kind: this.openOptions.sessionKind ?? 'conversation', model: this.model, backend: this.provider };
   }
 
+  private workShellErrors(): string[] {
+    const shell = this.shell();
+    if (shell) return validateWorkShell(shell, this.harnessView().predicates);
+    return this.predicateArities('shell').some(arity => arity === 1 || arity === 3)
+      ? ['The shell declaration cannot be read. Declare shell/1 as a supported fact and quote metadata names, e.g. name: "Query".'] : [];
+  }
+
   async workSpec(): Promise<WorkSpec> {
     const shell = this.shell();
-    const diagnostics = workShellDiagnostics(shell);
-    const errors = shell ? validateWorkShell(shell, this.harnessView().predicates) : [];
+    const errors = this.workShellErrors();
+    const diagnostics = !shell && errors.length ? [] : workShellDiagnostics(shell);
     diagnostics.push(...errors);
     const scripts = await this.scriptHashes();
     const stateHash = harnessHash(this.canonicalSource(), scripts);
@@ -641,6 +648,7 @@ export class DMLSession {
     const snapshotSource = this.purpose === 'work' ? this.pinnedWorkSource ?? this.moduleSource() : this.moduleSource();
     const snapshotScripts = this.purpose === 'work' ? this.pinnedWorkScripts ?? scripts : scripts;
     return { harness: this.harnessName, shell: errors.length || scriptsChanged ? null : shell, diagnostics,
+      status: errors.length || scriptsChanged ? 'invalid' : shell ? 'ready' : 'missing',
       version: this.purpose === 'work' ? this.pinnedWorkVersion : this.history?.currentVersion,
       hash: this.purpose === 'work' ? this.pinnedWorkHash ?? stateHash : stateHash,
       snapshot: { source: snapshotSource, hash: harnessHash(snapshotSource, snapshotScripts),
@@ -2240,6 +2248,10 @@ export class DMLSession {
     if (this.transactionBefore === null) {
       return { committed: false, changed: [], error: 'no open transaction' };
     }
+    if (this.transactionDirty) {
+      const errors = this.workShellErrors();
+      if (errors.length) return { committed: false, error: `Invalid Work shell; fix it before committing:\n${errors.join('\n')}` };
+    }
     const before = this.transactionBefore;
     const after = this.predicateList();
     const touched = this.editTouched();
@@ -2342,6 +2354,11 @@ export class DMLSession {
       return { committed: false, error: String(outcome ?? 'replace failed') };
     }
 
+    const errors = this.workShellErrors();
+    if (errors.length) {
+      this.prologQuery(`deepclause_mi:repl_rollback('${this.sessionId}', ${quoteString(previous)}, _)`);
+      return { committed: false, error: `Invalid Work shell; source was not committed:\n${errors.join('\n')}` };
+    }
     const after = this.predicateList();
     const changed = this.simplePredicateDiff(before, after);
     let version: number | undefined;
