@@ -1237,7 +1237,13 @@ create_engine(SessionId, _MemoryId, Args, Params, InitialMemory, Engine) :-
     % Check if tracing is enabled and store in session state
     (get_dict(trace, Params, true) -> TraceEnabled = true ; TraceEnabled = false),
     assertz(session_trace_enabled(SessionId, TraceEnabled)),
-    reset_trace_store(SessionId),
+    % Keep the session trace across turns: create_engine runs once per turn,
+    % and a Work session can execute several workflows. Only create_session/
+    % explicit clear resets the store.
+    (   session_trace_count(SessionId, _)
+    ->  true
+    ;   assertz(session_trace_count(SessionId, 0))
+    ),
     % Check for gas limit in params
     (get_dict(gas_limit, Params, GasLimit) -> true ; GasLimit = -1),
     % Create initial state with provided memory, params, context stack, trace depth and gas

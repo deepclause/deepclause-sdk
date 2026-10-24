@@ -55,6 +55,16 @@ describe('full MI execution trace', () => {
     await expect(repl!.session.trace()).resolves.toEqual([]);
   });
 
+  it('keeps trace entries across turns', async () => {
+    await run('leaf(1)');
+    const first = await repl!.session.trace();
+    for await (const event of repl!.session.query('leaf(2)')) {
+      if (event.type === 'error') throw new Error(event.content ?? 'query failed');
+    }
+    const second = await repl!.session.trace();
+    expect(second.length).toBeGreaterThan(first.length);
+  });
+
   it('keeps entry order and depth for nested calls', async () => {
     await run('parent(X)');
     const entries = await repl!.session.trace();
