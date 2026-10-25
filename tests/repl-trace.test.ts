@@ -125,3 +125,44 @@ describe('tool-scoped MI trace', () => {
     }
   });
 });
+
+describe('workflow-scoped MI trace', () => {
+  it('nests a workflow MI tree under the agent run_workflow call', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'deepclause-workflow-trace-'));
+    let calls = 0;
+    const work = await createHarnessRepl({
+      workspacePath: dir,
+      model: 'test-model',
+      provider: 'openai',
+      mode: 'work',
+      execution: 'inline',
+      trace: true,
+      llmBackend: {
+        complete: async (request) => {
+          if (!request.tools?.some((tool) => tool.name === 'run_workflow')) throw new Error('run_workflow tool missing');
+          return calls++ === 0
+            ? { text: '', toolCalls: [{ id: 'workflow-1', name: 'run_workflow', arguments: { name: 'Do' } }] }
+            : { text: 'done' };
+        },
+      },
+    });
+    try {
+      await work.session.loadCode([
+        'wf(Value) :- Value = "wf".',
+        'shell(_{kind:agent,system:"test",host_tools:[],tools:[],workflows:[',
+        '  _{name:"Do",goal:"wf",inputs:[],outputs:[_{name:"Value",type:string}]}',
+        '],welcome:""}).',
+      ].join('\n'));
+      for await (const event of work.prompt('run the workflow')) {
+        if (event.type === 'error') throw new Error(event.content ?? 'prompt failed');
+      }
+      const entries = await work.session.trace();
+      const root = entries.find((entry) => entry.type === 'tool' && entry.predicate === 'run_workflow');
+      expect(root?.id).toBeTruthy();
+      expect(entries.some((entry) => entry.type === 'call' && entry.predicate === 'wf' && entry.scope === root?.id)).toBe(true);
+    } finally {
+      await work.dispose();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
