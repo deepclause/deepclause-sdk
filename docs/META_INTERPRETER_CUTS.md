@@ -1,9 +1,9 @@
 # Known issue: `!` (cut) in user-defined DML predicates is not honored
 
-**Status:** fixed for pure predicates (see [Resolution](#resolution)).
-Predicates that need state threading still ignore `!`; that limitation is
-documented and pinned by a test. Exposed by the meta-interpreter backtracking
-fix shipped in 0.0.88 and later.
+**Status:** fixed. Cuts are honoured in both pure and interpreted predicates (see
+[Resolution](#resolution)); the interpreted case compiles the cut instead of
+running the body natively. Exposed by the meta-interpreter backtracking fix
+shipped in 0.0.88 and later.
 
 ## Summary
 
@@ -85,9 +85,10 @@ agent_main :-
 - Before the fix: `Xs = [1, 2]`.
 - Now: `Xs = [1]`.
 
-`tests/meta-interpreter-cuts.test.ts` covers this case as a normal `it` now,
-plus clause commit (an effectful clause does not replay), `findall/3`, `call/1`,
-`\+`, disjunction, a cut typed as a query, and the remaining limitation below.
+`tests/meta-interpreter-cuts.test.ts` covers this case as a normal `it`, plus
+clause commit (an effectful clause does not replay), `findall/3`, `call/1`,
+`not/1`, disjunction, a cut typed as a query, and the lowered (interpreted)
+variants that call `output/1`.
 
 ## History
 
@@ -164,19 +165,35 @@ the harness changes (`load_code/3`, `repl_define/4`, `repl_delete_predicate/4`,
 Measured overhead on cut-free recursive code is negligible (slightly faster than
 before in the current build).
 
-### Remaining limitation
+### Interpreted predicates: cut lowering
 
-A predicate that mixes a cut with a state-threading predicate is still
-interpreted, so its cut remains inert:
+A predicate that needs the interpreter (it calls `task/N`, `exec/2`, `output/1`,
+forms, processes, …) cannot run natively, so its cut is **compiled away** before
+the body is interpreted:
 
 ```prolog
-imp(X) :- p(X), output(seen), !.   % output/1 needs the interpreter
-imp(_) :- p(_).
+!         ->  '$dc_cut_flag'                    % commit the clause
+( L, !, R ) ->  '$dc_cut_commit'(L), R          % once(L), then commit
+( L ; R )   ->  ( L' ; '$dc_cut_guard'(R') )    % pruned when L cut
+\+ G, call(G), findall(_,G,_), (C->T;E)  ->  G keeps its own cut scope
 ```
 
-`tests/meta-interpreter-cuts.test.ts` pins this. Use `once/1` or if-then-else in
-such clauses. Cutting this limitation would need Option B (compiling special
-predicates into ordinary wrapper calls).
+`'$dc_cut_commit'(L)` is `once(L)` plus the commit marker. `once/1` is already
+interpreter-aware, so bindings and the threaded state behave exactly as with a
+real cut. The marker itself is a per-call, non-backtrackable fact
+(`mi_cut_done/1`) because "do not try later clauses" must survive backtracking,
+which the threaded state cannot do; the call id travels in the state so nested
+calls and scopes cannot collide.
+
+Measured behaviour is now ISO for: clause commit, effectful clauses (no replay),
+`findall/3`, `call/1`, `\+`/`not/1`, disjunction, if-then-else, mid-body cuts
+(post-cut goals still enumerate), and cuts typed directly as a query. Tool bodies
+are lowered the same way. Cut-free interpreted calls take the old path unchanged,
+so there is no measurable overhead.
+
+Remaining known gap: a cut is only visible where a *clause body* is interpreted
+or a body/query is lowered, so a cut inside a hand-written closure passed to
+`call/N` at runtime is still inert. Use `once/1` there.
 
 ## Proposed fixes
 

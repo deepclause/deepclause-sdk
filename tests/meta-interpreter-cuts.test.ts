@@ -104,15 +104,32 @@ describe("meta-interpreter cut semantics", () => {
     expect(await solutionsOf(code, "p(X), !")).toEqual([["X=1"]]);
   });
 
-  it("documents the limitation: a cut next to a host predicate stays inert", async () => {
-    // output/1 needs state threading, so the predicate is interpreted and the
-    // cut cannot commit; use once/1 or if-then-else there.
+  it("honours a cut in a predicate that needs the interpreter (host predicate)", async () => {
+    // output/1 requires state threading, so the body is interpreted; the cut is
+    // lowered to once(...) + a per-call commit marker instead.
     const code = `
-      p(1). p(2).
-      imp(X) :- p(X), output(seen), !.
-      imp(_) :- p(_).
+      p(1). p(2). p(3).
+      imp(X)  :- p(X), output(seen), !.
+      imp(_)  :- p(wrong).
     `;
-    const [got] = await solutionsOf(code, "imp(X)");
-    expect(got.length).toBeGreaterThan(1);
+    expect(await solutionsOf(code, "imp(X)")).toEqual([["X=1"]]);
+  });
+
+  it("scopes lowered cuts like Prolog: disjunction, call/1, negation, mid-body", async () => {
+    const code = `
+      p(1). p(2). p(3).
+      dis(X)  :- ( p(X), output(seen), ! ; X = 99 ).
+      cal(X)  :- call(( p(X), output(seen), ! )).
+      cal(99).
+      neg     :- not(( p(_), output(seen), ! )).
+      mid(X,Y):- p(X), output(seen), !, p(Y).
+      plain(X):- p(X), output(seen).
+    `;
+    const [dis, cal, neg, mid, plain] = await solutionsOf(code, "dis(X)", "cal(X)", "neg", "mid(X,Y)", "plain(X)");
+    expect(dis).toEqual(["X=1"]);                       // right branch pruned
+    expect(cal).toEqual(["X=1", "X=99"]);               // call/1 is its own scope
+    expect(neg).toEqual([]);                            // the cut goal succeeds, so neg fails
+    expect(mid).toEqual(["X=1,Y=1", "X=1,Y=2", "X=1,Y=3"]); // post-cut goals enumerate
+    expect(plain).toEqual(["X=1", "X=2", "X=3"]);       // no cut: unchanged
   });
 });

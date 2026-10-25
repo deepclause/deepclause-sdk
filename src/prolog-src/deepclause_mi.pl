@@ -144,6 +144,7 @@
 :- dynamic session_engine/2.       % session_engine(SessionId, Engine) - legacy default engine handle
 :- dynamic mi_cut_class/3.         % mi_cut_class(SessionId, Name/Arity, native|interpreted)
 :- dynamic mi_purity/3.            % mi_purity(SessionId, Name/Arity, pure|impure|in_progress)
+:- dynamic mi_cut_done/1.          % mi_cut_done(CallId) - non-backtrackable clause commit
 :- dynamic session_frame/4.        % session_frame(FrameId, SessionId, Kind, Depth)
 :- dynamic session_frame_engine/2. % session_frame_engine(FrameId, Engine)
 :- dynamic session_default_frame/2. % session_default_frame(SessionId, FrameId)
@@ -4770,8 +4771,9 @@ call_tool_inline(SessionId, ToolName, Args, StateIn, StateOut, Result) :-
         ToolHead = ToolPattern,
         % Execute the tool body through MI
         % Wrap in catch to handle answer() commits - answer() yields and then throws
+        mi_lower_cut_body(Body, LoweredBody),
         catch(
-            (   mi_call(Body, StateIn, StateOut)
+            (   mi_call(LoweredBody, StateIn, StateOut)
             ->  % Collect result from result/1 facts or output args
                 % Use catch to handle case where result/2 doesn't exist
                 (   catch(SessionId:result(ToolNameAtom, R), _, fail)
@@ -4828,10 +4830,13 @@ create_tool_engine(SessionId, ToolName, Args, ToolEngineId) :-
         (session_params(SessionId, Params) -> true ; Params = params{}),
         InitialState = state{memory: [], params: Params, context_stack: [], depth: 0},
         % Create goal that will yield the result
+        % A tool body is interpreted (it may call exec/exec-free host code); lower
+        % any cut so it commits the body's prefix instead of doing nothing.
+        mi_lower_cut_body(Body, LoweredBody),
         Goal = (
             nb_setval(current_session_id, SessionId),
             catch(
-                (   mi_call(Body, InitialState, _FinalState),
+                (   mi_call(LoweredBody, InitialState, _FinalState),
                     % A tool that declares an output but leaves it unbound has no
                     % result. `extract_tool_result_simple/4` maps that to `true`, which
                     % is how a `tool(fs_write(Path, Content), …)` (content taken for the
@@ -6937,6 +6942,39 @@ mi_call(\+(Goal), StateIn, StateIn) :-
 mi_call(!, StateIn, StateIn) :-
     !.
 
+%% mi_call('$dc_cut_flag', +StateIn, -StateOut)
+%% A cut whose only remaining effect is committing the clause.
+mi_call('$dc_cut_flag', StateIn, StateOut) :- !,
+    mi_cut_mark(StateIn),
+    StateOut = StateIn.
+
+%% mi_call('$dc_cut_commit'(Goal), +StateIn, -StateOut)
+%% Commit the goals to the left of a cut, then the clause. once/1 is
+%% interpreter-aware, so bindings and state are kept.
+mi_call('$dc_cut_commit'(Goal), StateIn, StateOut) :- !,
+    once(mi_call(Goal, StateIn, State1)),
+    mi_cut_mark(State1),
+    StateOut = State1.
+
+%% mi_call('$dc_cut_guard'(Goal), +StateIn, -StateOut)
+%% The right branch of a disjunction whose left branch was cut.
+mi_call('$dc_cut_guard'(Goal), StateIn, StateOut) :- !,
+    (   mi_cut_committed(StateIn)
+    ->  fail
+    ;   mi_call(Goal, StateIn, StateOut)
+    ).
+
+%% mi_call('$dc_cut_scope'(Goal), +StateIn, -StateOut)
+%% A nested cut scope: call/1, \+/1, findall/3, an if-then-else condition.
+mi_call('$dc_cut_scope'(Goal), StateIn, StateOut) :- !,
+    (   get_dict(call_id, StateIn, Outer) -> true ; Outer = none ),
+    mi_fresh_call_id(CallId),
+    call_cleanup(
+        mi_call(Goal, StateIn.put(call_id, CallId), StateOut0),
+        mi_clear_cut_mark(CallId)
+    ),
+    StateOut = StateOut0.put(call_id, Outer).
+
 %% mi_call(true, +StateIn, -StateOut)
 mi_call(true, StateIn, StateIn).
 
@@ -8068,6 +8106,10 @@ is_mi_special_predicate(\+(_)).
 is_mi_special_predicate(catch(_,_,_)).
 is_mi_special_predicate(throw(_)).
 is_mi_special_predicate(!).
+is_mi_special_predicate('$dc_cut_flag').
+is_mi_special_predicate('$dc_cut_commit'(_)).
+is_mi_special_predicate('$dc_cut_guard'(_)).
+is_mi_special_predicate('$dc_cut_scope'(_)).
 is_mi_special_predicate(true).
 is_mi_special_predicate(fail).
 is_mi_special_predicate(false).
@@ -8328,26 +8370,53 @@ mi_call_dispatch(Goal, StateIn, StateOut) :-
     ;   % A pure predicate that uses a cut runs natively: interpreting its body
         % would turn `!` into `true` (docs/META_INTERPRETER_CUTS.md), because the
         % cut cannot reach the clause/2 choice point from mi_call/3.
-        (   mi_native_cut_predicate(SessionId, Goal)
-        ->  get_depth(StateIn, Depth),
-            trace_goal_call(SessionId, Goal, Depth),
+        mi_call_predicate_class(SessionId, Goal, Class),
+        get_depth(StateIn, Depth),
+        trace_goal_call(SessionId, Goal, Depth),
+        (   Class == native
+        ->  % Pure predicate with a cut: run the real clauses so `!` is a real
+            % Prolog cut (bindings kept, clause committed, scopes honoured).
             (   call(SessionId:Goal)
             *-> trace_goal_exit(SessionId, Goal, Depth), StateOut = StateIn
             ;   trace_goal_fail(SessionId, Goal, Depth), fail
             )
-        ;   % User-defined predicate - use clause/2 for backtracking
-            get_depth(StateIn, Depth),
-            trace_goal_call(SessionId, Goal, Depth),
-            % Find a matching clause - allows backtracking to try multiple clauses
-            clause(SessionId:Goal, Body),
-            NewDepth is Depth + 1,
-            set_depth(StateIn, NewDepth, State1),
-            (   mi_call(Body, State1, State2)
-            *-> trace_goal_exit(SessionId, Goal, Depth),
-                set_depth(State2, Depth, StateOut)
-            ;   trace_goal_fail(SessionId, Goal, Depth),
-                fail
+        ;   (   Class == cut
+            ->  % Interpreted goal by goal with a lowered cut. Each call gets its
+                % own commit marker so the cut can stop later clauses from being
+                % tried; the marker must survive backtracking, so it cannot live
+                % in the threaded state.
+                (   get_dict(call_id, StateIn, OuterCall) -> true ; OuterCall = none ),
+                mi_fresh_call_id(CallId),
+                call_cleanup(
+                    mi_call_clause_loop(SessionId, Goal, Depth, StateIn.put(call_id, CallId),
+                                        CallId, true, StateOut0),
+                    mi_clear_cut_mark(CallId)
+                ),
+                StateOut = StateOut0.put(call_id, OuterCall)
+            ;   % No cut: the plain interpreter path, unchanged.
+                mi_call_clause_loop(SessionId, Goal, Depth, StateIn, none, false, StateOut)
             )
+        )
+    ).
+
+%% mi_call_clause_loop(+SessionId, +Goal, +Depth, +StateIn, +CallId, +Lower, -StateOut)
+%% Enumerate clauses, interpreting each lowered body. Once the call's commit
+%% marker is set, later clauses are never tried - that is the cut's second
+%% effect, which must survive backtracking and therefore cannot live in the
+%% threaded state.
+mi_call_clause_loop(SessionId, Goal, Depth, StateIn, CallId, Lower, StateOut) :-
+    clause(SessionId:Goal, Body),
+    (   CallId \== none,
+        mi_cut_done(CallId)
+    ->  fail
+    ;   (   Lower == true -> mi_lower_cut_body(Body, Lowered) ; Lowered = Body ),
+        NewDepth is Depth + 1,
+        set_depth(StateIn, NewDepth, State1),
+        (   mi_call(Lowered, State1, State2)
+        *-> trace_goal_exit(SessionId, Goal, Depth),
+            set_depth(State2, Depth, StateOut)
+        ;   trace_goal_fail(SessionId, Goal, Depth),
+            fail
         )
     ).
 
@@ -8373,28 +8442,33 @@ mi_native_query(SessionId, Goal) :-
 %% whenever the harness changes.
 %% ============================================================
 
-mi_native_cut_predicate(SessionId, Goal) :-
+%% mi_call_predicate_class(+SessionId, +Goal, -Class)
+%%   native      - contains a cut and is pure: run the real clauses
+%%   cut         - contains a cut but needs the interpreter: lower the cut
+%%   no_cut      - no cut: interpret the body as written
+mi_call_predicate_class(SessionId, Goal, Class) :-
     callable(Goal),
     functor(Goal, Name, Arity),
-    (   mi_cut_class(SessionId, Name/Arity, Class)
-    ->  Class == native
-    ;   (   mi_classify_cut_predicate(SessionId, Name/Arity, Class)
-        ->  assertz(mi_cut_class(SessionId, Name/Arity, Class))
-        ;   Class = interpreted,
-            assertz(mi_cut_class(SessionId, Name/Arity, interpreted))
+    (   mi_cut_class(SessionId, Name/Arity, Cached)
+    ->  Class = Cached
+    ;   (   mi_classify_cut_predicate(SessionId, Name/Arity, Class0)
+        ->  Class = Class0
+        ;   Class = no_cut
         ),
-        Class == native
+        assertz(mi_cut_class(SessionId, Name/Arity, Class))
     ).
 
 mi_classify_cut_predicate(SessionId, Name/Arity, Class) :-
     functor(Head, Name, Arity),
     findall(Body, clause(SessionId:Head, Body), Bodies),
     Bodies \== [],
-    member(Body0, Bodies),
-    term_has_cut(Body0),
-    (   forall(member(Body, Bodies), mi_body_is_pure(SessionId, Body))
-    ->  Class = native
-    ;   Class = interpreted
+    (   member(Body0, Bodies),
+        term_has_cut(Body0)
+    ->  (   forall(member(Body, Bodies), mi_body_is_pure(SessionId, Body))
+        ->  Class = native
+        ;   Class = cut
+        )
+    ;   fail
     ).
 
 %% term_has_cut(+Term): a cut occurs anywhere in the term (conservative).
@@ -8480,6 +8554,113 @@ sub_term(Sub, Term) :-
     Term =.. [_|Args],
     member(Arg, Args),
     sub_term(Sub, Arg).
+
+%% ============================================================
+%% Cut lowering for interpreted predicates
+%%
+%% A predicate that needs the interpreter (it calls task/N, exec/2, output/1,
+%% forms, processes, ...) cannot run natively, so its cuts are compiled away
+%% instead:
+%%
+%%   !            -> '$dc_cut_flag'                 (commit the clause)
+%%   (L, !, R)    -> '$dc_cut_commit'(L), R         (once(L), then commit)
+%%   (L ; R)      -> ( L' ; '$dc_cut_guard'(R') )   when L may cut
+%%   \+ G, call(G), findall(_,G,_), (C->T;E)  ->  the goal keeps its own scope
+%%
+%% '$dc_cut_commit'(L) is once(L) plus the commit flag, and once/1 is already
+%% interpreter-aware, so bindings and the threaded state behave exactly as a
+%% real cut. The flag is a non-backtrackable fact per call (mi_cut_done/1): it
+%% must survive backtracking, which the threaded state cannot do.
+%% ============================================================
+
+%% mi_lower_cut_body(+Body, -Lowered)
+mi_lower_cut_body(Body, Lowered) :-
+    (   term_has_cut(Body)
+    ->  mi_lower_goal(Body, Lowered, _)
+    ;   Lowered = Body
+    ).
+
+%% mi_lower_goal(+Goal, -Lowered, -HasClauseCut)
+mi_lower_goal(!, '$dc_cut_flag', true) :- !.
+mi_lower_goal((A, B), Lowered, HasCut) :- !,
+    mi_lower_goal(A, A1, CutA),
+    mi_lower_goal(B, B1, CutB),
+    (   CutA == true
+    ->  % The cut is inside A: A1 already commits its own prefix and keeps
+        % enumerating after the cut, so do not wrap it again.
+        Lowered = (A1, B1)
+    ;   CutB == true
+    ->  % A cut follows: every goal to its left is committed.
+        Lowered = ('$dc_cut_commit'(A1), B1)
+    ;   Lowered = (A1, B1)
+    ),
+    ( CutA == true -> HasCut = true ; HasCut = CutB ).
+mi_lower_goal((A ; B), Lowered, HasCut) :- !,
+    mi_lower_goal(A, A1, CutA),
+    mi_lower_goal(B, B1, CutB),
+    (   CutA == true
+    ->  Lowered = (A1 ; '$dc_cut_guard'(B1))
+    ;   Lowered = (A1 ; B1)
+    ),
+    ( CutA == true -> HasCut = true ; HasCut = CutB ).
+mi_lower_goal((Cond -> Then ; Else), Lowered, HasCut) :- !,
+    mi_lower_scope(Cond, C1),
+    mi_lower_goal(Then, T1, CutT),
+    mi_lower_goal(Else, E1, CutE),
+    Lowered = (C1 -> T1 ; E1),
+    ( CutT == true -> HasCut = true ; HasCut = CutE ).
+mi_lower_goal((Cond -> Then), Lowered, HasCut) :- !,
+    mi_lower_scope(Cond, C1),
+    mi_lower_goal(Then, T1, CutT),
+    Lowered = (C1 -> T1),
+    HasCut = CutT.
+mi_lower_goal(\+(Goal), \+(G1), false) :- !, mi_lower_scope(Goal, G1).
+mi_lower_goal(call(Goal), call(G1), false) :- !, mi_lower_scope(Goal, G1).
+mi_lower_goal(call(Goal, A), call(G1, A), false) :- !, mi_lower_scope(Goal, G1).
+mi_lower_goal(once(Goal), once(G1), false) :- !, mi_lower_scope(Goal, G1).
+mi_lower_goal(ignore(Goal), ignore(G1), false) :- !, mi_lower_scope(Goal, G1).
+mi_lower_goal(not(Goal), not(G1), false) :- !, mi_lower_scope(Goal, G1).
+mi_lower_goal(findall(T, Goal, L), findall(T, G1, L), false) :- !, mi_lower_scope(Goal, G1).
+mi_lower_goal(bagof(T, Goal, L), bagof(T, G1, L), false) :- !, mi_lower_scope(Goal, G1).
+mi_lower_goal(setof(T, Goal, L), setof(T, G1, L), false) :- !, mi_lower_scope(Goal, G1).
+mi_lower_goal(aggregate_all(T, Goal, R), aggregate_all(T, G1, R), false) :- !, mi_lower_scope(Goal, G1).
+mi_lower_goal(forall(Cond, Action), forall(C1, A1), false) :- !,
+    mi_lower_scope(Cond, C1),
+    mi_lower_scope(Action, A1).
+mi_lower_goal(Goal, Goal, false).
+
+%% A goal that is a cut scope of its own: lower its cuts, then mark the scope.
+mi_lower_scope(Goal, Scoped) :-
+    (   term_has_cut(Goal)
+    ->  mi_lower_goal(Goal, Lowered, _),
+        Scoped = '$dc_cut_scope'(Lowered)
+    ;   Scoped = Goal
+    ).
+
+%% ============================================================
+%% Cut lowering - runtime support
+%% ============================================================
+
+mi_fresh_call_id(Id) :-
+    (   nb_current(mi_call_seq, N) -> true ; N = 0 ),
+    N1 is N + 1,
+    nb_setval(mi_call_seq, N1),
+    Id = N1.
+
+%% mi_cut_mark(+State): this call must not try later clauses.
+mi_cut_mark(State) :-
+    (   get_dict(call_id, State, CallId), CallId \== none
+    ->  (   mi_cut_done(CallId) -> true ; assertz(mi_cut_done(CallId)) )
+    ;   true
+    ).
+
+mi_cut_committed(State) :-
+    get_dict(call_id, State, CallId),
+    CallId \== none,
+    mi_cut_done(CallId).
+
+mi_clear_cut_mark(CallId) :-
+    retractall(mi_cut_done(CallId)).
 
 %% mi_clear_cut_classes(+SessionId): the harness changed; reclassify lazily.
 mi_clear_cut_classes(SessionId) :-
