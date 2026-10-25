@@ -1,7 +1,9 @@
 # Known issue: `!` (cut) in user-defined DML predicates is not honored
 
-**Status:** open. Affects all current SDK versions. Exposed by the
-meta-interpreter backtracking fix shipped in 0.0.88 and later.
+**Status:** fixed for pure predicates (see [Resolution](#resolution)).
+Predicates that need state threading still ignore `!`; that limitation is
+documented and pinned by a test. Exposed by the meta-interpreter backtracking
+fix shipped in 0.0.88 and later.
 
 ## Summary
 
@@ -80,11 +82,12 @@ agent_main :-
 ```
 
 - Standard Prolog: `Xs = [1]`.
-- Current meta-interpreter: `Xs = [1, 2]`.
+- Before the fix: `Xs = [1, 2]`.
+- Now: `Xs = [1]`.
 
-A test for this lives in `tests/meta-interpreter-cuts.test.ts` and is marked
-with `it.fails` so the suite stays green until the issue is fixed. Flip it to a
-normal `it` as part of the fix.
+`tests/meta-interpreter-cuts.test.ts` covers this case as a normal `it` now,
+plus clause commit (an effectful clause does not replay), `findall/3`, `call/1`,
+`\+`, disjunction, a cut typed as a query, and the remaining limitation below.
 
 ## History
 
@@ -135,6 +138,45 @@ This is the workaround applied to `deepclause-pi` `src/assets/specs.dml`
 
 `once/1` is also usable as a blunt commit for "first solution of this
 predicate" cases, because it is a built-in and calls its goal directly.
+
+## Resolution
+
+Implemented: **native execution for pure cut predicates** (Option A.2).
+
+`mi_call_dispatch/3` asks `mi_native_cut_predicate/2` before interpreting a
+session clause. When the predicate contains a cut and is *pure*, the dispatch
+calls `call(SessionId:Goal)` instead of decomposing the body, so the cut is a
+real Prolog cut: bindings are kept, the clause commits, and `\+`, `call/1`,
+`findall/3` and if-then-else scope it exactly as Prolog does. A pure goal typed
+directly as a query (or passed to `execute`) is run the same way, so
+`p(X), !` commits the query.
+
+"Pure" is computed transitively (`mi_body_is_pure/2`, `mi_predicate_purity/3`):
+a predicate is impure if it — or anything it calls — needs state threading
+(`task/N`, `prompt/N`, `llm/2`, `exec/2`, forms, processes, `system/1`, `output/1`,
+…). Native-safe constructs (`;`, `->`, `\+`, `!`, `findall/3`, `call/N`,
+`once/1`, `catch/3`, `assertz/1`, …) do not make a predicate impure; their
+arguments are still checked.
+
+Both decisions are cached (`mi_cut_class/3`, `mi_purity/3`) and cleared whenever
+the harness changes (`load_code/3`, `repl_define/4`, `repl_delete_predicate/4`,
+`repl_rollback/3`, `repl_snapshot_restore/1`, `assert[a]`/`retract[all]`).
+Measured overhead on cut-free recursive code is negligible (slightly faster than
+before in the current build).
+
+### Remaining limitation
+
+A predicate that mixes a cut with a state-threading predicate is still
+interpreted, so its cut remains inert:
+
+```prolog
+imp(X) :- p(X), output(seen), !.   % output/1 needs the interpreter
+imp(_) :- p(_).
+```
+
+`tests/meta-interpreter-cuts.test.ts` pins this. Use `once/1` or if-then-else in
+such clauses. Cutting this limitation would need Option B (compiling special
+predicates into ordinary wrapper calls).
 
 ## Proposed fixes
 

@@ -156,6 +156,11 @@ before relying on optional limits, recipe libraries or resume behavior.
 Conjunction `A,B`, alternatives `(A;B)`, committed `(C->T;E)`, negation `\+ G`,
 unification `=`, arithmetic `is`/`=:=`, identity `==`, disequality dif/2,
 `once/1`, cut `!`, `catch/3` and `throw/1` are supported. Read basics for modes.
+A cut commits its clause and the goals to its left, and is scoped by `\+`,
+`call/1`, `findall/3` and if-then-else — but only in a *pure* predicate (one that
+calls no host/model predicate). A clause that also calls `task/N`, `exec/2`,
+`output/1`, forms or processes is interpreted, so its cut is ignored there: use
+`once/1` or `(Cond -> Then ; Else)` instead.
 Backtracking restores logical bindings/memory; it does NOT undo host/file actions.
 Select one intended effectful path. Pure relations may intentionally enumerate.
 

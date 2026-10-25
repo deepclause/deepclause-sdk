@@ -142,6 +142,8 @@
 
 %% Dynamic predicates for session state (engine management only, not memory!)
 :- dynamic session_engine/2.       % session_engine(SessionId, Engine) - legacy default engine handle
+:- dynamic mi_cut_class/3.         % mi_cut_class(SessionId, Name/Arity, native|interpreted)
+:- dynamic mi_purity/3.            % mi_purity(SessionId, Name/Arity, pure|impure|in_progress)
 :- dynamic session_frame/4.        % session_frame(FrameId, SessionId, Kind, Depth)
 :- dynamic session_frame_engine/2. % session_frame_engine(FrameId, Engine)
 :- dynamic session_default_frame/2. % session_default_frame(SessionId, FrameId)
@@ -1466,7 +1468,8 @@ destroy_session(SessionId) :-
 %% preprocessing (task/prompt rewrite, interpolation, expand_term).
 load_code(SessionId, Code, Error) :-
     catch(
-        (   guard_not_frozen(SessionId),
+        (   mi_clear_cut_classes(SessionId),
+            guard_not_frozen(SessionId),
             parse_dml_string(Code, SessionId),
             Error = none
         ),
@@ -1639,7 +1642,13 @@ repl_solve(Goal, Names, SessionId, State) :-
     ).
 
 repl_solve_loop(Goal, Names, SessionId, State) :-
-    mi_call(Goal, State, StateOut),
+    (   mi_native_query(SessionId, Goal)
+    ->  % A cut in a query commits the query itself. A pure query has no
+        % state to thread, so it can run natively and get real cut semantics.
+        call(SessionId:Goal),
+        StateOut = State
+    ;   mi_call(Goal, State, StateOut)
+    ),
     collect_bindings(Names, Bindings),
     store_memory_for_state(SessionId, StateOut),
     engine_yield(solution(Bindings, false)),
@@ -2947,7 +2956,8 @@ repl_retract_predicate_clause(SessionId, Pattern, Result) :-
 %% clauses and can leave an empty predicate behind), this abolishes it.
 repl_delete_predicate(SessionId, Name, Arity, Result) :-
     catch(
-        (   guard_not_frozen(SessionId),
+        (   mi_clear_cut_classes(SessionId),
+            guard_not_frozen(SessionId),
             atom(Name), integer(Arity), Arity >= 0,
             (   repl_protected_name(Name)
             ->  throw(error(permission_error(modify, reserved_name, Name/Arity),
@@ -3063,7 +3073,8 @@ repl_delete_tool(SessionId, ToolName, Result) :-
 %% clauses being replaced are copied first so a failure can still put them back.
 repl_define(SessionId, HeadPatternText, ClausesText, Result) :-
     catch(
-        (   guard_not_frozen(SessionId),
+        (   mi_clear_cut_classes(SessionId),
+            guard_not_frozen(SessionId),
             repl_define_target(SessionId, HeadPatternText, HeadName, HeadArity),
             repl_parse_clauses(SessionId, ClausesText, Terms, SourceViews),
             findall(Name/Arity,
@@ -3321,7 +3332,8 @@ repl_history_assert_term(Term, SessionId) :-
 %% memory is preserved.
 repl_rollback(SessionId, Source, Result) :-
     catch(
-        (   guard_not_frozen(SessionId),
+        (   mi_clear_cut_classes(SessionId),
+            guard_not_frozen(SessionId),
             repl_abolish_user_predicates(SessionId),
             retractall(session_source_view(SessionId, _, _)),
             retractall(session_directive(SessionId, _)),
@@ -3925,6 +3937,7 @@ repl_snapshot_save(SessionId) :-
 
 %% repl_snapshot_restore(+SessionId)
 repl_snapshot_restore(SessionId) :-
+    mi_clear_cut_classes(SessionId),
     (   repl_snapshot(SessionId, Snapshot)
     ->  retract(repl_snapshot(SessionId, Snapshot)),
         findall(Name/Arity,
@@ -6973,13 +6986,15 @@ mi_call(assertz(Head), StateIn, StateIn) :-
     get_session_id(SessionId),
     guard_not_frozen(SessionId),
     guard_reserved_clause(Head),
-    assertz(SessionId:Head).
+    assertz(SessionId:Head),
+    mi_clear_cut_classes(SessionId).
 
 mi_call(asserta(Head), StateIn, StateIn) :-
     get_session_id(SessionId),
     guard_not_frozen(SessionId),
     guard_reserved_clause(Head),
-    asserta(SessionId:Head).
+    asserta(SessionId:Head),
+    mi_clear_cut_classes(SessionId).
 
 guard_reserved_clause(Head) :-
     (   repl_reserved_clause(Head)
@@ -6991,12 +7006,14 @@ guard_reserved_clause(Head) :-
 mi_call(retract(Head), StateIn, StateIn) :-
     get_session_id(SessionId),
     guard_not_frozen(SessionId),
-    retract(SessionId:Head).
+    retract(SessionId:Head),
+    mi_clear_cut_classes(SessionId).
 
 mi_call(retractall(Head), StateIn, StateIn) :-
     get_session_id(SessionId),
     guard_not_frozen(SessionId),
-    retractall(SessionId:Head).
+    retractall(SessionId:Head),
+    mi_clear_cut_classes(SessionId).
 
 %% ============================================================
 %% List Predicates - Interpreted for proper state threading
@@ -8308,20 +8325,166 @@ mi_call_dispatch(Goal, StateIn, StateOut) :-
         *-> trace_goal_exit(SessionId, Goal, Depth), StateOut = StateIn
         ;   trace_goal_fail(SessionId, Goal, Depth), fail
         )
-    ;   % User-defined predicate - use clause/2 for backtracking
-        get_depth(StateIn, Depth),
-        trace_goal_call(SessionId, Goal, Depth),
-        % Find a matching clause - allows backtracking to try multiple clauses
-        clause(SessionId:Goal, Body),
-        NewDepth is Depth + 1,
-        set_depth(StateIn, NewDepth, State1),
-        (   mi_call(Body, State1, State2)
-        *-> trace_goal_exit(SessionId, Goal, Depth),
-            set_depth(State2, Depth, StateOut)
-        ;   trace_goal_fail(SessionId, Goal, Depth),
-            fail
+    ;   % A pure predicate that uses a cut runs natively: interpreting its body
+        % would turn `!` into `true` (docs/META_INTERPRETER_CUTS.md), because the
+        % cut cannot reach the clause/2 choice point from mi_call/3.
+        (   mi_native_cut_predicate(SessionId, Goal)
+        ->  get_depth(StateIn, Depth),
+            trace_goal_call(SessionId, Goal, Depth),
+            (   call(SessionId:Goal)
+            *-> trace_goal_exit(SessionId, Goal, Depth), StateOut = StateIn
+            ;   trace_goal_fail(SessionId, Goal, Depth), fail
+            )
+        ;   % User-defined predicate - use clause/2 for backtracking
+            get_depth(StateIn, Depth),
+            trace_goal_call(SessionId, Goal, Depth),
+            % Find a matching clause - allows backtracking to try multiple clauses
+            clause(SessionId:Goal, Body),
+            NewDepth is Depth + 1,
+            set_depth(StateIn, NewDepth, State1),
+            (   mi_call(Body, State1, State2)
+            *-> trace_goal_exit(SessionId, Goal, Depth),
+                set_depth(State2, Depth, StateOut)
+            ;   trace_goal_fail(SessionId, Goal, Depth),
+                fail
+            )
         )
     ).
+
+%% mi_native_query(+SessionId, +Goal): a pure query containing a cut.
+mi_native_query(SessionId, Goal) :-
+    term_has_cut(Goal),
+    mi_body_is_pure(SessionId, Goal).
+
+%% ============================================================
+%% Cut inside user predicates
+%%
+%% `!` cannot be interpreted faithfully: the interpreted body is executed by
+%% mi_call/3, so a cut cannot prune the clause/2 choice point created in
+%% mi_call_dispatch/3 (see docs/META_INTERPRETER_CUTS.md). A *pure* predicate
+%% that contains a cut is therefore executed natively with call/1, which gives
+%% exact Prolog cut semantics: bindings are kept, the clause commits, and
+%% \+/1, call/1, findall/3 and if-then-else scope it correctly.
+%%
+%% "Pure" means: neither the predicate nor anything it calls needs state
+%% threading (task/N, prompt/N, llm/2, exec/2, forms, processes, system/1, ...).
+%% Such a predicate stays interpreted and its cut is ignored; that restriction
+%% is documented. Both decisions are cached per predicate and invalidated
+%% whenever the harness changes.
+%% ============================================================
+
+mi_native_cut_predicate(SessionId, Goal) :-
+    callable(Goal),
+    functor(Goal, Name, Arity),
+    (   mi_cut_class(SessionId, Name/Arity, Class)
+    ->  Class == native
+    ;   (   mi_classify_cut_predicate(SessionId, Name/Arity, Class)
+        ->  assertz(mi_cut_class(SessionId, Name/Arity, Class))
+        ;   Class = interpreted,
+            assertz(mi_cut_class(SessionId, Name/Arity, interpreted))
+        ),
+        Class == native
+    ).
+
+mi_classify_cut_predicate(SessionId, Name/Arity, Class) :-
+    functor(Head, Name, Arity),
+    findall(Body, clause(SessionId:Head, Body), Bodies),
+    Bodies \== [],
+    member(Body0, Bodies),
+    term_has_cut(Body0),
+    (   forall(member(Body, Bodies), mi_body_is_pure(SessionId, Body))
+    ->  Class = native
+    ;   Class = interpreted
+    ).
+
+%% term_has_cut(+Term): a cut occurs anywhere in the term (conservative).
+term_has_cut(Term) :-
+    (   Term == !
+    ->  true
+    ;   compound(Term),
+        Term =.. [_|Args],
+        member(Arg, Args),
+        term_has_cut(Arg)
+    ).
+
+mi_body_is_pure(SessionId, Body) :-
+    \+ (   sub_term(Goal, Body),
+            compound(Goal),
+            mi_impure_goal(SessionId, Goal)
+        ).
+
+%% A host/model predicate, or a user predicate that (transitively) needs one.
+mi_impure_goal(SessionId, Goal) :-
+    is_mi_special_predicate(Goal),
+    \+ mi_control_construct(Goal).
+mi_impure_goal(SessionId, Goal) :-
+    \+ is_mi_special_predicate(Goal),
+    predicate_property(SessionId:Goal, defined),
+    \+ predicate_property(SessionId:Goal, imported_from(_)),
+    \+ predicate_property(SessionId:Goal, foreign),
+    functor(Goal, Name, Arity),
+    mi_predicate_purity(SessionId, Name/Arity, impure).
+
+mi_predicate_purity(SessionId, Indicator, Purity) :-
+    (   mi_purity(SessionId, Indicator, Cached)
+    ->  Purity = Cached
+    ;   assertz(mi_purity(SessionId, Indicator, in_progress)),
+        Indicator = Name/Arity,
+        functor(Head, Name, Arity),
+        findall(Body, clause(SessionId:Head, Body), Bodies),
+        (   Bodies \== [],
+            forall(member(Body, Bodies), mi_body_is_pure(SessionId, Body))
+        ->  Purity = pure
+        ;   Purity = impure
+        ),
+        retractall(mi_purity(SessionId, Indicator, _)),
+        (   Purity == pure -> true ; true ),
+        assertz(mi_purity(SessionId, Indicator, Purity))
+    ).
+
+%% Control constructs and native-safe builtins are not "impure": they carry no
+%% state or are re-implemented natively.
+mi_control_construct((_, _)).
+mi_control_construct((_; _)).
+mi_control_construct((_ -> _)).
+mi_control_construct((_ *-> _)).
+mi_control_construct((_ *-> _ ; _)).
+mi_control_construct(\+(_)).
+mi_control_construct(!).
+mi_control_construct(true).
+mi_control_construct(fail).
+mi_control_construct(false).
+mi_control_construct(catch(_, _, _)).
+mi_control_construct(throw(_)).
+mi_control_construct(findall(_, _, _)).
+mi_control_construct(bagof(_, _, _)).
+mi_control_construct(setof(_, _, _)).
+mi_control_construct(aggregate_all(_, _, _)).
+mi_control_construct(forall(_, _)).
+mi_control_construct(call(_)).
+mi_control_construct(call(_, _)).
+mi_control_construct(call(_, _, _)).
+mi_control_construct(call(_, _, _, _)).
+mi_control_construct(once(_)).
+mi_control_construct(ignore(_)).
+mi_control_construct(not(_)).
+mi_control_construct(assertz(_)).
+mi_control_construct(asserta(_)).
+mi_control_construct(retract(_)).
+mi_control_construct(retractall(_)).
+
+%% sub_term(?Sub, +Term): any subterm, including arguments and list elements.
+sub_term(Term, Term).
+sub_term(Sub, Term) :-
+    compound(Term),
+    Term =.. [_|Args],
+    member(Arg, Args),
+    sub_term(Sub, Arg).
+
+%% mi_clear_cut_classes(+SessionId): the harness changed; reclassify lazily.
+mi_clear_cut_classes(SessionId) :-
+    retractall(mi_cut_class(SessionId, _, _)),
+    retractall(mi_purity(SessionId, _, _)).
 
 mi_call_dispatch(Goal, StateIn, StateOut) :-
     % Fallback for external/library predicates

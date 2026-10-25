@@ -59,8 +59,9 @@ Reply without tool calls to finish or ask the user. You do not call `finish` or
 - Backtracking tries more alternatives. Pure relational predicates may enumerate.
   An effectful/model-calling skill should have one intended solution: select a
   single input before the effect, use `once/1`, a committed branch or an intentional
-  cut, and avoid alternative clauses that replay the effect. A cut added at the
-  end is not a substitute for understanding earlier choicepoints.
+  cut, and avoid alternative clauses that replay the effect. A cut commits its
+  clause only in a pure predicate; if the clause also calls `task/N`, `exec/2`,
+  `output/1` or a form, prefer `once/1` or `(Cond -> Then ; Else)`.
 - Bind reusable outputs and RETURN. `output/1` is progress/display;
   `answer/1` terminates the current goal, it does not assign a workflow result or
   commit an authoring edit. Reserve it for a one-shot run entry point.
