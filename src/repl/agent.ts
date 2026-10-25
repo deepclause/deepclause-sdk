@@ -54,6 +54,9 @@ export interface HarnessAgentOptions {
   modelCatalog?: ModelCatalogEntry[];
   /** Pre-loaded documentation for the `reference` tool (handled by the controller). */
   knownMessages?: MemoryMessage[];
+  /** Trace callbacks around host tool execution, so MI calls can nest under tools. */
+  traceToolStart?: (name: string, args: Record<string, unknown>) => void;
+  traceToolEnd?: (name: string, args: Record<string, unknown>, result: unknown) => void;
   /**
    * Replace the bundled authoring prompt. Used by embeddings with a smaller
    * model/context, where the full guide would exceed the context window.
@@ -507,6 +510,8 @@ export class HarnessAgent {
         // An unknown parameter cannot mean what it says; report it as this
         // tool's result so the model can correct the call on its next turn.
         const argumentError = validateToolArguments(call.name, tools.get(call.name)?.parameters, call.arguments);
+        const traceToolStarted = argumentError.ok;
+        if (traceToolStarted) this.options.traceToolStart?.(call.name, call.arguments);
         const toolPromise = (argumentError.ok
           ? tool.execute(call.arguments, {
             signal: options.signal,
@@ -525,6 +530,13 @@ export class HarnessAgent {
         }
         while (toolEvents.length > 0) yield toolEvents.shift()!;
         await toolPromise;
+        if (traceToolStarted) {
+          this.options.traceToolEnd?.(
+            call.name,
+            call.arguments,
+            toolFailure ? { error: toolFailure instanceof Error ? toolFailure.message : String(toolFailure) } : result,
+          );
+        }
         const failureMessage = toolFailure
           ? (toolFailure instanceof Error ? toolFailure.message : String(toolFailure))
           : toolResultFailure(result);

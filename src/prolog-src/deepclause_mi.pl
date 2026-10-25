@@ -64,6 +64,8 @@
     repl_delete_annotation_entry/4,
     repl_trace_json/2,
     repl_trace_clear/1,
+    repl_trace_tool_start/4,
+    repl_trace_tool_end/3,
     repl_edit_touched/2,
     repl_edit_touched_text/2,
     repl_edit_touched_clear/1,
@@ -170,6 +172,7 @@
 :- dynamic session_llm_result/2. % session_llm_result(SessionId, Result)
 :- dynamic session_judgment_result/2. % session_judgment_result(SessionId, Result)
 :- dynamic session_trace_entry/3.  % session_trace_entry(SessionId, Index, Entry) - bounded trace
+:- dynamic session_trace_scope/2.  % session_trace_scope(SessionId, [ToolId|...]) - nested tool scope stack
 :- dynamic session_trace_count/2.  % session_trace_count(SessionId, Count)
 :- dynamic session_trace_log/2.    % legacy list; retained for compatibility
 :- dynamic session_trace_enabled/2. % session_trace_enabled(SessionId, true/false)
@@ -4529,26 +4532,79 @@ add_trace_entry(SessionId, Type, Predicate, Args, Depth) :-
 %% serialized in order.
 add_trace_entry_result(SessionId, Type, Predicate, Args, ResultOpt, Depth) :-
     (   session_trace_enabled(SessionId, true)
-    ->  (   session_trace_count(SessionId, Count)
-        ->  true
-        ;   Count = 0,
-            assertz(session_trace_count(SessionId, 0))
+    ->  get_time(Now),
+        Timestamp is round(Now * 1000),
+        (   ResultOpt = none
+        ->  Entry0 = trace{timestamp: Timestamp, type: Type, predicate: Predicate, args: Args, depth: Depth}
+        ;   ResultOpt = some(Result),
+            Entry0 = trace{timestamp: Timestamp, type: Type, predicate: Predicate, args: Args, result: Result, depth: Depth}
         ),
-        Max = 50000,
-        (   Count < Max
-        ->  get_time(Now),
-            Timestamp is round(Now * 1000),
-            (   ResultOpt = none
-            ->  Entry = trace{timestamp: Timestamp, type: Type, predicate: Predicate, args: Args, depth: Depth}
-            ;   ResultOpt = some(Result),
-                Entry = trace{timestamp: Timestamp, type: Type, predicate: Predicate, args: Args, result: Result, depth: Depth}
-            ),
-            assertz(session_trace_entry(SessionId, Count, Entry)),
-            Next is Count + 1,
-            retractall(session_trace_count(SessionId, _)),
-            assertz(session_trace_count(SessionId, Next))
-        ;   true
+        add_trace_scope(Entry0, Entry),
+        append_trace_entry(SessionId, Entry)
+    ;   true
+    ).
+
+%% add_trace_scope(+EntryIn, -EntryOut)
+%% Attach the current tool/workflow scope, so the UI can nest MI calls under
+%% the host tool invocation that produced them.
+add_trace_scope(Entry, EntryOut) :-
+    get_session_id(SessionId),
+    (   session_trace_scope(SessionId, [Scope|_])
+    ->  put_dict(scope, Entry, Scope, EntryOut)
+    ;   EntryOut = Entry
+    ).
+
+%% append_trace_entry(+SessionId, +Entry)
+%% Bounded, indexed append used by normal MI entries and host tool roots.
+append_trace_entry(SessionId, Entry) :-
+    (   session_trace_count(SessionId, Count)
+    ->  true
+    ;   Count = 0,
+        assertz(session_trace_count(SessionId, 0))
+    ),
+    Max = 50000,
+    (   Count < Max
+    ->  assertz(session_trace_entry(SessionId, Count, Entry)),
+        Next is Count + 1,
+        retractall(session_trace_count(SessionId, _)),
+        assertz(session_trace_count(SessionId, Next))
+    ;   true
+    ).
+
+%% repl_trace_tool_start(+SessionId, +Id, +Name, +ArgsJson)
+repl_trace_tool_start(SessionId, Id, Name, ArgsJson) :-
+    (   session_trace_enabled(SessionId, true)
+    ->  get_time(Now),
+        Timestamp is round(Now * 1000),
+        (   session_trace_scope(SessionId, [Parent|_])
+        ->  put_dict(scope, trace{timestamp: Timestamp, type: tool, predicate: Name,
+                                  args: [ArgsJson], depth: 0, id: Id, scope: Parent}, Entry)
+        ;   Entry = trace{timestamp: Timestamp, type: tool, predicate: Name,
+                          args: [ArgsJson], depth: 0, id: Id}
+        ),
+        append_trace_entry(SessionId, Entry),
+        (   session_trace_scope(SessionId, Stack)
+        ->  retractall(session_trace_scope(SessionId, _)),
+            assertz(session_trace_scope(SessionId, [Id|Stack]))
+        ;   assertz(session_trace_scope(SessionId, [Id]))
         )
+    ;   true
+    ).
+
+%% repl_trace_tool_end(+SessionId, +Id, +ResultJson)
+repl_trace_tool_end(SessionId, Id, ResultJson) :-
+    (   session_trace_enabled(SessionId, true)
+    ->  (   session_trace_scope(SessionId, Stack),
+            select(Id, Stack, Rest)
+        ->  retractall(session_trace_scope(SessionId, _)),
+            (   Rest = [] -> true ; assertz(session_trace_scope(SessionId, Rest)) )
+        ;   true
+        ),
+        get_time(Now),
+        Timestamp is round(Now * 1000),
+        Entry = trace{timestamp: Timestamp, type: exit, predicate: tool,
+                      args: [], result: ResultJson, depth: 0, scope: Id},
+        append_trace_entry(SessionId, Entry)
     ;   true
     ).
 
@@ -4556,6 +4612,7 @@ add_trace_entry_result(SessionId, Type, Predicate, Args, ResultOpt, Depth) :-
 reset_trace_store(SessionId) :-
     retractall(session_trace_entry(SessionId, _, _)),
     retractall(session_trace_count(SessionId, _)),
+    retractall(session_trace_scope(SessionId, _)),
     retractall(session_trace_log(SessionId, _)).
 
 %% session_trace_list(+SessionId, -Entries)
@@ -4606,10 +4663,19 @@ trace_entry_json(Trace, Dict) :-
     get_dict(args, Trace, Args),
     get_dict(depth, Trace, Depth),
     term_string(Args, ArgsText),
+    Base = _{timestamp: Timestamp, type: Type, predicate: Predicate, depth: Depth, argsText: ArgsText},
     (   get_dict(result, Trace, Result)
     ->  term_string(Result, ResultText),
-        Dict = _{timestamp: Timestamp, type: Type, predicate: Predicate, depth: Depth, argsText: ArgsText, resultText: ResultText}
-    ;   Dict = _{timestamp: Timestamp, type: Type, predicate: Predicate, depth: Depth, argsText: ArgsText}
+        put_dict(resultText, Base, ResultText, WithResult)
+    ;   WithResult = Base
+    ),
+    (   get_dict(id, Trace, Id0)
+    ->  put_dict(id, WithResult, Id0, WithId)
+    ;   WithId = WithResult
+    ),
+    (   get_dict(scope, Trace, Scope)
+    ->  put_dict(scope, WithId, Scope, Dict)
+    ;   Dict = WithId
     ).
 
 %% ============================================================

@@ -81,3 +81,47 @@ describe('full MI execution trace', () => {
     expect(entries[leaf]?.depth).toBeGreaterThan(entries[parent]?.depth ?? 0);
   });
 });
+
+describe('tool-scoped MI trace', () => {
+  it('nests MI calls under the Work tool invocation that caused them', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'deepclause-tool-trace-'));
+    let requestIndex = 0;
+    const work = await createHarnessRepl({
+      workspacePath: dir,
+      model: 'test-model',
+      provider: 'openai',
+      mode: 'work',
+      execution: 'inline',
+      trace: true,
+      llmBackend: {
+        complete: async (request) => {
+          if (!request.tools?.some((tool) => tool.name === 'inner')) throw new Error('inner tool missing');
+          const index = requestIndex++;
+          if (index === 0) return { text: '', toolCalls: [{ id: 'call-1', name: 'inner', arguments: {} }] };
+          return { text: 'done' };
+        },
+      },
+    });
+    try {
+      await work.session.loadCode([
+        'inner(Value) :- Value = "ok".',
+        'shell(_{kind:agent,system:"test",host_tools:[],tools:[',
+        '  _{name:"inner",goal:"inner",description:"Inner tool",inputs:[],outputs:[_{name:"Value",type:string}]}',
+        '],workflows:[],welcome:""}).',
+      ].join('\n'));
+      for await (const event of work.prompt('run the inner tool')) {
+        if (event.type === 'error') throw new Error(event.content ?? 'prompt failed');
+      }
+      const entries = await work.session.trace();
+      const root = entries.find((entry) => entry.type === 'tool' && entry.predicate === 'inner');
+      expect(root?.id).toBeTruthy();
+      const child = entries.find((entry) => entry.type === 'call' && entry.predicate === 'inner' && entry.scope === root?.id);
+      expect(child).toBeDefined();
+      const exit = entries.find((entry) => entry.type === 'exit' && entry.predicate === 'tool' && entry.scope === root?.id);
+      expect(exit).toBeDefined();
+    } finally {
+      await work.dispose();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});

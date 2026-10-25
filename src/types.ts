@@ -232,7 +232,7 @@ export interface TraceEntry {
   /** Timestamp in milliseconds */
   timestamp: number;
   /** Type of trace event */
-  type: 'call' | 'exit' | 'fail' | 'output' | 'llm_call' | 'exec';
+  type: 'call' | 'exit' | 'fail' | 'output' | 'llm_call' | 'exec' | 'tool';
   /** Predicate or operation name */
   predicate?: string;
   /** Arguments or details */
@@ -245,6 +245,10 @@ export interface TraceEntry {
   result?: unknown;
   /** Call depth for indentation */
   depth?: number;
+  /** Stable id for a host tool root, used by scoped child entries. */
+  id?: string;
+  /** Parent tool root id; set on MI calls made while a tool is executing. */
+  scope?: string;
 }
 
 /**

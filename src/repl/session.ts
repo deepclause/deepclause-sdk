@@ -119,6 +119,16 @@ const RESUME_NOTE =
   + 'the harness and conversation memory were restored, but any subagents/services running '
   + 'before are gone. Re-create anything you still need.';
 
+/** JSON text for a trace payload; never throw because a value is cyclic. */
+function traceJson(value: unknown): string {
+  try {
+    const text = JSON.stringify(value)
+    return text === undefined ? 'null' : text
+  } catch {
+    return String(value)
+  }
+}
+
 const RESUME_NOTE_PREFIX = 'This session was reloaded';
 
 export interface DMLSessionOptions {
@@ -342,6 +352,9 @@ export class DMLSession {
   /** Persisted authoring-agent conversation (agent mode). */
   private agentMessages: MemoryMessage[] = [];
   private harnessAgent?: HarnessAgent;
+  /** Active host-tool trace scopes; nested tool calls push/pop here. */
+  private traceToolIds: string[] = [];
+  private traceToolSeq = 0;
   /** Open edit transaction (agent mode): predicate list at snapshot. */
   private transactionBefore: string[] | null = null;
   private transactionDirty = false;
@@ -2077,6 +2090,8 @@ export class DMLSession {
       currentModel: `${this.provider}:${this.model}`,
       modelCatalog: this.modelResolver?.catalog(),
       knownMessages: this.agentMessages,
+      traceToolStart: (name, args) => this.traceToolStart(name, args),
+      traceToolEnd: (name, args, result) => this.traceToolEnd(name, args, result),
       agentSystemPrompt: this.purpose === 'work' ? buildWorkSystemPrompt(this.shell()!) : this.openOptions.agentSystemPrompt,
     });
     return this.harnessAgent;
@@ -2614,6 +2629,35 @@ export class DMLSession {
       `deepclause_mi:repl_delete_predicate('${this.sessionId}', ${quoteAtom(name)}, ${Number(arityText)}, Result)`
     );
     return this.editResult(plainValue(result?.Result));
+  }
+
+  /** Open a tool scope so MI calls made by the tool nest under it. */
+  private traceToolStart(name: string, args: Record<string, unknown>): void {
+    if (!this.openOptions.trace) return
+    const id = `tool_${Date.now().toString(36)}_${++this.traceToolSeq}`
+    this.traceToolIds.push(id)
+    try {
+      this.prologQuery(
+        `deepclause_mi:repl_trace_tool_start('${this.sessionId}', '${id}', `
+        + `${quotePrologString(name)}, ${quotePrologString(traceJson(args))})`,
+      )
+    } catch {
+      /* tracing must never break a tool */
+    }
+  }
+
+  /** Close the current tool scope and attach its result. */
+  private traceToolEnd(_name: string, _args: Record<string, unknown>, result: unknown): void {
+    if (!this.openOptions.trace) return
+    const id = this.traceToolIds.pop()
+    if (!id) return
+    try {
+      this.prologQuery(
+        `deepclause_mi:repl_trace_tool_end('${this.sessionId}', '${id}', ${quotePrologString(traceJson(result))})`,
+      )
+    } catch {
+      /* tracing must never break a tool */
+    }
   }
 
   /** Read the full MI execution trace captured for this session. */
