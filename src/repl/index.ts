@@ -164,6 +164,8 @@ export interface HarnessRepl extends WorkSessionPort {
   diagram(entry?: string, mode?: DiagramMode, options?: { signal?: AbortSignal }): Promise<DiagramResult>;
   /** Preload dependencies before loading a source whose imports changed. */
   preloadHarnessModules(modules: import('./session.js').HarnessModuleSource[]): Promise<void>;
+  /** Workspace-relative files linked by script_file/2. */
+  linkedScripts(): Promise<string[]>;
   /** Read the full MI execution trace captured for this session. */
   trace(): Promise<import('../types.js').TraceEntry[]>;
   /** Delete the captured MI trace for this session. */
@@ -258,6 +260,10 @@ class HarnessReplImpl implements HarnessRepl {
 
   preloadHarnessModules(modules: import('./session.js').HarnessModuleSource[]): Promise<void> {
     return this.session.preloadHarnessModules(modules);
+  }
+
+  linkedScripts(): Promise<string[]> {
+    return this.session.linkedScripts();
   }
 
   trace(): Promise<import('../types.js').TraceEntry[]> {

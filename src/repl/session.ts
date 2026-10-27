@@ -1584,6 +1584,11 @@ export class DMLSession {
     return this.loadCode(strFromU8(entries[harnessName]));
   }
 
+  /** Workspace-relative script files linked by this harness. */
+  async linkedScripts(): Promise<string[]> {
+    return this.scriptFiles();
+  }
+
   /** Read-only listing of the living module (`all`, `Name/Arity`, or `tools`). */
   async listing(filter: string = 'all'): Promise<string> {
     const filterTerm = filter === 'all' || filter === 'tools'
