@@ -583,6 +583,7 @@ export class DMLSession {
     if (!result) {
       throw new Error('Failed to create REPL session');
     }
+    if (snapshot?.harnessModules?.length) session.openOptions.harnessModules = snapshot.harnessModules;
     await session.loadHarnessModules();
     await session.initHistory();
     if (snapshot) {
@@ -1336,6 +1337,7 @@ export class DMLSession {
         clean: isClean,
         savedAt: new Date().toISOString(),
         scripts,
+        ...(this.openOptions.harnessModules?.length ? { harnessModules: this.openOptions.harnessModules } : {}),
         memory: {
           harness: this.dumpMemoryTerm('harness'),
           meta: this.dumpMemoryTerm('meta'),

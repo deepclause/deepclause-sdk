@@ -111,6 +111,8 @@ export interface SessionHarnessSnapshot {
   clean: boolean;
   savedAt: string;
   scripts: HistoryScriptRef[];
+  /** Exact dependency modules used by this session/harness version. */
+  harnessModules?: Array<{ id: string; name: string; version?: string | number; hash?: string; source: string }>;
   /** Serialized conversation memory, when captured. */
   memory?: {
     harness: string;
