@@ -44,7 +44,7 @@ export type {
 // DML REPL (goal + prompt mode) for CLI and embedding
 export { createHarnessRepl } from './repl/index.js';
 export { DMLSession } from './repl/session.js';export type { HarnessRepl, HarnessReplOptions, RunOpts, DMLQueryEvent, ReplEvent, RollbackResult } from './repl/index.js';
-export type { DMLSessionOptions, DMLQueryOptions, ProcessSession } from './repl/session.js';
+export type { DMLSessionOptions, DMLQueryOptions, ProcessSession, HarnessModuleSource, HarnessModuleInfo } from './repl/session.js';
 export { formatListing, highlightProlog, reflowListing } from './repl/highlight.js';
 
 // TypeScript authoring agent
@@ -113,7 +113,7 @@ export {
   logoutProvider,
 } from './repl/auth.js';
 export type { LoginProviderOption } from './repl/auth.js';
-export { HistoryStore } from './repl/history.js';
+export { HistoryStore, moduleVersion } from './repl/history.js';
 export type {
   HistoryOptions,
   SessionMetadata,

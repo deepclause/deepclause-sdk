@@ -59,7 +59,7 @@ import type {
   ToolPolicy,
   TraceEntry,
 } from '../types.js';
-import { buildParamsTerm, plainValue, quotePrologString } from './frames.js';
+import { buildParamsTerm, plainValue, quoteAtom, quotePrologString } from './frames.js';
 import {
   buildHarnessHeader,
   type HarnessExportOptions,
@@ -131,6 +131,28 @@ function traceJson(value: unknown): string {
 
 const RESUME_NOTE_PREFIX = 'This session was reloaded';
 
+/** A dependency preloaded into the session by the embedding. */
+export interface HarnessModuleSource {
+  /** Valid Prolog atom, unique within the session. */
+  id: string
+  name: string
+  version?: string | number
+  hash?: string
+  source: string
+}
+
+export interface HarnessModuleInfo {
+  exports: string[]
+  modules: Array<{
+    name: string
+    version: string
+    hash: string
+    module: string
+    exports: string[]
+    imports: Array<{ from: string; as: string; module: string }>
+  }>
+}
+
 export interface DMLSessionOptions {
   mode?: SessionPurpose;
   sessionKind?: 'conversation' | 'workflow-run';
@@ -145,6 +167,8 @@ export interface DMLSessionOptions {
   gasLimit?: number;
   /** Enable the DML execution trace (surfaced on the `finished` event). */
   trace?: boolean;
+  /** Harness modules preloaded before the main harness source. */
+  harnessModules?: HarnessModuleSource[];
   /** Runner configuration (model/provider/temperature/backend). */
   runnerOptions: RunnerOptions;
   tools?: Map<string, ToolDefinition>;
@@ -559,6 +583,7 @@ export class DMLSession {
     if (!result) {
       throw new Error('Failed to create REPL session');
     }
+    await session.loadHarnessModules();
     await session.initHistory();
     if (snapshot) {
       if (snapshot.memory?.agent) {
@@ -1534,6 +1559,20 @@ export class DMLSession {
       files.push({ rel, bytes });
     }
 
+    // Bundles carry their dependency sources. Preload them into the session's
+    // module registry before the importing harness is parsed.
+    const manifestBytes = entries['manifest.json'];
+    if (manifestBytes) {
+      try {
+        const manifest = JSON.parse(strFromU8(manifestBytes)) as { modules?: HarnessModuleSource[] };
+        if (Array.isArray(manifest.modules) && manifest.modules.length > 0) {
+          await this.preloadHarnessModules(manifest.modules);
+        }
+      } catch {
+        /* A malformed manifest is ignored; the main source still gets a chance. */
+      }
+    }
+
     for (const file of files) {
       const abs = this.resolveWorkspacePath(file.rel);
       await fs.mkdir(path.dirname(abs), { recursive: true });
@@ -1831,6 +1870,17 @@ export class DMLSession {
       entries[rel] = bytes;
       manifestFiles.push({ path: rel, bytes: bytes.length });
     }
+    const modules = (this.openOptions.harnessModules ?? []).map((module) => ({
+      id: module.id,
+      name: module.name,
+      version: module.version ?? 'head',
+      hash: module.hash ?? moduleVersion(module.source),
+      source: module.source,
+    }));
+    for (const module of modules) {
+      const file = `modules/${module.id}.dml`;
+      entries[file] = strToU8(module.source);
+    }
     entries['manifest.json'] = strToU8(`${JSON.stringify({
       version: 1,
       header,
@@ -1838,6 +1888,7 @@ export class DMLSession {
       provider: this.provider,
       timestamp: new Date().toISOString(),
       files: manifestFiles,
+      modules,
     }, null, 2)}\n`);
 
     await fs.mkdir(path.dirname(target), { recursive: true });
@@ -2631,6 +2682,33 @@ export class DMLSession {
     return this.editResult(plainValue(result?.Result));
   }
 
+  /** Preload additional dependencies before an edit/load changes import directives. */
+  async preloadHarnessModules(modules: HarnessModuleSource[]): Promise<void> {
+    if (!modules.length) return
+    const existing = this.openOptions.harnessModules ?? []
+    const byId = new Map(existing.map((module) => [module.id, module]))
+    for (const module of modules) byId.set(module.id, module)
+    this.openOptions.harnessModules = [...byId.values()]
+    await this.loadHarnessModules()
+  }
+
+  /** Load dependency modules before the main harness source is parsed. */
+  private async loadHarnessModules(): Promise<void> {
+    const modules = this.openOptions.harnessModules
+    if (!modules?.length) return
+    for (const module of modules) {
+      const version = quotePrologString(String(module.version ?? 'head'))
+      const hash = quotePrologString(module.hash ?? '')
+      const source = quotePrologString(module.source)
+      const query = `deepclause_mi:repl_load_harness_module('${this.sessionId}', '${module.id}', `
+        + `${quoteAtom(module.name)}, ${version}, ${hash}, ${source})`
+      const result = this.prologQuery(query)
+      if (!result || (result as { success?: unknown }).success === false || (result as { error?: unknown }).error) {
+        throw new Error(`could not load harness module '${module.name}': ${String((result as { message?: unknown }).message ?? 'load failed')}`)
+      }
+    }
+  }
+
   /** Open a tool scope so MI calls made by the tool nest under it. */
   private traceToolStart(name: string, args: Record<string, unknown>): void {
     if (!this.openOptions.trace) return
@@ -2674,6 +2752,21 @@ export class DMLSession {
       return Array.isArray(parsed) ? parsed as TraceEntry[] : [];
     } catch {
       return [];
+    }
+  }
+
+  /** Read-only module provenance for the current harness. */
+  harnessModuleInfo(): import('./session.js').HarnessModuleInfo {
+    try {
+      const result = this.prologQuery(`deepclause_mi:repl_harness_module_info_json('${this.sessionId}', Json)`);
+      const raw = toJsValue(result?.Json);
+      const parsed = (typeof raw === 'string' ? JSON.parse(raw) : raw) as import('./session.js').HarnessModuleInfo | null;
+      return {
+        exports: Array.isArray(parsed?.exports) ? parsed.exports : [],
+        modules: Array.isArray(parsed?.modules) ? parsed.modules : [],
+      };
+    } catch {
+      return { exports: [], modules: [] };
     }
   }
 

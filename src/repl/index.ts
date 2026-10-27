@@ -105,6 +105,8 @@ export interface HarnessReplOptions {
   onDiagnostic?: (message: string) => void;
   /** Enable the full MI execution trace for this session. */
   trace?: boolean;
+  /** Harness modules preloaded before the main harness source. */
+  harnessModules?: import('./session.js').HarnessModuleSource[];
   /** Persistent session/trace/harness history. Off unless provided. */
   history?: HistoryOptions;
   /** Harness this session edits (a project can hold several). Default `main`. */
@@ -160,6 +162,8 @@ export interface HarnessRepl extends WorkSessionPort {
   compact(customInstructions?: string): Promise<{ applied: boolean; beforeTokens: number; afterTokens: number; error?: string }>;
   /** Generate a diagram of an entry predicate (Mermaid → ASCII tree + SVG). */
   diagram(entry?: string, mode?: DiagramMode, options?: { signal?: AbortSignal }): Promise<DiagramResult>;
+  /** Preload dependencies before loading a source whose imports changed. */
+  preloadHarnessModules(modules: import('./session.js').HarnessModuleSource[]): Promise<void>;
   /** Read the full MI execution trace captured for this session. */
   trace(): Promise<import('../types.js').TraceEntry[]>;
   /** Delete the captured MI trace for this session. */
@@ -252,6 +256,10 @@ class HarnessReplImpl implements HarnessRepl {
     return this.session.resumedTranscript(limit);
   }
 
+  preloadHarnessModules(modules: import('./session.js').HarnessModuleSource[]): Promise<void> {
+    return this.session.preloadHarnessModules(modules);
+  }
+
   trace(): Promise<import('../types.js').TraceEntry[]> {
     return this.session.trace();
   }
@@ -316,6 +324,7 @@ export async function createHarnessRepl(options: HarnessReplOptions): Promise<Ha
     createProcessSession: options.createProcessSession,
     askUser: options.askUser,
     trace: options.trace,
+    harnessModules: options.harnessModules,
     history: options.history,
     harnessName: options.harness,
     autoLoadHarness: options.autoLoadHarness,

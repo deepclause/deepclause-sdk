@@ -66,6 +66,14 @@
     repl_trace_clear/1,
     repl_trace_tool_start/4,
     repl_trace_tool_end/3,
+    repl_load_harness_module/6,
+    repl_hs_register_exports/2,
+    repl_hs_register_module_exports/2,
+    repl_hs_register_imports/5,
+    parse_harness_module_string/3,
+    process_harness_term/3,
+    repl_harness_module_info/2,
+    repl_harness_module_info_json/2,
     repl_edit_touched/2,
     repl_edit_touched_text/2,
     repl_edit_touched_clear/1,
@@ -176,6 +184,12 @@
 :- dynamic session_judgment_result/2. % session_judgment_result(SessionId, Result)
 :- dynamic session_trace_entry/3.  % session_trace_entry(SessionId, Index, Entry) - bounded trace
 :- dynamic session_trace_scope/2.  % session_trace_scope(SessionId, [ToolId|...]) - nested tool scope stack
+:- dynamic session_harness_module/5. % SessionId, Name, Version, Hash, ModuleId
+:- dynamic harness_module_owner/4. % ModuleId, Name, Version, Hash
+:- dynamic harness_module_export/3. % ModuleId, Name, Arity
+:- dynamic harness_module_import/4. % ModuleId, Name/Arity, TargetModule, TargetName/Arity
+:- dynamic session_harness_export/3. % SessionId, Name, Arity
+:- dynamic session_harness_import/4. % SessionId, Name/Arity, TargetModule, TargetName/Arity
 :- dynamic session_trace_count/2.  % session_trace_count(SessionId, Count)
 :- dynamic session_trace_log/2.    % legacy list; retained for compatibility
 :- dynamic session_trace_enabled/2. % session_trace_enabled(SessionId, true/false)
@@ -220,9 +234,30 @@ assert_params(SessionId, Params) :-
     ;   true
     ).
 
+%% Validate that every exported predicate actually exists. Export directives can
+%% appear before the definitions, so this runs after the whole source is loaded.
+repl_validate_session_exports(SessionId) :-
+    findall(Name/Arity, session_harness_export(SessionId, Name, Arity), Exports),
+    repl_validate_export_list(Exports, SessionId, session).
+
+repl_validate_module_exports(ModuleId) :-
+    findall(Name/Arity, harness_module_export(ModuleId, Name, Arity), Exports),
+    repl_validate_export_list(Exports, ModuleId, module).
+
+repl_validate_export_list([], _, _).
+repl_validate_export_list([Name/Arity|Rest], Owner, Kind) :-
+    (   module_local_predicate(Owner, Name, Arity)
+    ->  true
+    ;   throw(error(existence_error(export, Name/Arity),
+                context(export/1, 'exported predicate is not defined in this harness')))
+    ),
+    repl_validate_export_list(Rest, Owner, Kind).
+
 %% parse_dml_string(+Code, +SessionId)
 %% Parse DML code from a string
 parse_dml_string(Code, SessionId) :-
+    retractall(session_harness_export(SessionId, _, _)),
+    retractall(session_harness_import(SessionId, _, _, _)),
     open_string(Code, Stream),
     parse_clauses(Stream, SessionId),
     close(Stream),
@@ -235,7 +270,8 @@ parse_dml_string(Code, SessionId) :-
 parse_clauses(Stream, SessionId) :-
     read_term(Stream, Term, [module(SessionId), variable_names(Bindings)]),
     (   Term == end_of_file
-    ->  install_builtin_tools(SessionId)
+    ->  install_builtin_tools(SessionId),
+        repl_validate_session_exports(SessionId)
     ;   preprocess_loaded_term(Term, Bindings, PreparedTerms),
         forall(member(PreparedTerm, PreparedTerms), process_clause(PreparedTerm, SessionId)),
         parse_clauses(Stream, SessionId)
@@ -689,8 +725,16 @@ repl_reject_script_predicate_collision(SessionId, Name, Where) :-
 repl_check_script_name_for_head(SessionId, Head) :-
     (   catch(repl_head_of(Head, H), _, fail),
         callable(H),
-        functor(H, Name, _Arity)
-    ->  (   current_predicate(SessionId:script_file/2),
+        functor(H, Name, Arity)
+    ->  (   session_harness_import(SessionId, Name/Arity, TargetModule, _)
+        ->  format(atom(Message),
+                '~w/~w is imported read-only from ~w. Define a different local wrapper instead of redefining it.',
+                [Name, Arity, TargetModule]),
+            throw(error(permission_error(modify, imported_predicate, Name/Arity),
+                        context(process_clause/2, Message)))
+        ;   true
+        ),
+        (   current_predicate(SessionId:script_file/2),
             SessionId:script_file(Name, _)
         ->  format(atom(Message),
                 '~w is already a script_file/2 link name. Rename the link (for example ~w_py) or rename the predicate; script link names and predicate names must not overlap.',
@@ -1003,6 +1047,253 @@ import_library_into_mi(library(Name)) :-
     !,
     catch(deepclause_mi:use_module(library(Name)), _, true).
 import_library_into_mi(_).
+
+%% ============================================================
+%% Harness modules (export / use_harness)
+%% ============================================================
+
+harness_indicator_list(Spec, List) :-
+    (   is_list(Spec)
+    ->  List = Spec
+    ;   Spec = (A, B)
+    ->  harness_indicator_list(A, LA),
+        harness_indicator_list(B, LB),
+        append(LA, LB, List)
+    ;   List = [Spec]
+    ).
+
+zz_debug_fact(ok).
+valid_harness_indicator(Name/Arity) :-
+    atom(Name), integer(Arity), Arity >= 0,
+    \+ repl_reserved_name(Name).
+
+repl_hs_register_exports(SessionId, Spec) :-
+    harness_indicator_list(Spec, Exports),
+    repl_hs_export_list(Exports, SessionId).
+
+repl_hs_export_list([], _SessionId).
+repl_hs_export_list([Indicator|Rest], SessionId) :-
+    (   valid_harness_indicator(Indicator)
+    ->  Indicator = Name/Arity,
+        assertz(session_harness_export(SessionId, Name, Arity))
+    ;   throw(error(domain_error(predicate_indicator, Indicator),
+                context(export/1, 'export expects Name/Arity')))
+    ),
+    repl_hs_export_list(Rest, SessionId).
+
+repl_hs_register_module_exports(ModuleId, Spec) :-
+    harness_indicator_list(Spec, Exports),
+    repl_hs_module_export_list(Exports, ModuleId).
+
+repl_hs_module_export_list([], _ModuleId).
+repl_hs_module_export_list([Indicator|Rest], ModuleId) :-
+    (   valid_harness_indicator(Indicator)
+    ->  Indicator = Name/Arity,
+        assertz(harness_module_export(ModuleId, Name, Arity))
+    ;   throw(error(domain_error(predicate_indicator, Indicator),
+                context(export/1, 'export expects Name/Arity')))
+    ),
+    repl_hs_module_export_list(Rest, ModuleId).
+
+%% repl_hs_register_imports(+Owner, +SessionId, +Name, +VersionOpt, +Spec)
+%% Owner is a harness module id, or the session id for the caller.
+repl_hs_register_imports(Owner, SessionId, Name, VersionOpt, Spec) :-
+    harness_indicator_list(Spec, Exports),
+    repl_hs_find_target(SessionId, Name, VersionOpt, TargetModule),
+    repl_hs_import_list(Exports, Owner, SessionId, TargetModule).
+
+repl_hs_find_target(SessionId, Name, none, TargetModule) :-
+    findall(ModuleId,
+        session_harness_module(SessionId, Name, _, _, ModuleId),
+        Modules0),
+    sort(Modules0, Modules),
+    (   Modules = [TargetModule|_]
+    ->  true
+    ;   throw(error(existence_error(harness_module, Name),
+                context(use_harness/2, 'harness module is not available in this session')))
+    ).
+repl_hs_find_target(SessionId, Name, version(Version0), TargetModule) :-
+    normalize_harness_version(Version0, Version),
+    findall(ModuleId,
+        session_harness_module(SessionId, Name, Version, _, ModuleId),
+        Modules0),
+    sort(Modules0, Modules),
+    (   Modules = [TargetModule|_]
+    ->  true
+    ;   throw(error(existence_error(harness_module, Name),
+                context(use_harness/2, 'harness module is not available in this session')))
+    ).
+
+normalize_harness_version(Value, Normalized) :-
+    (   number(Value)
+    ->  number_string(Value, Normalized)
+    ;   atom(Value)
+    ->  atom_string(Value, Normalized)
+    ;   string(Value)
+    ->  Normalized = Value
+    ;   term_string(Value, Normalized)
+    ).
+
+harness_import_conflicts(Owner, SessionId, Indicator) :-
+    (   Owner == SessionId
+    ->  (   session_harness_import(SessionId, Indicator, _, _)
+        ;   session_harness_export(SessionId, Name, Arity),
+            Indicator = Name/Arity
+        )
+    ;   harness_module_import(Owner, Indicator, _, _)
+    ;   Indicator = Name/Arity,
+        module_local_predicate(Owner, Name, Arity)
+    ).
+
+repl_hs_import_list([], _Owner, _SessionId, _TargetModule).
+repl_hs_import_list([Indicator|Rest], Owner, SessionId, TargetModule) :-
+    (   Indicator = ExportName/ExportArity
+    ->  true
+    ;   throw(error(domain_error(predicate_indicator, Indicator),
+                context(use_harness/2, 'imports must be Name/Arity')))
+    ),
+    (   harness_module_export(TargetModule, ExportName, ExportArity)
+    ->  true
+    ;   throw(error(existence_error(export, Indicator),
+                context(use_harness/2, 'the imported harness does not export this predicate')))
+    ),
+    (   harness_import_conflicts(Owner, SessionId, Indicator)
+    ->  throw(error(permission_error(import, duplicate_predicate, Indicator),
+                context(use_harness/2, 'name is already present in the importing harness')))
+    ;   true
+    ),
+    (   Owner == SessionId
+    ->  assertz(session_harness_import(SessionId, Indicator, TargetModule, Indicator))
+    ;   assertz(harness_module_import(Owner, Indicator, TargetModule, Indicator))
+    ),
+    repl_hs_import_list(Rest, Owner, SessionId, TargetModule).
+
+%% process_directive(export(...), +SessionId)
+process_directive(export(Spec), SessionId) :-
+    !,
+    repl_hs_register_exports(SessionId, Spec),
+    record_directive(SessionId, export(Spec)).
+
+%% process_directive(use_harness(Name, Imports), +SessionId)
+process_directive(use_harness(Name, Imports), SessionId) :-
+    !,
+    repl_hs_register_imports(SessionId, SessionId, Name, none, Imports),
+    record_directive(SessionId, use_harness(Name, Imports)).
+process_directive(use_harness(Name, version(Version), Imports), SessionId) :-
+    !,
+    repl_hs_register_imports(SessionId, SessionId, Name, version(Version), Imports),
+    record_directive(SessionId, use_harness(Name, version(Version), Imports)).
+
+%% repl_harness_module_info_json(+SessionId, -Json)
+%% Provenance for the UI: imported modules, exported predicates and the local
+%% caller's exports. Never exposes private predicates.
+repl_harness_module_info_json(SessionId, Json) :-
+    findall(ModuleDict,
+        (   session_harness_module(SessionId, Name, Version, Hash, ModuleId),
+            findall(ExportName/ExportArity,
+                harness_module_export(ModuleId, ExportName, ExportArity),
+                ExportIndicators),
+            maplist(indicator_text, ExportIndicators, Exports),
+            findall(ImportDict,
+                (   harness_module_import(ModuleId, FromName/FromArity, Target, TargetName/TargetArity),
+                    indicator_text(FromName/FromArity, From),
+                    indicator_text(TargetName/TargetArity, As),
+                    ImportDict = _{from: From, as: As, module: Target}
+                ),
+                Imports),
+            ModuleDict = _{name: Name, version: Version, hash: Hash, module: ModuleId,
+                          exports: Exports, imports: Imports}
+        ),
+        Modules),
+    findall(IndicatorText,
+        (   session_harness_export(SessionId, Name, Arity),
+            indicator_text(Name/Arity, IndicatorText)
+        ),
+        LocalExports),
+    Json =_{modules: Modules, exports: LocalExports}.
+
+indicator_text(Name/Arity, Text) :-
+    format(atom(Text), '~w/~w', [Name, Arity]).
+
+%% ============================================================
+%% Module loading (preloaded by the embedding before the main source)
+%% ============================================================
+
+ensure_harness_module(ModuleId) :-
+    (   current_module(ModuleId)
+    ->  true
+    ;   assertz(ModuleId:harness_module_marker)
+    ).
+
+%% repl_load_harness_module(+SessionId, +ModuleId, +Name, +Version, +Hash, +Code)
+%% Loads one dependency into its own SWI module. The module is immutable at the
+%% public boundary: only exported predicates are registered as imports.
+repl_load_harness_module(SessionId, ModuleId, Name, Version0, Hash, Code) :-
+    atom(ModuleId),
+    atom(Name),
+    normalize_harness_version(Version0, Version),
+    (   session_harness_module(SessionId, Name, Version, Hash, _Instance)
+    ->  true
+    ;   format(atom(Instance), '~w_~w', [ModuleId, SessionId]),
+        (   harness_module_owner(Instance, Name, Version, Hash)
+        ->  true
+        ;   assertz(harness_module_owner(Instance, Name, Version, Hash)),
+            ensure_harness_module(Instance),
+            parse_harness_module_string(Code, Instance, SessionId)
+        ),
+        assertz(session_harness_module(SessionId, Name, Version, Hash, Instance))
+    ).
+
+parse_harness_module_string(Code, ModuleId, SessionId) :-
+    open_string(Code, Stream),
+    parse_harness_module_clauses(Stream, ModuleId, SessionId),
+    close(Stream),
+    repl_validate_module_exports(ModuleId).
+
+parse_harness_module_clauses(Stream, ModuleId, SessionId) :-
+    read_term(Stream, RawTerm, [module(ModuleId), variable_names(Bindings)]),
+    (   RawTerm == end_of_file
+    ->  true
+    ;   preprocess_loaded_term(RawTerm, Bindings, PreparedTerms),
+        forall(member(Term, PreparedTerms),
+            process_harness_term(Term, ModuleId, SessionId)),
+        parse_harness_module_clauses(Stream, ModuleId, SessionId)
+    ).
+
+process_harness_term((:- export(Spec)), ModuleId, _SessionId) :-
+    !, repl_hs_register_module_exports(ModuleId, Spec).
+process_harness_term((:- use_harness(Name, Imports)), ModuleId, SessionId) :-
+    !, repl_hs_register_imports(ModuleId, SessionId, Name, none, Imports).
+process_harness_term((:- use_harness(Name, version(Version), Imports)), ModuleId, SessionId) :-
+    !, repl_hs_register_imports(ModuleId, SessionId, Name, version(Version), Imports).
+process_harness_term((:- use_module(Module)), ModuleId, _SessionId) :-
+    !, catch(ModuleId:use_module(Module), _, true).
+process_harness_term((:- ModuleSpec), ModuleId, _SessionId) :-
+    !,
+    (   ModuleSpec = use_module(Module, _)
+    ->  catch(ModuleId:use_module(Module), _, true)
+    ;   true
+    ).
+process_harness_term('$dc_tool'(_, _), _ModuleId, _SessionId) :- !.
+process_harness_term((tool(_, _) :- _), _ModuleId, _SessionId) :- !.
+process_harness_term((tool(_, _, _) :- _), _ModuleId, _SessionId) :- !.
+process_harness_term((tool(_) :- _), _ModuleId, _SessionId) :- !.
+process_harness_term((Head :- Body), ModuleId, _SessionId) :-
+    !,
+    (   catch(expand_dict_dots(Body, ExpandedBody), _, fail)
+    ->  true
+    ;   ExpandedBody = Body
+    ),
+    assertz(ModuleId:(Head :- ExpandedBody)).
+process_harness_term(Fact, ModuleId, _SessionId) :-
+    (   Fact = script_file(_, _)
+    ->  true
+    ;   Fact = tool(_, _)
+    ->  true
+    ;   Fact = tool(_, _, _)
+    ->  true
+    ;   assertz(ModuleId:Fact)
+    ).
 
 %% process_directive(+Directive, +SessionId)
 process_directive(param(Key, Desc), SessionId) :-
@@ -1438,6 +1729,8 @@ clear_session(SessionId) :-
     retractall(session_user_tool_schema(SessionId, _, _)),
     retractall(session_source_view(SessionId, _, _)),
     retractall(session_builtin_tool(SessionId, _)),
+    retractall(session_harness_export(SessionId, _, _)),
+    retractall(session_harness_import(SessionId, _, _, _)),
     repl_abolish_user_predicates(SessionId),
     install_builtin_tools(SessionId).
 
@@ -1471,6 +1764,8 @@ load_code(SessionId, Code, Error) :-
     catch(
         (   mi_clear_cut_classes(SessionId),
             guard_not_frozen(SessionId),
+            retractall(session_harness_export(SessionId, _, _)),
+            retractall(session_harness_import(SessionId, _, _, _)),
             parse_dml_string(Code, SessionId),
             Error = none
         ),
@@ -1731,6 +2026,15 @@ repl_listing_output(SessionId, Filter) :-
                 )
             ;   true
             )
+        ),
+        findall(Name/Arity-TargetModule,
+            (   session_harness_import(SessionId, Name/Arity, TargetModule, _),
+                repl_listing_match(Filter, Name, Arity)
+            ),
+            Imports0),
+        sort(Imports0, Imports),
+        forall(member(Name/Arity-TargetModule, Imports),
+            format("~w/~w  [imported from ~w, read-only]~n", [Name, Arity, TargetModule])
         ),
         repl_listing_tool_summary(SessionId)
     ).
@@ -2235,6 +2539,10 @@ export_harness_output(SessionId, Header) :-
 export_directives(SessionId) :-
     findall(Directive, session_directive(SessionId, Directive), Directives0),
     sort(Directives0, Directives),
+    findall(Name/Arity-TargetModule,
+        session_harness_import(SessionId, Name/Arity, TargetModule, _),
+        Imports0),
+    sort(Imports0, Imports),
     forall(member(Directive, Directives), format(":- ~q.~n", [Directive])),
     (   Directives == []
     ->  true
@@ -2923,6 +3231,14 @@ repl_tool_pattern_head(tool(Head, _, _), Head).
 repl_retract_predicate_clause(SessionId, Pattern, Result) :-
     repl_head_of(Pattern, Clause),
     repl_callable_indicator(Clause, Name, Arity),
+    (   session_harness_import(SessionId, Name/Arity, TargetModule, _)
+    ->  format(atom(ImportMessage),
+            '~w/~w is imported read-only from ~w and cannot be retracted here.',
+            [Name, Arity, TargetModule]),
+        throw(error(permission_error(modify, imported_predicate, Name/Arity),
+                    context(repl_retract/3, ImportMessage)))
+    ;   true
+    ),
     (   repl_protected_clause(Clause)
     ->  throw(error(permission_error(modify, reserved_name, Clause),
                 context(repl_retract/3, 'cannot retract a reserved predicate')))
@@ -2960,6 +3276,14 @@ repl_delete_predicate(SessionId, Name, Arity, Result) :-
         (   mi_clear_cut_classes(SessionId),
             guard_not_frozen(SessionId),
             atom(Name), integer(Arity), Arity >= 0,
+            (   session_harness_import(SessionId, Name/Arity, TargetModule, _)
+            ->  format(atom(ImportMessage),
+                    '~w/~w is imported read-only from ~w and cannot be deleted here.',
+                    [Name, Arity, TargetModule]),
+                throw(error(permission_error(modify, imported_predicate, Name/Arity),
+                            context(repl_delete_predicate/4, ImportMessage)))
+            ;   true
+            ),
             (   repl_protected_name(Name)
             ->  throw(error(permission_error(modify, reserved_name, Name/Arity),
                         context(repl_delete_predicate/4, 'cannot delete a reserved predicate')))
@@ -3162,18 +3486,37 @@ repl_define_target(SessionId, HeadText, Name, Arity) :-
     ).
 
 %% repl_require_committable(+SessionId, +Term)
-repl_require_committable(_SessionId, Term) :-
+repl_require_committable(SessionId, Term) :-
     (   repl_protected_clause(Term)
     ->  throw(error(permission_error(modify, reserved_name, Term),
                 context(repl_define/4, 'cannot define a reserved predicate')))
     ;   true
+    ),
+    (   catch(repl_head_of(Term, Head), _, fail),
+        callable(Head),
+        functor(Head, Name, Arity),
+        session_harness_import(SessionId, Name/Arity, TargetModule, _)
+    ->  format(atom(ImportMessage),
+            '~w/~w is imported read-only from ~w and cannot be redefined here.',
+            [Name, Arity, TargetModule]),
+        throw(error(permission_error(modify, imported_predicate, Name/Arity),
+                    context(repl_define/4, ImportMessage)))
+    ;   true
     ).
 
 %% repl_require_not_reserved(+SessionId, +Indicator)
-repl_require_not_reserved(_SessionId, Name/Arity) :-
+repl_require_not_reserved(SessionId, Name/Arity) :-
     (   repl_protected_name(Name)
     ->  throw(error(permission_error(modify, reserved_name, Name/Arity),
                 context(repl_define/4, 'cannot define a reserved predicate')))
+    ;   true
+    ),
+    (   session_harness_import(SessionId, Name/Arity, TargetModule, _)
+    ->  format(atom(ImportMessage),
+            '~w/~w is imported read-only from ~w and cannot be redefined here.',
+            [Name, Arity, TargetModule]),
+        throw(error(permission_error(modify, imported_predicate, Name/Arity),
+                    context(repl_define/4, ImportMessage)))
     ;   true
     ).
 
@@ -3225,6 +3568,7 @@ repl_manifest(SessionId, Manifest) :-
             ),
             format("- predicates: ~w~n", [Preds]),
             format("- tools: ~w~n", [Tools]),
+            format("- imports: ~w~n", [Imports]),
             format("- directives: ~w~n", [Directives]),
             (   Docs0 == []
             ->  format("- docs: (none; add doc(Name/Arity, Text) facts)~n")
@@ -3374,7 +3718,13 @@ repl_harness_view(SessionId, Rows) :-
             ),
             format(atom(Row), "~w/~w|~w|~w", [Name, Arity, Clauses, FlagText])
         ),
-        Rows).
+        OwnRows),
+    findall(Row,
+        (   session_harness_import(SessionId, Name/Arity, TargetModule, _),
+            format(atom(Row), "~w/~w|0|imported,read-only,~w", [Name, Arity, TargetModule])
+        ),
+        ImportedRows),
+    append(OwnRows, ImportedRows, Rows).
 
 repl_predicate_clause_count(SessionId, Name, Arity, Count) :-
     functor(Head, Name, Arity),
@@ -4534,6 +4884,98 @@ get_depth(State, Depth) :-
 %% set_depth(+StateIn, +Depth, -StateOut)
 set_depth(StateIn, Depth, StateOut) :-
     StateOut = StateIn.put(depth, Depth).
+
+%% get_harness_context(+State, -Module)
+%% The module whose local predicates are currently being resolved. `session`
+%% means the caller's live harness module.
+get_harness_context(State, Module) :-
+    (   is_dict(State), get_dict(harness_module, State, Module)
+    ->  true
+    ;   get_session_id(SessionId),
+        Module = SessionId
+    ).
+
+set_harness_context(StateIn, Module, StateOut) :-
+    StateOut = StateIn.put(harness_module, Module).
+
+harness_module_loaded(Module) :-
+    harness_module_owner(Module, _, _, _).
+
+import_target(Owner, Name, Arity, TargetModule, TargetName) :-
+    (   harness_module_loaded(Owner)
+    ->  harness_module_import(Owner, Name/Arity, TargetModule, TargetName/Arity)
+    ;   session_harness_import(Owner, Name/Arity, TargetModule, TargetName/Arity)
+    ).
+
+module_local_predicate(Module, Name, Arity) :-
+    functor(Head, Name, Arity),
+    predicate_property(Module:Head, defined),
+    \+ predicate_property(Module:Head, imported_from(_)),
+    \+ predicate_property(Module:Head, built_in),
+    \+ predicate_property(Module:Head, foreign).
+
+is_harness_module(Module) :-
+    harness_module_owner(Module, _, _, _).
+
+retarget_goal(Goal, Name, TargetGoal) :-
+    Goal =.. [_|Args],
+    TargetGoal =.. [Name|Args].
+
+mi_call_harness_goal(Module, Goal, StateIn, StateOut) :-
+    get_session_id(SessionId),
+    get_harness_context(StateIn, Previous),
+    (   Previous == Module
+    ->  true
+    ;   functor(Goal, Name, Arity),
+        (   harness_module_export(Module, Name, Arity)
+        ->  true
+        ;   throw(error(permission_error(access, private_predicate, Module:Goal),
+                    context(use_harness/2, 'only exported predicates are callable from another harness')))
+        )
+    ),
+    get_depth(StateIn, Depth),
+    NextDepth is Depth + 1,
+    State1 = StateIn.put(depth, NextDepth),
+    set_harness_context(State1, Module, State2),
+    trace_goal_call(SessionId, Goal, Depth),
+    (   clause(Module:Goal, Body)
+    *-> (   Body == true
+        ->  trace_goal_exit(SessionId, Goal, Depth),
+            State3 = State2
+        ;   mi_call(Body, State2, State3),
+            trace_goal_exit(SessionId, Goal, Depth)
+        ),
+        State4 = State3.put(depth, Depth),
+        set_harness_context(State4, Previous, StateOut)
+    ;   trace_goal_fail(SessionId, Goal, Depth),
+        fail
+    ).
+
+%% mi_call_dispatch for an unqualified goal inside a harness module. Local
+%% predicates win; otherwise resolve that module's imports. Never fall through
+%% to the caller's session module, which would leak private caller predicates.
+mi_call_dispatch(Goal, StateIn, StateOut) :-
+    get_session_id(SessionId),
+    get_harness_context(StateIn, Current),
+    Current \== SessionId,
+    callable(Goal),
+    \+ predicate_property(Goal, built_in),
+    functor(Goal, Name, Arity),
+    !,
+    (   module_local_predicate(Current, Name, Arity)
+    ->  mi_call_harness_goal(Current, Goal, StateIn, StateOut)
+    ;   import_target(Current, Name, Arity, TargetModule, TargetName)
+    ->  retarget_goal(Goal, TargetName, TargetGoal),
+        mi_call_harness_goal(TargetModule, TargetGoal, StateIn, StateOut)
+    ;   predicate_property(Current:Goal, defined)
+    ->  get_depth(StateIn, Depth),
+        trace_goal_call(SessionId, Goal, Depth),
+        (   catch(call(Current:Goal), _, fail)
+        ->  trace_goal_exit(SessionId, Goal, Depth), StateOut = StateIn
+        ;   trace_goal_fail(SessionId, Goal, Depth), fail
+        )
+    ;   fail
+    ).
 
 %% add_trace_entry(+SessionId, +Type, +Predicate, +Args, +Depth)
 %% Add a trace entry if tracing is enabled
@@ -7020,8 +7462,18 @@ repl_reserved_clause(Head) :-
     functor(Head, Name, _),
     repl_protected_name(Name).
 
+guard_harness_mutation(StateIn, What) :-
+    get_session_id(SessionId),
+    get_harness_context(StateIn, Module),
+    (   Module == SessionId
+    ->  true
+    ;   throw(error(permission_error(modify, imported_module, What),
+                context(mi_call/3, 'imported harness modules are read-only')))
+    ).
+
 mi_call(assertz(Head), StateIn, StateIn) :-
     get_session_id(SessionId),
+    guard_harness_mutation(StateIn, Head),
     guard_not_frozen(SessionId),
     guard_reserved_clause(Head),
     assertz(SessionId:Head),
@@ -7029,6 +7481,7 @@ mi_call(assertz(Head), StateIn, StateIn) :-
 
 mi_call(asserta(Head), StateIn, StateIn) :-
     get_session_id(SessionId),
+    guard_harness_mutation(StateIn, Head),
     guard_not_frozen(SessionId),
     guard_reserved_clause(Head),
     asserta(SessionId:Head),
@@ -7043,12 +7496,14 @@ guard_reserved_clause(Head) :-
 
 mi_call(retract(Head), StateIn, StateIn) :-
     get_session_id(SessionId),
+    guard_harness_mutation(StateIn, Head),
     guard_not_frozen(SessionId),
     retract(SessionId:Head),
     mi_clear_cut_classes(SessionId).
 
 mi_call(retractall(Head), StateIn, StateIn) :-
     get_session_id(SessionId),
+    guard_harness_mutation(StateIn, Head),
     guard_not_frozen(SessionId),
     retractall(SessionId:Head),
     mi_clear_cut_classes(SessionId).
@@ -7952,6 +8407,11 @@ mi_call(_Module:Goal, StateIn, StateOut) :-
 % body must resolve its own unqualified helpers in *its* module: interpreting it
 % here called `interp_json/2` (and any other helper) as `deepclause_mi:…`.
 % Session-qualified goals still need the interpreter so task/N and exec/2 work.
+mi_call(Module:Goal, StateIn, StateOut) :-
+    is_harness_module(Module),
+    !,
+    mi_call_harness_goal(Module, Goal, StateIn, StateOut).
+
 mi_call(Module:Goal, StateIn, StateIn) :-
     external_callable_module(Module),
     !,
@@ -8666,6 +9126,17 @@ mi_clear_cut_mark(CallId) :-
 mi_clear_cut_classes(SessionId) :-
     retractall(mi_cut_class(SessionId, _, _)),
     retractall(mi_purity(SessionId, _, _)).
+
+mi_call_dispatch(Goal, StateIn, StateOut) :-
+    get_session_id(SessionId),
+    get_harness_context(StateIn, Current),
+    Current == SessionId,
+    callable(Goal),
+    functor(Goal, Name, Arity),
+    import_target(SessionId, Name, Arity, TargetModule, TargetName),
+    !,
+    retarget_goal(Goal, TargetName, TargetGoal),
+    mi_call_harness_goal(TargetModule, TargetGoal, StateIn, StateOut).
 
 mi_call_dispatch(Goal, StateIn, StateOut) :-
     % Fallback for external/library predicates

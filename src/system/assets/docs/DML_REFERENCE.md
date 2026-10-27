@@ -16,6 +16,29 @@ or goal calls can name any predicate. Normal Work conversation uses shell/1.
 purpose; `schema/2` defines model data shapes; `script_file/2` links bundled files.
 Use distinct script link/predicate names, e.g. extract_py versus extract/2.
 
+## Harness modules
+
+A harness can publish a small read-only API for other harnesses:
+
+```text
+:- export([summarise/2, classify/2]).
+```
+
+Import only the exports you use:
+
+```text
+:- use_harness(support, [summarise/2]).
+:- use_harness(support, version(3), [detail/1]).
+```
+
+Imported predicates are read-only. Their private helpers remain private, and
+the importing harness must not redefine or delete an imported predicate. The
+host resolves and preloads dependency modules; imports do not inherit the other
+harness's `shell/1`, tools, workflows or `agent_main`. Exported declarations are
+validated at load time, and a version pin must resolve to a matching published
+harness version. Prefer explicit arguments and pure exports over shared mutable
+state. A cycle or missing export fails the load with a provenance error.
+
 ## Model operations
 
 `task(Description, Outputs...)`: bounded model agent with DML harness memory and
