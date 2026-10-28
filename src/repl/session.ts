@@ -2815,6 +2815,11 @@ export class DMLSession {
     return this.editResult(plainValue(result?.Result));
   }
 
+  /** Current dependency modules, including imports added during this session. */
+  harnessModuleSources(): HarnessModuleSource[] {
+    return [...(this.openOptions.harnessModules ?? [])];
+  }
+
   /** Preload additional dependencies before an edit/load changes import directives. */
   async preloadHarnessModules(modules: HarnessModuleSource[]): Promise<void> {
     if (!modules.length) return
