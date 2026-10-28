@@ -159,3 +159,21 @@ describe('harness module bundles', () => {
     expect(answer).toBe('9');
   });
 });
+
+describe('authoring use_harness tool', () => {
+  it('adds an import directive inside the edit transaction', async () => {
+    const supportDir = path.join(workspace, '.deepclause/repl/harnesses/support');
+    await fs.mkdir(supportDir, { recursive: true });
+    await fs.writeFile(path.join(supportDir, 'harness.dml'), ':- export([foo/1]).\nfoo(11).', 'utf8');
+    repl = await createHarnessRepl({ workspacePath: workspace, model: 'test-model', provider: 'openai', execution: 'inline' });
+    expect((await repl.session.beginTurn()).ok).toBe(true);
+    expect(await repl.session.useHarness('support', ['foo/1'])).toEqual({ ok: true });
+    expect((await repl.session.endTurn()).committed).toBe(true);
+    expect(await repl.session.harnessSource()).toContain('use_harness(support,[foo/1])');
+    const values: unknown[] = [];
+    for await (const event of repl.session.query('foo(X)')) {
+      if (event.type === 'solution') values.push(event.solution?.bindings?.[0]?.value);
+    }
+    expect(values).toContain('11');
+  });
+});

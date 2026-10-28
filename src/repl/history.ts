@@ -372,6 +372,12 @@ export class HistoryStore {
     await fs.writeFile(this.harnessFile, head?.module ?? baseline, 'utf8');
   }
 
+  /** Read one historical module version for read-only reuse. */
+  async readHarnessVersion(version: number): Promise<string | null> {
+    const current = await this.readVersion(version);
+    return current?.module.trim() ? current.module : null;
+  }
+
   /** The module at HEAD: the live `harness.dml`, or the HEAD version snapshot. */
   async readHeadModule(): Promise<{ version: number; module: string } | null> {
     let module = '';

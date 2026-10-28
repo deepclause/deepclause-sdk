@@ -2386,6 +2386,43 @@ export class DMLSession {
     return current !== this.baseSourceHash ? 'Harness changed in another session. Export any private edits and reopen a fresh Develop conversation before committing.' : undefined;
   }
 
+  /** Add a use_harness directive to the current edit transaction. */
+  async useHarness(name: string, predicates: string[], version?: string | number): Promise<{ ok: boolean; error?: string }> {
+    if (this.transactionBefore === null) return { ok: false, error: 'no open transaction; call begin_turn before adding an import' }
+    if (this.purpose === 'work') return { ok: false, error: 'Work cannot author the harness' }
+    if (!/^[a-z][a-z0-9_]*$/.test(name)) return { ok: false, error: 'harness module names must be lowercase identifiers' }
+    if (this.harnessName === name) return { ok: false, error: 'a harness cannot import itself' }
+    const valid = predicates.filter((predicate) => /^[a-z][A-Za-z0-9_]*\/\d+$/.test(predicate))
+    if (valid.length !== predicates.length || valid.length === 0) return { ok: false, error: 'predicates must be Name/Arity indicators' }
+    try {
+      const store = await this.foreignHistory(name)
+      const source = version !== undefined
+        ? await store.readHarnessVersion(Number(version))
+        : (await store.readHeadModule())?.module ?? null
+      if (!source?.trim()) return { ok: false, error: `foreign harness ${name} has no committed content` }
+      const available = exportedIndicators(source)
+      const missing = valid.filter((predicate) => !available.includes(predicate))
+      if (missing.length) return { ok: false, error: `${name} does not export: ${missing.join(', ')}` }
+      const hash = moduleVersion(source)
+      const moduleId = `dcmod_${name}_${String(version ?? 'head')}_${hash}`.replace(/[^A-Za-z0-9_]/g, '_')
+      await this.preloadHarnessModules([{ id: moduleId, name, version: version ?? 'head', hash, source }])
+      const versionTerm = version === undefined ? 'none' : `version(${quotePrologString(String(version))})`
+      const indicators = valid.map((predicate) => {
+        const [predicateName, arity] = predicate.split('/')
+        return `${quoteAtom(predicateName)}/${Number(arity)}`
+      }).join(', ')
+      const result = this.prologQuery(
+        `deepclause_mi:repl_add_harness_import('${this.sessionId}', ${quoteAtom(name)}, ${versionTerm}, [${indicators}], Result)`,
+      )
+      const outcome = plainValue(result?.Result)
+      if (outcome !== 'ok') return { ok: false, error: String(outcome ?? 'could not add import') }
+      this.transactionDirty = true
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
   async beginTurn(): Promise<{ ok: boolean; error?: string; message?: string }> {
     if (this.purpose === 'work') return { ok: false, error: 'Work cannot author the harness. Open a separate Develop conversation.' };
     const conflict = await this.persistentConflict(); if (conflict) return { ok: false, error: conflict };

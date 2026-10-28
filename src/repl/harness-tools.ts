@@ -61,8 +61,10 @@ export interface HarnessCommitResult {
 /** The harness operations the authoring agent needs. Implemented by `DMLSession`. */
 export interface HarnessToolController {
   isFrozen(): boolean;
-  /** Read the harness: `all`, `Name/Arity`, `tools`, or a name prefix. */
+  /** Read the harness: `all`, `Name/Arity`, `tools`, `harnesses`, or `harness:Name`. */
   listing(filter: string): Promise<string>;
+  /** Add a read-only foreign harness import inside the current edit transaction. */
+  useHarness(name: string, predicates: string[], version?: string | number): Promise<{ ok: boolean; error?: string }>;
   /** The harness Work shell, when one is declared. */
   shell(): ShellSpec | null;
   /** Concise harness manifest for the system prompt. */
@@ -258,6 +260,24 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
       required: [],
     },
     execute: async (args) => text(await controller.listing(String(args.filter ?? 'all').trim() || 'all')),
+  });
+
+  tools.set('use_harness', {
+    description: 'Make exported predicates from another harness available read-only. Inspect it first with listing("harness:Name"), then call this after begin_turn. The import is recorded as a :- use_harness(...) directive and committed by end_turn.',
+    parameters: {
+      type: 'object',
+      properties: {
+        name: stringProp('Harness slot name, lowercase letters/digits/underscores.'),
+        predicates: stringProp('Comma-separated exported indicators, e.g. summarise/2,prioritise/2.'),
+        version: { type: 'string', description: 'Optional published harness version.' },
+      },
+      required: ['name', 'predicates'],
+    },
+    execute: async (args) => controller.useHarness(
+      String(args.name ?? ''),
+      String(args.predicates ?? '').split(',').map((predicate) => predicate.trim()).filter(Boolean),
+      typeof args.version === 'string' && args.version.trim() ? args.version.trim() : undefined,
+    ),
   });
 
   tools.set('begin_turn', {

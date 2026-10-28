@@ -64,6 +64,7 @@
     repl_delete_annotation_entry/4,
     repl_trace_json/2,
     repl_trace_clear/1,
+    repl_add_harness_import/5,
     repl_trace_tool_start/4,
     repl_trace_tool_end/3,
     repl_load_harness_module/6,
@@ -1167,6 +1168,23 @@ repl_hs_import_list([Indicator|Rest], Owner, SessionId, TargetModule) :-
     ;   assertz(harness_module_import(Owner, Indicator, TargetModule, Indicator))
     ),
     repl_hs_import_list(Rest, Owner, SessionId, TargetModule).
+
+%% repl_add_harness_import(+SessionId, +Name, +VersionOpt, +Predicates, -Result)
+%% Adds a use_harness directive to the living module inside the current edit
+%% transaction. The caller must have preloaded the target module.
+repl_add_harness_import(SessionId, Name, VersionOpt, Predicates, Result) :-
+    catch(
+        (   guard_not_frozen(SessionId),
+            (   VersionOpt == none
+            ->  Directive = use_harness(Name, Predicates)
+            ;   Directive = use_harness(Name, VersionOpt, Predicates)
+            ),
+            process_directive(Directive, SessionId),
+            Result = ok
+        ),
+        ImportError,
+        format(atom(Result), 'error(~w)', [ImportError])
+    ).
 
 %% process_directive(export(...), +SessionId)
 process_directive(export(Spec), SessionId) :-
@@ -4276,6 +4294,7 @@ repl_snapshot_save(SessionId) :-
     ;   ToolSources = []
     ),
     findall(Directive, session_directive(SessionId, Directive), Directives),
+    findall(import(Import, Target, TargetImport), session_harness_import(SessionId, Import, Target, TargetImport), Import0),
     (   session_repl_memory(SessionId, Memory) -> true ; Memory = [] ),
     assertz(repl_snapshot(SessionId, snapshot{
         clauses: Clauses,
@@ -4283,6 +4302,7 @@ repl_snapshot_save(SessionId) :-
         schemas: Schemas,
         tool_sources: ToolSources,
         directives: Directives,
+        imports: Import0,
         memory: Memory
     })).
 
@@ -4313,6 +4333,13 @@ repl_snapshot_restore(SessionId) :-
         retractall(session_directive(SessionId, _)),
         forall(member(Directive, Snapshot.directives),
             assertz(session_directive(SessionId, Directive))),
+        retractall(session_harness_import(SessionId, _, _, _)),
+        (   get_dict(imports, Snapshot, SnapshotImports)
+        ->  true
+        ;   SnapshotImports = []
+        ),
+        forall(member(import(Import, Target, TargetImport), SnapshotImports),
+            assertz(session_harness_import(SessionId, Import, Target, TargetImport))),
         retractall(session_repl_memory(SessionId, _)),
         assertz(session_repl_memory(SessionId, Snapshot.memory))
     ;   true
