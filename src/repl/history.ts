@@ -251,7 +251,17 @@ export class HistoryStore {
       for (const name of entries) {
         if (!isValidHarnessName(name)) continue;
         try {
-          if ((await fs.stat(path.join(this.rootAbs, 'harnesses', name))).isDirectory()) names.push(name);
+          const info = await fs.stat(path.join(this.rootAbs, 'harnesses', name)) as {
+            isDirectory?: () => boolean;
+            isDir?: () => boolean;
+            mode?: number;
+          };
+          const directory = typeof info.isDirectory === 'function'
+            ? info.isDirectory()
+            : typeof info.isDir === 'function'
+              ? info.isDir()
+              : typeof info.mode === 'number' && (info.mode & 0o170000) === 0o040000;
+          if (directory) names.push(name);
         } catch {
           /* vanished or unreadable */
         }
