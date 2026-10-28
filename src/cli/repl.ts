@@ -2602,8 +2602,10 @@ function collect(value: string, previous: string[] | undefined): string[] {
 export function normalizeHarnessName(name?: string): string | undefined {
   const trimmed = name?.trim();
   if (!trimmed) return undefined;
-  const slug = trimmed.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
-  return slug || undefined;
+  let slug = trimmed.toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
+  if (!slug) return undefined;
+  if (!/^[a-z]/.test(slug)) slug = `h_${slug}`;
+  return slug;
 }
 
 /** Harness name implied by a `-l` file: its basename without the `.dml`/`.zip`. */

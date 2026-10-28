@@ -26,8 +26,17 @@ export type HistoryTrace = 'off' | 'summary' | 'full';
 export function assertSessionId(id: string): void {
   if (typeof id !== 'string' || !/^[A-Za-z0-9_.-]+$/.test(id) || id === '.' || id === '..') throw new Error('Invalid session id');
 }
+/** Harness names are unquoted Prolog atoms and workspace directory names. */
+export const HARNESS_NAME_RE = /^[a-z][a-z0-9_]*$/;
+
+export function isValidHarnessName(name: string): boolean {
+  return typeof name === 'string' && HARNESS_NAME_RE.test(name);
+}
+
 export function assertHarnessName(name: string): void {
-  if (typeof name !== 'string' || !name || name === '.' || name === '..' || /[\\/\\\\:\u0000-\u001f]/.test(name)) throw new Error('Harness name must be a workspace directory name, not a path');
+  if (!isValidHarnessName(name)) {
+    throw new Error("Harness name must be a lowercase workspace directory name: start with a letter and use only lowercase letters, digits and underscores (no spaces or special characters)");
+  }
 }
 
 export interface HistoryOptions {

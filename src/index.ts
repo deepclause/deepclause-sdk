@@ -113,7 +113,7 @@ export {
   logoutProvider,
 } from './repl/auth.js';
 export type { LoginProviderOption } from './repl/auth.js';
-export { HistoryStore, moduleVersion } from './repl/history.js';
+export { HistoryStore, moduleVersion, isValidHarnessName } from './repl/history.js';
 export type {
   HistoryOptions,
   SessionMetadata,

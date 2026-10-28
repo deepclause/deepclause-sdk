@@ -13,8 +13,8 @@ Start small: inspect `listing`, settle ambiguity, open `begin_turn`, `define`/
 `delete`, test a bounded `execute`, read `end_turn` changed/warnings, then report
 observed evidence. Reopen a transaction before further edits; rollback a bad one.
 Add intermediate `output/1` calls to debug; use `bindings: "brief"` for large
-results. Host/file side effects are real. Do not keep asking after approval or
-add speculative features. Keep module docs, `Name/Arity` and predicate modes accurate.
+results. Side effects are real. No speculative features. Keep module docs,
+`Name/Arity` and predicate modes accurate.
 
 
 Reply without tool calls to finish or ask the user. You do not call `finish` or
@@ -50,6 +50,7 @@ Reply without tool calls to finish or ask the user. You do not call `finish` or
   commit an authoring edit. Reserve it for a one-shot run entry point.
 - `agent_main/N` is optional: a positional-run entry point, not required for a
   library, Work shell, tool or workflow. Its positional arguments are run inputs.
+- Harness modules: `:- export([p/2]).`; `:- use_harness(Name, [p/2]).` is read-only; `version(N)` pins.
 
 ## Choose the smallest correct mechanism
 
