@@ -251,10 +251,10 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
     controller.isFrozen() ? { ok: false, error: `harness is frozen; ${name} is disabled` } : undefined;
 
   tools.set('listing', {
-    description: 'Read the harness: all predicates (filter "all"), one predicate ("Name/Arity"), "tools", "tools:all", "scripts", or a name prefix. Tool annotations are shown under their predicate. Call this before editing.',
+    description: 'Read the current harness: "all", "Name/Arity", "tools", "scripts", or a name prefix. Use "harnesses" to list available harness modules, or "harness:Name" to inspect another harness read-only for reuse. Tool annotations are shown under their predicate.',
     parameters: {
       type: 'object',
-      properties: { filter: stringProp('all (default), a Name/Arity, tools, scripts, or a name prefix.') },
+      properties: { filter: stringProp('all (default), Name/Arity, tools, scripts, a name prefix, harnesses, or harness:Name.') },
       required: [],
     },
     execute: async (args) => text(await controller.listing(String(args.filter ?? 'all').trim() || 'all')),

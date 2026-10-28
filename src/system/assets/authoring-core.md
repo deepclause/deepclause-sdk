@@ -20,9 +20,9 @@ results. Side effects are real. No speculative features. Keep module docs,
 1. Understand the real input, desired output and correctness check. If ambiguous,
    ask one focused question and stop. For a new harness propose the smallest
    design before building; do not keep asking after the user has settled it.
-2. Read first: `listing(filter: "all")`, then a relevant `Name/Arity`. Reuse an
-   existing predicate. Consult ONE matching reference contract for an unfamiliar
-   feature, not the whole documentation library.
+2. Read first: `listing(filter: "all")`, then `Name/Arity`. Reuse an
+   existing predicate. Foreign: `listing("harnesses")`, `listing("harness:Name")`.
+   Consult ONE reference for unfamiliar features, not all docs.
 3. Open `begin_turn` once. Add or replace with `define`; remove with `delete`.
    Every clause, including doc/schema/shell facts, ends with its own period.
 4. Test a bounded goal with `execute`; inspect bindings, actual output and errors.

@@ -119,6 +119,42 @@ const RESUME_NOTE =
   + 'the harness and conversation memory were restored, but any subagents/services running '
   + 'before are gone. Re-create anything you still need.';
 
+/** Predicate indicators declared by `:- export(...)` directives. */
+function exportedIndicators(source: string): string[] {
+  const found: string[] = []
+  for (const match of source.matchAll(/^\s*:-\s*export\s*\(([\s\S]*?)\)\s*\./gm)) {
+    for (const indicator of match[1].matchAll(/([a-z][A-Za-z0-9_]*)\s*\/\s*(\d+)/g)) {
+      const value = `${indicator[1]}/${indicator[2]}`
+      if (!found.includes(value)) found.push(value)
+    }
+  }
+  return found
+}
+
+const FOREIGN_CLAUSE_HEAD = /^([a-z][A-Za-z0-9_]*)\s*(?:\(|\.|:-)/;
+
+function extractForeignPredicate(source: string, selection: string): string {
+  const name = selection.split('/')[0];
+  const lines = source.split('\n');
+  let start = -1;
+  for (let index = 0; index < lines.length; index++) {
+    const match = FOREIGN_CLAUSE_HEAD.exec(lines[index]);
+    if (match?.[1] === name) { start = index; break; }
+  }
+  if (start < 0) return '';
+  let end = start + 1;
+  for (; end < lines.length; end++) {
+    const match = FOREIGN_CLAUSE_HEAD.exec(lines[end]);
+    if (match && match[1] !== name) break;
+  }
+  return lines.slice(start, end).join('\n').trimEnd();
+}
+
+function foreignFilter(filter: string): { name: string; selection: string } | null {
+  const match = /^harness:([a-z][a-z0-9_]*)(?::(.*))?$/.exec(filter.trim())
+  return match ? { name: match[1], selection: (match[2] ?? 'all').trim() || 'all' } : null
+}
+
 /** JSON text for a trace payload; never throw because a value is cyclic. */
 function traceJson(value: unknown): string {
   try {
@@ -1589,16 +1625,68 @@ export class DMLSession {
     return this.scriptFiles();
   }
 
-  /** Read-only listing of the living module (`all`, `Name/Arity`, or `tools`). */
+  /** Read-only listing of the living or a foreign harness module. */
   async listing(filter: string = 'all'): Promise<string> {
-    const filterTerm = filter === 'all' || filter === 'tools'
-      ? filter
-      : toListingFilter(filter);
+    const normalized = filter.trim() || 'all';
+    if (normalized === 'harnesses') return this.listForeignHarnesses();
+    const foreign = foreignFilter(normalized);
+    if (foreign) return this.inspectForeignHarness(foreign.name, foreign.selection);
+    const filterTerm = normalized === 'all' || normalized === 'tools'
+      ? normalized
+      : toListingFilter(normalized);
     const result = this.prologQuery(
       `deepclause_mi:repl_listing('${this.sessionId}', ${filterTerm}, Text)`
     );
     const text = plainValue(result?.Text);
     return typeof text === 'string' ? text : '';
+  }
+
+  private async foreignHistory(name: string): Promise<HistoryStore | null> {
+    if (!this.openOptions.history) return null;
+    const store = new HistoryStore(
+      this.workspacePath ?? process.cwd(),
+      this.sessionId,
+      this.openOptions.history,
+      name,
+    );
+    await store.init();
+    return store;
+  }
+
+  private async listForeignHarnesses(): Promise<string> {
+    const history = this.history ?? (this.openOptions.history
+      ? new HistoryStore(this.workspacePath ?? process.cwd(), this.sessionId, this.openOptions.history, this.harnessName)
+      : null);
+    if (!history) return 'foreign harnesses unavailable: persistent history is not enabled for this session';
+    const names = await history.listHarnessNames();
+    if (names.length === 0) return 'no foreign harnesses';
+    const lines = ['foreign harnesses (latest committed version; read-only):'];
+    for (const name of names) {
+      const store = await this.foreignHistory(name).catch(() => null);
+      const head = store ? await store.readHeadModule() : null;
+      if (!head?.module.trim()) continue;
+      const exports = exportedIndicators(head.module);
+      lines.push(`- ${name} v${head.version} — ${exports.length ? `exports: ${exports.join(', ')}` : 'exports: (none)'}`);
+    }
+    return lines.join('\n');
+  }
+
+  private async inspectForeignHarness(name: string, selection: string): Promise<string> {
+    const store = await this.foreignHistory(name);
+    if (!store) return `foreign harness ${name}: persistent history is not enabled for this session`;
+    const head = await store.readHeadModule();
+    if (!head?.module.trim()) return `foreign harness ${name}: no committed content`;
+    const exports = exportedIndicators(head.module);
+    const header = [
+      `foreign harness ${name} v${head.version} (read-only)`,
+      `exports: ${exports.length ? exports.join(', ') : '(none)'}`,
+      `reuse with: :- use_harness(${name}, [${exports.join(', ') || '...'}]).`,
+    ].join('\n');
+    if (selection !== 'all' && selection !== '') {
+      const block = extractForeignPredicate(head.module, selection);
+      if (block) return `${header}\n\n${block}`;
+    }
+    return `${header}\n\n${head.module}`;
   }
 
   /**

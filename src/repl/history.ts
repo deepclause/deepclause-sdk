@@ -240,6 +240,19 @@ export class HistoryStore {
     return `${this.sessionDirRel}/events.jsonl`;
   }
 
+  /** Harness slot names under this history root, excluding incomplete folders. */
+  async listHarnessNames(): Promise<string[]> {
+    try {
+      const entries = await fs.readdir(path.join(this.rootAbs, 'harnesses'), { withFileTypes: true });
+      return entries
+        .filter((entry) => entry.isDirectory() && isValidHarnessName(entry.name))
+        .map((entry) => entry.name)
+        .sort((a, b) => a.localeCompare(b));
+    } catch {
+      return [];
+    }
+  }
+
   private get historyFile(): string {
     return path.join(this.rootAbs, 'history.dml');
   }

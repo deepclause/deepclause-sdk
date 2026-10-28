@@ -90,6 +90,29 @@ describe('harness modules', () => {
     expect(answer).toBe('7');
   });
 
+
+  it('lists and inspects foreign harnesses through the listing tool', async () => {
+    const supportDir = path.join(workspace, '.deepclause/repl/harnesses/support');
+    await fs.mkdir(supportDir, { recursive: true });
+    await fs.writeFile(path.join(supportDir, 'harness.dml'), ':- export([foo/1]).\nfoo(7).', 'utf8');
+    repl = await createHarnessRepl({
+      workspacePath: workspace,
+      model: 'test-model',
+      provider: 'openai',
+      execution: 'inline',
+      history: {},
+    });
+    const list = await repl.session.listing('harnesses');
+    expect(list).toContain('support');
+    expect(list).toContain('exports: foo/1');
+    const inspect = await repl.session.listing('harness:support');
+    expect(inspect).toContain('foreign harness support');
+    expect(inspect).toContain('use_harness(support, [foo/1])');
+    expect(inspect).toContain('foo(7).');
+    const predicate = await repl.session.listing('harness:support:foo/1');
+    expect(predicate).toContain('foo(7).');
+  });
+
   it('rejects invalid exports and imports and prevents redefinition', async () => {
     await open([{ id: 'dcmod_support_1', name: 'support', version: '1', hash: 'h', source: ':- export([f/1]).\nf(1).' }]);
     const badExport = await repl!.session.loadCode(':- export([missing/1]).');
