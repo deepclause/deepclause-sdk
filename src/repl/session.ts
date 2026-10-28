@@ -1641,12 +1641,11 @@ export class DMLSession {
     return typeof text === 'string' ? text : '';
   }
 
-  private async foreignHistory(name: string): Promise<HistoryStore | null> {
-    if (!this.openOptions.history) return null;
+  private async foreignHistory(name: string): Promise<HistoryStore> {
     const store = new HistoryStore(
       this.workspacePath ?? process.cwd(),
       this.sessionId,
-      this.openOptions.history,
+      this.openOptions.history ?? {},
       name,
     );
     await store.init();
@@ -1654,10 +1653,13 @@ export class DMLSession {
   }
 
   private async listForeignHarnesses(): Promise<string> {
-    const history = this.history ?? (this.openOptions.history
-      ? new HistoryStore(this.workspacePath ?? process.cwd(), this.sessionId, this.openOptions.history, this.harnessName)
-      : null);
-    if (!history) return 'foreign harnesses unavailable: persistent history is not enabled for this session';
+    const history = this.history ?? new HistoryStore(
+      this.workspacePath ?? process.cwd(),
+      this.sessionId,
+      this.openOptions.history ?? {},
+      this.harnessName,
+    );
+    await history.init();
     const names = await history.listHarnessNames();
     if (names.length === 0) return 'no foreign harnesses';
     const lines = ['foreign harnesses (latest committed version; read-only):'];
@@ -1673,7 +1675,6 @@ export class DMLSession {
 
   private async inspectForeignHarness(name: string, selection: string): Promise<string> {
     const store = await this.foreignHistory(name);
-    if (!store) return `foreign harness ${name}: persistent history is not enabled for this session`;
     const head = await store.readHeadModule();
     if (!head?.module.trim()) return `foreign harness ${name}: no committed content`;
     const exports = exportedIndicators(head.module);

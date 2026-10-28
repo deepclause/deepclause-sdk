@@ -100,7 +100,6 @@ describe('harness modules', () => {
       model: 'test-model',
       provider: 'openai',
       execution: 'inline',
-      history: {},
     });
     const list = await repl.session.listing('harnesses');
     expect(list).toContain('support');
