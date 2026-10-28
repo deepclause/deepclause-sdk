@@ -65,6 +65,7 @@
     repl_trace_json/2,
     repl_trace_clear/1,
     repl_add_harness_import/5,
+    repl_set_harness_exports/3,
     repl_trace_tool_start/4,
     repl_trace_tool_end/3,
     repl_load_harness_module/6,
@@ -1232,6 +1233,32 @@ repl_harness_module_info_json(SessionId, Json) :-
 
 indicator_text(Name/Arity, Text) :-
     format(atom(Text), '~w/~w', [Name, Arity]).
+
+%% repl_set_harness_exports(+SessionId, +Predicates, -Result)
+%% Replace the current export contract within the open edit transaction.
+repl_set_harness_exports(SessionId, Predicates, Result) :-
+    catch(
+        (   guard_not_frozen(SessionId),
+            repl_validate_export_selection(SessionId, Predicates),
+            retractall(session_directive(SessionId, export(_))),
+            retractall(session_harness_export(SessionId, _, _)),
+            (   Predicates == []
+            ->  true
+            ;   process_directive(export(Predicates), SessionId)
+            ),
+            Result = ok
+        ),
+        ExportError,
+        format(atom(Result), 'error(~w)', [ExportError])
+    ).
+
+repl_validate_export_selection(_SessionId, []).
+repl_validate_export_selection(SessionId, [Name/Arity|Rest]) :-
+    (   atom(Name), integer(Arity), Arity >= 0, module_local_predicate(SessionId, Name, Arity)
+    ->  repl_validate_export_selection(SessionId, Rest)
+    ;   throw(error(existence_error(export, Name/Arity),
+                context(export/1, 'can only export predicates defined by this harness')))
+    ).
 
 %% ============================================================
 %% Module loading (preloaded by the embedding before the main source)
@@ -4294,6 +4321,7 @@ repl_snapshot_save(SessionId) :-
     ;   ToolSources = []
     ),
     findall(Directive, session_directive(SessionId, Directive), Directives),
+    findall(Name/Arity, session_harness_export(SessionId, Name, Arity), Exports),
     findall(import(Import, Target, TargetImport), session_harness_import(SessionId, Import, Target, TargetImport), Import0),
     (   session_repl_memory(SessionId, Memory) -> true ; Memory = [] ),
     assertz(repl_snapshot(SessionId, snapshot{
@@ -4302,6 +4330,7 @@ repl_snapshot_save(SessionId) :-
         schemas: Schemas,
         tool_sources: ToolSources,
         directives: Directives,
+        exports: Exports,
         imports: Import0,
         memory: Memory
     })).
@@ -4333,6 +4362,12 @@ repl_snapshot_restore(SessionId) :-
         retractall(session_directive(SessionId, _)),
         forall(member(Directive, Snapshot.directives),
             assertz(session_directive(SessionId, Directive))),
+        retractall(session_harness_export(SessionId, _, _)),
+        (   get_dict(exports, Snapshot, SnapshotExports)
+        ->  forall(member(ExportName/ExportArity, SnapshotExports),
+                assertz(session_harness_export(SessionId, ExportName, ExportArity)))
+        ;   true
+        ),
         retractall(session_harness_import(SessionId, _, _, _)),
         (   get_dict(imports, Snapshot, SnapshotImports)
         ->  true

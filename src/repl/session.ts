@@ -2423,6 +2423,29 @@ export class DMLSession {
     }
   }
 
+  /** Replace the harness export list inside the current transaction. */
+  async setHarnessExports(predicates: string[]): Promise<{ ok: boolean; error?: string }> {
+    if (this.transactionBefore === null) return { ok: false, error: 'no open transaction; call begin_turn before changing exports' }
+    if (this.purpose === 'work') return { ok: false, error: 'Work cannot author the harness' }
+    const valid = predicates.filter((predicate) => /^[a-z][A-Za-z0-9_]*\/\d+$/.test(predicate))
+    if (valid.length !== predicates.length) return { ok: false, error: 'exports must be Name/Arity indicators' }
+    const indicators = valid.map((predicate) => {
+      const [name, arity] = predicate.split('/')
+      return `${quoteAtom(name)}/${Number(arity)}`
+    }).join(', ')
+    try {
+      const result = this.prologQuery(
+        `deepclause_mi:repl_set_harness_exports('${this.sessionId}', [${indicators}], Result)`,
+      )
+      const outcome = plainValue(result?.Result)
+      if (outcome !== 'ok') return { ok: false, error: String(outcome ?? 'could not update exports') }
+      this.transactionDirty = true
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
   async beginTurn(): Promise<{ ok: boolean; error?: string; message?: string }> {
     if (this.purpose === 'work') return { ok: false, error: 'Work cannot author the harness. Open a separate Develop conversation.' };
     const conflict = await this.persistentConflict(); if (conflict) return { ok: false, error: conflict };

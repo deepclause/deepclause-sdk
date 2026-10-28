@@ -177,3 +177,16 @@ describe('authoring use_harness tool', () => {
     expect(values).toContain('11');
   });
 });
+
+describe('authoring export tool', () => {
+  it('replaces the public export list inside a transaction', async () => {
+    repl = await createHarnessRepl({ workspacePath: workspace, model: 'test-model', provider: 'openai', execution: 'inline' });
+    expect((await repl.session.beginTurn()).ok).toBe(true);
+    expect((await repl.session.define('foo/1', 'foo(1).')).ok).toBe(true);
+    expect(await repl.session.setHarnessExports(['foo/1'])).toEqual({ ok: true });
+    expect((await repl.session.endTurn()).committed).toBe(true);
+    const source = await repl.session.harnessSource();
+    expect(source).toContain('export([foo/1])');
+    expect(await repl.session.setHarnessExports(['missing/1'])).toEqual({ ok: false, error: 'no open transaction; call begin_turn before changing exports' });
+  });
+});

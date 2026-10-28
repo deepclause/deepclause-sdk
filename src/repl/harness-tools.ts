@@ -65,6 +65,8 @@ export interface HarnessToolController {
   listing(filter: string): Promise<string>;
   /** Add a read-only foreign harness import inside the current edit transaction. */
   useHarness(name: string, predicates: string[], version?: string | number): Promise<{ ok: boolean; error?: string }>;
+  /** Replace the harness's public export list inside the current edit transaction. */
+  setHarnessExports(predicates: string[]): Promise<{ ok: boolean; error?: string }>;
   /** The harness Work shell, when one is declared. */
   shell(): ShellSpec | null;
   /** Concise harness manifest for the system prompt. */
@@ -277,6 +279,20 @@ export function createHarnessTools(controller: HarnessToolController): Map<strin
       String(args.name ?? ''),
       String(args.predicates ?? '').split(',').map((predicate) => predicate.trim()).filter(Boolean),
       typeof args.version === 'string' && args.version.trim() ? args.version.trim() : undefined,
+    ),
+  });
+
+  tools.set('set_exports', {
+    description: 'Replace the harness public export list. Requires begin_turn. Pass all predicates that should be exported, comma-separated; pass an empty string to clear exports. Exported predicates become available to other harnesses through use_harness.',
+    parameters: {
+      type: 'object',
+      properties: {
+        predicates: stringProp('Complete export list, e.g. summarise/2,prioritise/2. Empty clears exports.'),
+      },
+      required: ['predicates'],
+    },
+    execute: async (args) => controller.setHarnessExports(
+      String(args.predicates ?? '').split(',').map((predicate) => predicate.trim()).filter(Boolean),
     ),
   });
 
