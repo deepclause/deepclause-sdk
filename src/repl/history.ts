@@ -243,11 +243,20 @@ export class HistoryStore {
   /** Harness slot names under this history root, excluding incomplete folders. */
   async listHarnessNames(): Promise<string[]> {
     try {
-      const entries = await fs.readdir(path.join(this.rootAbs, 'harnesses'), { withFileTypes: true });
-      return entries
-        .filter((entry) => entry.isDirectory() && isValidHarnessName(entry.name))
-        .map((entry) => entry.name)
-        .sort((a, b) => a.localeCompare(b));
+      // Browser fs shims do not all implement `readdir({ withFileTypes })`.
+      // Read names first and test directories separately so the listing works
+      // in both Node and the OPFS bridge.
+      const entries = await fs.readdir(path.join(this.rootAbs, 'harnesses'));
+      const names: string[] = [];
+      for (const name of entries) {
+        if (!isValidHarnessName(name)) continue;
+        try {
+          if ((await fs.stat(path.join(this.rootAbs, 'harnesses', name))).isDirectory()) names.push(name);
+        } catch {
+          /* vanished or unreadable */
+        }
+      }
+      return names.sort((a, b) => a.localeCompare(b));
     } catch {
       return [];
     }
