@@ -2,6 +2,8 @@
 
 **Effortlessly build efficient model-, task-, or domain-specific harnesses.**
 
+**Web app:** [web.deepclause.ai](https://web.deepclause.ai)
+
 Follow us on [X (@hilbertshelper)](https://x.com/hilbertshelper) · Blog: [deepclause.substack.com](https://deepclause.substack.com)
 
 DeepClause is a **Prolog-based runtime for self-modifying agent harnesses**. A
