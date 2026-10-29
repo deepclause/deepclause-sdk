@@ -1064,7 +1064,6 @@ harness_indicator_list(Spec, List) :-
     ;   List = [Spec]
     ).
 
-zz_debug_fact(ok).
 valid_harness_indicator(Name/Arity) :-
     atom(Name), integer(Arity), Arity >= 0,
     \+ repl_reserved_name(Name).
