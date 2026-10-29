@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.5.0 - 2026-10-29
+
+### Added
+
+- **Versioned, read-only harness modules.** A harness can publish an API with
+  `:- export([p/2]).` and import another harness's exports with
+  `:- use_harness(Name, [p/2]).` or `:- use_harness(Name, version(3), [p/2]).`
+  Imports are read-only, private helpers stay private, and load-time validation
+  rejects missing exports, version mismatches, cycles, redefinitions and reserved
+  names with provenance errors. Imports do not inherit the other harness's
+  `shell/1`, tools, workflows or `agent_main`.
+- **Authoring tools for module composition.** The authoring agent can inspect
+  foreign harnesses with `listing("harnesses")` / `listing("harness:Name")`, add
+  an import with `use_harness`, and replace exports with `set_exports`, all inside
+  the normal edit transaction.
+- **Harness module preloading and provenance.** `createHarnessRepl` accepts
+  `harnessModules`, exposes `preloadHarnessModules()` and `linkedScripts()`, and
+  reports `harnessModuleInfo()`; `HarnessModuleSource`/`HarnessModuleInfo` are
+  exported. Dependency sources travel with exported bundles and are preloaded in
+  execute workers.
+- **Module locks in session snapshots.** Session snapshots record the exact
+  dependency versions and hashes; restore and worker execution use the same
+  modules. Foreign harness listing works without history, and browser filesystem
+  adapters handle directory listings without `withFileTypes`.
+
+### Changed
+
+- The authoring prompts now describe harness modules and direct the agent to
+  inspect a foreign harness before importing it.
+- `README.md` links the hosted web app at <https://web.deepclause.ai>.
+
+### Fixed
+
+- Foreign harness directories are listed correctly in browser filesystems and
+  without a history-enabled session.
+- Removed a stray debug fact from the meta-interpreter.
+
 ## 0.4.0 - 2026-10-21
 
 ### Added
