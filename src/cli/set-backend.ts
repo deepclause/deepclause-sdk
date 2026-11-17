@@ -17,22 +17,24 @@ import * as readline from 'readline';
 
 import { loadConfig, updateConfig } from './config.js';
 import {
+  LLAMA_PROVIDER_ID,
   createPiBackend,
   isPiPackageAvailable,
   openPiRuntime,
   toPiModelInfo,
+  type LlamaServerOptions,
   type PiModelInfo,
   type PiProviderInfo,
   type PiRuntimeHandle,
 } from '../repl/backend.js';
-import { apiKeyInteraction, createTerminalAuthInteraction } from '../repl/auth.js';
+import { createTerminalAuthInteraction, loginToProvider } from '../repl/auth.js';
 import { pickFromList } from '../repl/picker.js';
 
 export type BackendKind = 'env' | 'pi';
 
 const PI_PACKAGE = '@earendil-works/pi-coding-agent';
 
-export interface SetBackendOptions {
+export interface SetBackendOptions extends LlamaServerOptions {
   agentDir?: string;
   models?: string;
   auth?: string;
@@ -135,10 +137,26 @@ export async function ensurePiAuth(
   provider: string,
   options: SetBackendOptions,
 ): Promise<void> {
-  if (handle.hasAuth(provider)) return;
+  const server: LlamaServerOptions = {
+    baseUrl: options.baseUrl,
+    host: options.host,
+    port: options.port,
+  };
+  // An explicit llama.cpp endpoint must re-login: the router URL lives in the
+  // stored credential, so skipping this would silently keep the old one.
+  const explicitServer = options.baseUrl !== undefined
+    || options.host !== undefined
+    || options.port !== undefined;
+  if (handle.hasAuth(provider) && !(provider === LLAMA_PROVIDER_ID && explicitServer)) {
+    return;
+  }
 
   if (options.apiKey) {
-    await handle.login(provider, apiKeyInteraction(options.apiKey), 'api_key');
+    await loginToProvider(handle, provider, {
+      interaction: createTerminalAuthInteraction(),
+      apiKey: options.apiKey,
+      ...server,
+    });
     return;
   }
 
@@ -147,10 +165,16 @@ export async function ensurePiAuth(
   const canApiKey = info?.apiKey !== false;
 
   if (options.login === false || !process.stdin.isTTY) {
-    throw new Error(
-      `pi has no credentials for provider '${provider}'. `
-      + `Run 'pi auth' to sign in, or pass --api-key <key>.`,
-    );
+    if (explicitServer && handle.hasAuth(provider)) {
+      throw new Error(
+        `Updating the llama.cpp endpoint requires re-login; `
+        + `pass --api-key <key> or run 'deepclause login --provider llama.cpp' in a terminal.`,
+      );
+    }
+    const hint = provider === LLAMA_PROVIDER_ID
+      ? `Run 'deepclause login --provider llama.cpp', set LLAMA_BASE_URL, or pass --api-key <key>.`
+      : `Run 'pi auth' to sign in, or pass --api-key <key>.`;
+    throw new Error(`pi has no credentials for provider '${provider}'. ${hint}`);
   }
 
   let type: 'api_key' | 'oauth' = canOAuth && !canApiKey ? 'oauth' : 'api_key';
@@ -162,7 +186,11 @@ export async function ensurePiAuth(
   }
 
   console.log(`\nStarting pi login for '${provider}' (${type})…`);
-  await handle.login(provider, createTerminalAuthInteraction(), type);
+  await loginToProvider(handle, provider, {
+    interaction: createTerminalAuthInteraction(),
+    type,
+    ...server,
+  });
 }
 
 /**
@@ -220,7 +248,28 @@ async function setupPiBackend(
     };
   }
 
-  const model = await choosePiModel(handle, options);
+  // Resolve credentials before the catalog lookup when the user named a
+  // provider. Some providers (llama.cpp) only publish a catalog after auth.
+  const normalizedModel = options.model?.replace(':', '/');
+  const explicitServer = options.baseUrl !== undefined
+    || options.host !== undefined
+    || options.port !== undefined;
+  const providerHint = options.provider
+    ?? (normalizedModel?.includes('/') ? normalizedModel.split('/')[0] : undefined)
+    ?? (explicitServer ? LLAMA_PROVIDER_ID : undefined);
+  if (
+    providerHint
+    && handle.listProviders().some((provider) => provider.id === providerHint)
+  ) {
+    await ensurePiAuth(handle, providerHint, options);
+  }
+
+  // When the endpoint flags imply llama.cpp but no provider was named, keep
+  // the picker scoped to that provider instead of every model in pi's catalog.
+  const chooseOptions = explicitServer && !options.provider
+    ? { ...options, provider: providerHint ?? LLAMA_PROVIDER_ID }
+    : options;
+  const model = await choosePiModel(handle, chooseOptions);
   await ensurePiAuth(handle, model.provider, options);
   const thinkingLevel = await chooseThinkingLevel(model, options.thinking);
 
@@ -288,6 +337,9 @@ export function registerSetBackendCommand(program: Command): void {
     .option('--model <provider/model>', 'pin the default model (skips the picker)')
     .option('--thinking <level>', 'thinking level for reasoning models (off|minimal|low|medium|high|xhigh|max)')
     .option('--provider <id>', 'restrict the catalog/picker to one provider')
+    .option('--base-url <url>', 'llama.cpp server URL (overrides --host/--port)')
+    .option('--host <host>', 'llama.cpp server host (default 127.0.0.1)')
+    .option('--port <port>', 'llama.cpp server port (default 8080)')
     .option('--api-key <key>', 'store an API key for the provider in pi credentials')
     .option('--install', `(no-op) ${PI_PACKAGE} ships as a dependency`)
     .option('--list', 'list pi providers and models without changing the backend')

@@ -80,20 +80,81 @@ when there is no structure you would want to reuse, review, or reproduce.
 
 ## Develop and Work
 
-The terminal and web share a Work contract. **Develop** authors DML; **Work** uses
-its declared assistant tools and workflows without authoring tools. Manual starts
-run exactly the selected workflow, with validated inputs and typed outputs:
+DeepClause has two ways to use the same harness:
+
+| | Develop | Work |
+|---|---|---|
+| Purpose | Author and edit the harness | Use the harness |
+| Input | plain English, or `/goal <dml>` | chat with the declared tools, or run a declared workflow |
+| Can change DML | yes, through transactional commits | no |
+| Needs `shell/1` | no | yes |
+
+**Develop is the default.** Describe a skill, tool, or change in plain English;
+the authoring agent writes, tests, and commits it. **Work** is the stable,
+non-authoring surface for a harness that is ready to use.
+
+### Work needs a shell
+
+A harness becomes usable in Work when it declares a `shell/1` fact:
+
+```prolog
+shell(_{
+    kind: agent,
+    system: "You are a concise writing assistant.",
+    host_tools: [],
+    tools: [
+        _{name: "text_length", goal: "length_of",
+          description: "Count characters in text.",
+          inputs: [_{name: "Text", type: string}],
+          outputs: [_{name: "N", type: integer}]}
+    ],
+    workflows: [
+        _{name: "Uppercase", goal: "uppercase",
+          inputs: [_{name: "Text", type: string}],
+          outputs: [_{name: "Upper", type: string}]}
+    ],
+    welcome: "Ask about text, or choose Uppercase."
+}).
+```
+
+- `kind: agent` gives a chat assistant that can call only the declared tools and
+  workflows. `kind: workflow` gives a workflow-only surface with no assistant.
+- `tools` are declared DML tools; `host_tools` lists host capabilities the
+  harness may use (for example `bash`). Host grants and sandbox boundaries still
+  apply.
+- Workflow inputs and outputs are typed. Missing or invalid inputs fail before
+  execution; a failed, cancelled, or suspended workflow is not success.
+- A harness without `shell/1` has no Work interface. Open Develop or an explicit
+  Run instead.
+
+### Entering Work
+
+In the TUI:
+
+```text
+/mode work [harness]                     open a Work conversation
+/workflows                               list declared workflows
+/workflow "Uppercase" {"Text":"hello"}   run exactly that workflow
+/mode develop [harness]                  return to authoring
+```
+
+From the CLI (assuming a harness named `example`):
 
 ```bash
 deepclause repl --mode work --harness example
-deepclause repl --mode work --harness example --workflow "Summarise text" --inputs '{"Text":"hello"}' --json
+deepclause repl --mode work --harness example \
+  --workflow "Uppercase" --inputs '{"Text":"hello"}' --json
 ```
 
-No `shell/1` means no inferred Work interface: open Develop or an explicit Run.
-Use `/mode`, `/workflows`, `/workflow` and `/details` in the TUI. Purpose, harness
-and snapshots persist across restart/transfer; Work and Develop are separate
-conversations. See [Work mode](docs/WORK_MODE.md) and the implementation/status
-notes in [TUI/web reconciliation](docs/TUI_WEB_RECONCILIATION.md).
+A manual `--workflow` run executes exactly that workflow and makes **zero
+assistant calls**. An agent shell calls the model only when the conversation
+needs it. Work and Develop are separate conversations with separate snapshots.
+Work is pinned to the harness version it started with; to change the shell,
+tools, or workflows, return to Develop (or open a fresh Work conversation after
+the edit).
+
+See [Work mode](docs/WORK_MODE.md) for the full contract and
+[TUI/web reconciliation](docs/TUI_WEB_RECONCILIATION.md) for implementation status.
 
 ## The REPL: a living, self-modifying harness
 
@@ -497,6 +558,58 @@ overrides it. Existing pi installations stay untouched.
 
 ### Local models (Ollama, llama.cpp, vLLM)
 
+#### llama.cpp (router or single-model)
+
+When `llama-server` runs in **router mode** (started without `--model` or `-m`),
+the `pi` backend registers pi's built-in `llama.cpp` provider and discovers its
+models live. Point it at the router with `LLAMA_BASE_URL`, or sign in once:
+
+```bash
+# one-off / environment-driven
+export LLAMA_BASE_URL=http://127.0.0.1:8080
+deepclause repl
+
+# or persist the router URL + an optional API key and pick a default model
+deepclause login --provider llama.cpp
+
+# non-default host and port
+deepclause login --provider llama.cpp --host 192.168.1.50 --port 9000
+deepclause login --provider llama.cpp --base-url http://gpu-box:9000
+deepclause set-backend pi --provider llama.cpp --host 192.168.1.50 --port 9000 \
+  --model llama.cpp/<id>
+```
+
+`--base-url` wins over `--host`/`--port`; a bare `--host` defaults the port to
+`8080`, and `--port` alone defaults the host to `127.0.0.1`. Passing an explicit
+endpoint re-runs the login, so the stored router URL is updated. The interactive
+login prompt also accepts a full URL, a bare `host`, or `host:port` when these
+flags are omitted, and `--provider llama.cpp` may be omitted when one of these
+endpoint flags is present. For a router that requires an API key, add
+`--api-key <key>`; the URL is resolved from the explicit flags, then
+`LLAMA_BASE_URL`, then `http://127.0.0.1:8080`.
+
+Inside the REPL, `/login` lists `llama.cpp`. Selecting it prompts for a base
+URL, a `host:port`, or a host and then a port. You can also pass the endpoint
+directly:
+
+```text
+/login llama.cpp --host 192.168.1.50 --port 9000
+/login --base-url http://gpu-box:9000
+```
+
+After `/login`, `/model` includes the models discovered by that login (the
+choice still applies on the next start). Use `/model llama.cpp/<id>` to set the
+default, or pass `--model llama.cpp/<id>` for this run. Start the router with
+`--jinja` when you need tool calling for `task/N`.
+
+Single-model mode also works: when `/models` does not return router metadata,
+DeepClause falls back to `/v1/models` and registers the reported model. If the
+server exposes neither a model id nor a model path, it uses the placeholder id
+`local-model`. Use `models.json` if you need to pin an exact id for a server
+that rejects arbitrary model names.
+
+#### Other OpenAI-compatible endpoints (Ollama, vLLM)
+
 The default `pi` backend reads pi's `models.json`, which can declare **custom
 OpenAI-compatible providers**, so a local server needs no SDK changes:
 
@@ -524,7 +637,7 @@ OpenAI-compatible providers**, so a local server needs no SDK changes:
 
 ```bash
 deepclause set-backend pi --list   # lists "loc (Local server) — configured [api-key]"
-                                   # and the model "loc/lecho"
+                                   # and the model "loc/llama3.1"
 deepclause repl --model loc:llama3.1
 ```
 

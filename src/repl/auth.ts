@@ -17,6 +17,12 @@ import type {
   PiAuthInteractionLike,
   PiRuntimeHandle,
 } from './backend.js';
+import {
+  DEFAULT_LLAMA_SERVER_URL,
+  LLAMA_PROVIDER_ID,
+  resolveLlamaServerUrl,
+  type LlamaServerOptions,
+} from './backend.js';
 
 export interface LoginProviderOption {
   id: string;
@@ -76,12 +82,40 @@ export function createTerminalAuthInteraction(): PiAuthInteractionLike {
   };
 }
 
-/** Interaction that answers every prompt with a fixed API key. */
-export function apiKeyInteraction(apiKey: string): PiAuthInteractionLike {
+/** Interaction that answers every prompt with a fixed API key (and optional text). */
+export function apiKeyInteraction(
+  apiKey: string,
+  options: { text?: string } = {},
+): PiAuthInteractionLike {
   return {
-    prompt: async () => apiKey,
+    prompt: async (prompt) => (prompt.type === 'secret' ? apiKey : (options.text ?? apiKey)),
     notify: (event) => {
       if (event.message) console.log(event.message);
+    },
+  };
+}
+
+/**
+ * Answer llama.cpp's server-URL prompt with an explicit `--base-url`/`--host`/
+ * `--port`, or normalise an entered `host`/`host:port` to an HTTP URL (pi's
+ * provider otherwise requires a scheme).
+ */
+function llamaLoginInteraction(
+  interaction: PiAuthInteractionLike,
+  server: LlamaServerOptions,
+): PiAuthInteractionLike {
+  const url = resolveLlamaServerUrl(server);
+  return {
+    ...interaction,
+    prompt: async (prompt) => {
+      if (prompt.type !== 'text') return interaction.prompt(prompt);
+      if (url) return url;
+      const answer = (await interaction.prompt({
+        ...prompt,
+        message: 'llama.cpp host, host:port, or base URL',
+      })).trim();
+      if (!answer || /^https?:\/\//i.test(answer)) return answer;
+      return `http://${answer}`;
     },
   };
 }
@@ -120,10 +154,40 @@ export function listLoginProviders(
 export async function loginToProvider(
   handle: PiRuntimeHandle,
   providerId: string,
-  options: { interaction: PiAuthInteractionLike; type?: 'api_key' | 'oauth'; apiKey?: string },
+  options: {
+    interaction: PiAuthInteractionLike;
+    type?: 'api_key' | 'oauth';
+    apiKey?: string;
+  } & LlamaServerOptions,
 ): Promise<void> {
+  const server: LlamaServerOptions = {
+    baseUrl: options.baseUrl,
+    host: options.host,
+    port: options.port,
+  };
+  const explicitServerUrl = resolveLlamaServerUrl(server);
+  const serverUrl = explicitServerUrl
+    ?? process.env.LLAMA_BASE_URL
+    ?? DEFAULT_LLAMA_SERVER_URL;
+
+  const login = async (interaction: PiAuthInteractionLike, type: 'api_key' | 'oauth'): Promise<void> => {
+    try {
+      await handle.login(providerId, interaction, type);
+    } catch (error) {
+      if (providerId === LLAMA_PROVIDER_ID && (explicitServerUrl || options.apiKey)) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`could not reach llama.cpp at ${serverUrl}: ${message}`);
+      }
+      throw error;
+    }
+  };
+
   if (options.apiKey) {
-    await handle.login(providerId, apiKeyInteraction(options.apiKey), 'api_key');
+    const interaction = apiKeyInteraction(
+      options.apiKey,
+      providerId === LLAMA_PROVIDER_ID ? { text: serverUrl } : undefined,
+    );
+    await login(interaction, 'api_key');
     return;
   }
   const types = listLoginProviders(handle)
@@ -133,7 +197,10 @@ export async function loginToProvider(
   if (!type) {
     throw new Error(`provider '${providerId}' has no login method`);
   }
-  await handle.login(providerId, options.interaction, type);
+  const interaction = providerId === LLAMA_PROVIDER_ID
+    ? llamaLoginInteraction(options.interaction, server)
+    : options.interaction;
+  await login(interaction, type);
 }
 
 /** Remove a stored credential (pi `/logout`). */

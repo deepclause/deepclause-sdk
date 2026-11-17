@@ -1163,6 +1163,16 @@ deepclause set-backend env           # revert to SDK providers/API keys
 deepclause set-backend status        # show the active backend and model
 ```
 
+The backend also registers pi's bundled `llama.cpp` provider. A llama.cpp
+router (`llama-server` started without `--model`/`-m`) is discovered from
+`LLAMA_BASE_URL` or through `deepclause login --provider llama.cpp`; use
+`--base-url`, `--host`, and `--port` to select a non-default endpoint. The REPL
+`/login` command accepts the same flags and, when selecting `llama.cpp`
+interactively, prompts for a base URL, `host:port`, or host and port.
+Single-model llama.cpp servers also work through a `/v1/models` fallback (and a
+`local-model` placeholder when no id is exposed); other OpenAI-compatible
+endpoints still use `models.json`.
+
 It writes a `backend` section into `.deepclause/config.json`:
 
 ```json

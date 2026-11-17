@@ -10,6 +10,7 @@
  */
 
 import * as path from 'path';
+import { pathToFileURL } from 'url';
 
 import type {
   LLMBackend,
@@ -241,6 +242,15 @@ function toPiMessages(messages: LLMBackendMessage[], model: PiModelLike): unknow
 }
 
 /**
+ * pi-ai's `streamSimple()` reserves this many tokens from the model's context
+ * window as a safety margin. For a small local window (llama.cpp `-c 4096`),
+ * that margin exceeds the whole window, so `max_tokens` collapses to 1.
+ * Passing a window inflated by the same margin to `streamSimple` cancels it;
+ * the provider request itself (model, URL, prompt) is unchanged.
+ */
+const PI_CONTEXT_SAFETY_TOKENS = 4096;
+
+/**
  * Wrap a pi registry + model as an SDK `LLMBackend`. Reused by the extension
  * embedding, which passes its live registry.
  *
@@ -345,7 +355,19 @@ export function createPiAdapter(  registry: PiRegistryLike,
       if (registry.streamSimple) {
         // Stream text/thinking deltas as they arrive; the final message carries
         // the full text, tool calls, and usage.
-        const stream = registry.streamSimple(activeModel, context, options);
+        //
+        // pi-ai clamps the output budget to
+        // `contextWindow - promptTokens - PI_CONTEXT_SAFETY_TOKENS` with a
+        // minimum of 1. For llama.cpp models whose window is the same size as
+        // that reserve, every request would ask for exactly one token. Inflate
+        // only the model object handed to streamSimple so the clamp cancels out;
+        // the actual model/request fields are untouched.
+        const requestModel = activeModel.provider === LLAMA_PROVIDER_ID
+          && typeof activeModel.contextWindow === 'number'
+          && activeModel.contextWindow > 0
+          ? { ...activeModel, contextWindow: activeModel.contextWindow + PI_CONTEXT_SAFETY_TOKENS }
+          : activeModel;
+        const stream = registry.streamSimple(requestModel, context, options);
         for await (const event of stream) {
           if (event.type === 'text_delta') {
             if (event.delta) request.onText?.(event.delta);
@@ -430,6 +452,8 @@ export function createPiAdapter(  registry: PiRegistryLike,
 
 interface PiModule {
   getAgentDir(): string;
+  /** Package root, used to load pi's bundled llama.cpp provider. */
+  getPackageDir?(): string;
   ModelRuntime: {
     create(options: { authPath?: string; modelsPath?: string; allowModelNetwork?: boolean }): Promise<unknown>;
   };
@@ -437,6 +461,53 @@ interface PiModule {
 }
 
 const PI_PACKAGE_NAME = '@earendil-works/pi-coding-agent';
+export const LLAMA_PROVIDER_ID = 'llama.cpp';
+export const DEFAULT_LLAMA_SERVER_URL = 'http://127.0.0.1:8080';
+/** Bound the startup catalog probe so an unreachable router cannot stall the CLI. */
+const LLAMA_CATALOG_TIMEOUT_MS = 5_000;
+/** A login already contacted the server, so give the catalog refresh more room. */
+const LLAMA_LOGIN_CATALOG_TIMEOUT_MS = 10_000;
+
+export interface LlamaServerOptions {
+  /** Full server URL; wins over host/port. */
+  baseUrl?: string;
+  /** Router hostname or IP (may include a port). */
+  host?: string;
+  /** Router port; defaults to 8080 for a bare host. */
+  port?: number | string;
+}
+
+/**
+ * Resolve an explicitly configured llama.cpp router URL. Returns undefined when
+ * no URL/host/port was supplied, so callers can fall back to
+ * `LLAMA_BASE_URL` or pi's own default.
+ */
+export function resolveLlamaServerUrl(options: LlamaServerOptions = {}): string | undefined {
+  const baseUrl = options.baseUrl?.trim();
+  if (baseUrl) return baseUrl;
+  if (options.host === undefined && options.port === undefined) return undefined;
+
+  const rawHost = options.host?.trim() || '127.0.0.1';
+  const hasScheme = /^https?:\/\//i.test(rawHost);
+  let url: URL;
+  try {
+    url = new URL(hasScheme ? rawHost : `http://${rawHost}`);
+  } catch {
+    throw new Error(`invalid llama.cpp host: ${rawHost}`);
+  }
+
+  if (options.port !== undefined) {
+    const port = Number(options.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error(`invalid llama.cpp port: ${String(options.port)}`);
+    }
+    url.port = String(port);
+  } else if (!hasScheme && !url.port) {
+    url.port = '8080';
+  }
+
+  return url.origin;
+}
 
 /**
  * Import the pi coding agent. It is a regular dependency of this SDK, so the
@@ -484,6 +555,10 @@ export interface PiRuntimeLike {
     output?: Array<{ type: string; data?: string; mimeType?: string; text?: string }>;
     errorMessage?: string;
   }>;
+  /** Register a native provider on a bare ModelRuntime (llama.cpp). */
+  registerNativeProvider?(provider: unknown): void;
+  /** Reload provider catalogs on a bare ModelRuntime. */
+  refresh?(options: { providers?: string[]; allowNetwork?: boolean; signal?: AbortSignal }): Promise<unknown>;
 }
 
 export interface PiProviderInfo {
@@ -588,6 +663,280 @@ export function isPiPackageAvailable(): boolean {
   }
 }
 
+interface LlamaCatalogEntry {
+  id: string;
+  status: { value: string };
+  meta?: { n_ctx?: number; n_ctx_train?: number };
+  architecture?: { input_modalities?: string[] };
+  source?: string;
+}
+
+interface LlamaRefreshContext {
+  credential?: { key?: string; env?: Record<string, string> };
+  publish: (publication: { persist?: unknown; update?: () => void }) => Promise<boolean>;
+  allowNetwork: boolean;
+  signal: AbortSignal;
+}
+
+interface LlamaProviderLike {
+  auth?: {
+    apiKey?: {
+      login?: (interaction: PiAuthInteractionLike) => Promise<unknown>;
+    };
+  };
+  refreshModels?: (context: LlamaRefreshContext) => Promise<void>;
+  getModels(): unknown[];
+  getAllModels?(): unknown[];
+}
+
+type LlamaSetCatalog = (
+  catalog: LlamaCatalogEntry[],
+  serverUrl: string,
+  options?: { routerAutoload?: boolean },
+) => void;
+
+interface LlamaProviderModule {
+  createLlamaProvider(): {
+    provider: LlamaProviderLike;
+    setCatalog?: LlamaSetCatalog;
+  };
+}
+
+const LLAMA_SINGLE_MODEL_FALLBACK_ID = 'local-model';
+
+/** Normalise a llama.cpp base URL to scheme + host + optional port (no `/v1`). */
+function normalizeLlamaBaseUrl(value: string): string {
+  const trimmed = value.trim();
+  const url = new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`);
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`invalid llama.cpp URL: ${value}`);
+  }
+  url.hash = '';
+  url.search = '';
+  url.pathname = url.pathname.replace(/\/+$/u, '').replace(/\/v1$/u, '') || '/';
+  return url.toString().replace(/\/$/u, '');
+}
+
+/**
+ * pi's LlamaClient.list() only understands router mode. A single-model server
+ * returns a different `/models` shape (or 404s it), so treat those two cases as
+ * a signal to fall back to the OpenAI-compatible catalog.
+ */
+function shouldTryLlamaSingleModelFallback(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /not running in llama\.cpp router mode/i.test(message) || /HTTP 404/i.test(message);
+}
+
+async function fetchLlamaJson(
+  url: string,
+  apiKey: string | undefined,
+  signal?: AbortSignal,
+): Promise<unknown | undefined> {
+  const effectiveSignal = signal ?? AbortSignal.timeout(15_000);
+  try {
+    const response = await fetch(url, {
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+      signal: effectiveSignal,
+    });
+    if (!response.ok) return undefined;
+    return await response.json();
+  } catch {
+    return undefined;
+  }
+}
+
+function llamaModelIds(payload: unknown): string[] {
+  if (!payload || typeof payload !== 'object') return [];
+  const data = (payload as { data?: unknown }).data;
+  if (!Array.isArray(data)) return [];
+  const ids: string[] = [];
+  for (const entry of data) {
+    if (!entry || typeof entry !== 'object') continue;
+    const id = (entry as { id?: unknown }).id;
+    if (typeof id === 'string' && id) ids.push(id);
+  }
+  return ids;
+}
+
+function llamaProps(payload: unknown): { nCtx?: number; modelPath?: string } {
+  if (!payload || typeof payload !== 'object') return {};
+  const record = payload as {
+    default_generation_settings?: { n_ctx?: unknown };
+    n_ctx?: unknown;
+    model_path?: unknown;
+  };
+  const context = record.default_generation_settings?.n_ctx ?? record.n_ctx;
+  const nCtx = typeof context === 'number' && Number.isFinite(context) && context > 0
+    ? context
+    : undefined;
+  const modelPath = typeof record.model_path === 'string' && record.model_path
+    ? record.model_path
+    : undefined;
+  return { nCtx, modelPath };
+}
+
+/**
+ * Build a one-model catalog for a single-model llama.cpp server. Prefer the id
+ * reported by `/v1/models` (or the `/props` model path), and fall back to a
+ * placeholder so login can still complete if the server exposes neither.
+ */
+async function probeLlamaSingleModelCatalog(
+  baseUrl: string,
+  apiKey: string | undefined,
+  signal?: AbortSignal,
+): Promise<LlamaCatalogEntry[]> {
+  const props = llamaProps(await fetchLlamaJson(`${baseUrl}/props`, apiKey, signal));
+  let ids = llamaModelIds(await fetchLlamaJson(`${baseUrl}/v1/models`, apiKey, signal));
+  if (ids.length === 0) {
+    ids = llamaModelIds(await fetchLlamaJson(`${baseUrl}/models`, apiKey, signal));
+  }
+  if (ids.length === 0 && props.modelPath) {
+    ids = [path.basename(props.modelPath)];
+  }
+  if (ids.length === 0) {
+    ids = [LLAMA_SINGLE_MODEL_FALLBACK_ID];
+  }
+  return ids.map((id) => ({
+    id,
+    status: { value: 'loaded' },
+    ...(props.nCtx ? { meta: { n_ctx: props.nCtx, n_ctx_train: props.nCtx } } : {}),
+    architecture: { input_modalities: ['text'] },
+    source: 'preset',
+  }));
+}
+
+/** Teach pi's llama.cpp provider to fall back for a single-model server. */
+function installLlamaSingleModelFallback(
+  provider: LlamaProviderLike,
+  setCatalog: LlamaSetCatalog | undefined,
+): void {
+  if (!setCatalog) return;
+
+  const auth = provider.auth?.apiKey;
+  if (auth && typeof auth.login === 'function') {
+    const originalLogin = auth.login.bind(auth);
+    auth.login = async (interaction: PiAuthInteractionLike) => {
+      let enteredUrl: string | undefined;
+      let enteredKey: string | undefined;
+      const wrapped: PiAuthInteractionLike = {
+        ...interaction,
+        prompt: async (prompt) => {
+          const answer = await interaction.prompt(prompt);
+          if (prompt.type === 'text' && enteredUrl === undefined) enteredUrl = answer;
+          if (prompt.type === 'secret') enteredKey = answer;
+          return answer;
+        },
+      };
+      try {
+        return await originalLogin(wrapped);
+      } catch (error) {
+        if (!shouldTryLlamaSingleModelFallback(error)) throw error;
+        let baseUrl: string;
+        try {
+          baseUrl = normalizeLlamaBaseUrl(
+            enteredUrl?.trim() || process.env.LLAMA_BASE_URL || DEFAULT_LLAMA_SERVER_URL,
+          );
+        } catch {
+          throw error;
+        }
+        const apiKey = enteredKey?.trim() || undefined;
+        setCatalog(await probeLlamaSingleModelCatalog(baseUrl, apiKey, interaction.signal), baseUrl, {
+          routerAutoload: false,
+        });
+        return { type: 'api_key', key: apiKey, env: { LLAMA_BASE_URL: baseUrl } };
+      }
+    };
+  }
+
+  const originalRefresh = provider.refreshModels;
+  if (typeof originalRefresh === 'function') {
+    provider.refreshModels = async (context) => {
+      try {
+        return await originalRefresh.call(provider, context);
+      } catch (error) {
+        if (!shouldTryLlamaSingleModelFallback(error)) throw error;
+        const serverUrl = context.credential?.env?.LLAMA_BASE_URL;
+        if (!context.allowNetwork || !serverUrl || context.signal.aborted) throw error;
+        let baseUrl: string;
+        try {
+          baseUrl = normalizeLlamaBaseUrl(serverUrl);
+        } catch {
+          throw error;
+        }
+        const catalog = await probeLlamaSingleModelCatalog(baseUrl, context.credential?.key, context.signal);
+        setCatalog(catalog, baseUrl, { routerAutoload: false });
+        await context.publish({
+          persist: { models: provider.getAllModels?.() ?? provider.getModels(), checkedAt: Date.now() },
+          update: () => undefined,
+        });
+      }
+    };
+  }
+}
+
+/**
+ * Register pi's bundled llama.cpp provider on a bare ModelRuntime.
+ *
+ * DeepClause constructs ModelRuntime directly, so pi's extension loader never
+ * runs and its llama.cpp extension is absent. The provider is importable from
+ * the installed pi package; registering it makes `/login llama.cpp`,
+ * `LLAMA_BASE_URL`, and live router discovery behave as they do in pi.
+ */
+async function registerLlamaCppProvider(pi: PiModule, runtime: PiRuntimeLike): Promise<boolean> {
+  if (!runtime.registerNativeProvider || typeof pi.getPackageDir !== 'function') {
+    return false;
+  }
+  const providerPath = path.join(pi.getPackageDir(), 'dist', 'extensions', 'llama', 'provider.js');
+  try {
+    const module = (await import(pathToFileURL(providerPath).href)) as LlamaProviderModule;
+    if (typeof module.createLlamaProvider !== 'function') return false;
+    const { provider, setCatalog } = module.createLlamaProvider();
+    installLlamaSingleModelFallback(provider, setCatalog);
+    runtime.registerNativeProvider(provider);
+    return true;
+  } catch {
+    // A different pi layout simply leaves llama.cpp unavailable; everything
+    // else keeps working through models.json and the built-in providers.
+    return false;
+  }
+}
+
+/**
+ * Refresh the llama.cpp catalog from its router. The provider only contacts
+ * the server when it has a credential (a stored login or `LLAMA_BASE_URL`), so
+ * an unconfigured provider is a cheap no-op.
+ */
+async function refreshLlamaCppCatalog(
+  runtime: PiRuntimeLike,
+  timeoutMs = LLAMA_CATALOG_TIMEOUT_MS,
+): Promise<void> {
+  if (!runtime.refresh) return;
+  try {
+    await runtime.refresh({
+      providers: [LLAMA_PROVIDER_ID],
+      allowNetwork: true,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch {
+    // The catalog is best-effort; cached models and the login flow still work.
+  }
+}
+
+/** Create a runtime with DeepClause's extra providers registered. */
+async function createPiRuntime(
+  pi: PiModule,
+  paths: ResolvedBackendPaths,
+): Promise<PiRuntimeLike> {
+  const runtime = (await pi.ModelRuntime.create({
+    authPath: paths.authPath,
+    modelsPath: paths.modelsPath,
+    allowModelNetwork: false,
+  })) as unknown as PiRuntimeLike;
+  await registerLlamaCppProvider(pi, runtime);
+  await refreshLlamaCppCatalog(runtime);
+  return runtime;
+}
+
 /**
  * Open a pi runtime using an existing install's credential store and model
  * catalog. This is the setup entry point used by `set-backend pi`; it does not
@@ -598,11 +947,7 @@ export async function openPiRuntime(
 ): Promise<PiRuntimeHandle> {
   const pi = await importPiModule();
   const paths = resolvePiPaths(options, { agentDir: pi.getAgentDir() });
-  const runtime = (await pi.ModelRuntime.create({
-    authPath: paths.authPath,
-    modelsPath: paths.modelsPath,
-    allowModelNetwork: false,
-  })) as unknown as PiRuntimeLike;
+  const runtime = await createPiRuntime(pi, paths);
   const registry = options.modelRegistry ?? new pi.ModelRegistry(runtime);
 
   return {
@@ -616,6 +961,9 @@ export async function openPiRuntime(
     login: async (providerId, interaction, type) => {
       const authType = type ?? 'api_key';
       await runtime.login(providerId, authType, interaction, {});
+      if (providerId === LLAMA_PROVIDER_ID) {
+        await refreshLlamaCppCatalog(runtime, LLAMA_LOGIN_CATALOG_TIMEOUT_MS);
+      }
     },
     logout: async (providerId) => {
       await runtime.logout(providerId);
@@ -651,11 +999,7 @@ export async function createPiBackend(options: CreatePiBackendOptions = {}): Pro
     const pi = await importPiModule();
     const paths = resolvePiPaths(options, { agentDir: pi.getAgentDir() });
     requested = requested ?? paths.model;
-    const runtime = await pi.ModelRuntime.create({
-      authPath: paths.authPath,
-      modelsPath: paths.modelsPath,
-      allowModelNetwork: false,
-    });
+    const runtime = await createPiRuntime(pi, paths);
     registry = new pi.ModelRegistry(runtime);
   }
 

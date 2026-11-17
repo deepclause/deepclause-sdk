@@ -48,11 +48,16 @@ import { PromptEditor } from '../repl/tui/editor.js';
 import { FormView } from '../repl/tui/form-view.js';
 import { applyFormKey, initialState, rows } from '../repl/form-widget.js';
 import { loadProjectContext } from '../repl/project-context.js';
-import { createPiBackend, THINKING_LEVELS } from '../repl/backend.js';
+import { LLAMA_PROVIDER_ID, createPiBackend, THINKING_LEVELS } from '../repl/backend.js';
 import { createReplToolset, type ReplToolset } from '../repl/toolset.js';
 import { takeStartupPrologMessages } from '../prolog/loader.js';
 import { createPiImageBackend } from '../repl/imagegen.js';
-import { EnvModelResolver, PiModelResolver, type ModelResolver } from '../repl/model-resolver.js';
+import {
+  EnvModelResolver,
+  PiModelResolver,
+  type ModelCatalogEntry,
+  type ModelResolver,
+} from '../repl/model-resolver.js';
 import type { DMLEvent, FormEventPayload, ImageBackend } from '../types.js';
 import type { JsonObject } from '../forms/spec.js';
 import { pickForm } from '../repl/form-widget.js';
@@ -156,7 +161,7 @@ export type ReplInput =
   | { kind: 'prompt'; prompt: string }
   | { kind: 'spawn'; goal: string; name?: string }
   | { kind: 'ps'; watch?: boolean; logs?: boolean; code?: string }
-  | { kind: 'login' }
+  | { kind: 'login'; provider?: string; baseUrl?: string; host?: string; port?: string }
   | { kind: 'send'; target: string; message: string }
   | { kind: 'call'; target: string; message: string }
   | { kind: 'stop'; target: string }
@@ -202,6 +207,78 @@ export function parseVizArgs(arg: string): { entry?: string; mode: DiagramMode; 
 export function formatTurnInput(turn: { mode: 'goal' | 'prompt'; request: string; workflow?: { name: string; inputs: Record<string, unknown> } }): string {
   if (turn.workflow) return `/workflow ${JSON.stringify(turn.workflow.name)} ${JSON.stringify(turn.workflow.inputs)}`;
   return turn.mode === 'goal' ? `/goal ${turn.request}` : turn.request;
+}
+
+/**
+ * Whether the TUI shows execution detail by default.
+ *
+ * Develop and Work both start with tool calls, task activity and reasoning
+ * visible. `--no-events` (and an explicit `/details off`) is the only opt-out;
+ * Work used to hide this by default, which made its assistant look inert next
+ * to Develop even though the runtime was emitting the same events.
+ */
+export function replDetailsDefault(events?: boolean): boolean {
+  return events !== false;
+}
+
+const LOGIN_USAGE = 'login (use /login [provider] [--host <host>] [--port <port>] [--base-url <url>])';
+
+/**
+ * Parse `/login [provider] [--host host] [--port port] [--base-url url]`.
+ * A bare URL is accepted as `--base-url`, and a positional provider may be
+ * omitted when an endpoint flag implies llama.cpp.
+ */
+export function parseLoginArgs(arg: string): ReplInput {
+  const tokens = arg.split(/\s+/).filter(Boolean);
+  let provider: string | undefined;
+  let baseUrl: string | undefined;
+  let host: string | undefined;
+  let port: string | undefined;
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    const equals = token.indexOf('=');
+    const flag = token.startsWith('--') ? (equals >= 0 ? token.slice(0, equals) : token) : '';
+    const inlineValue = equals >= 0 ? token.slice(equals + 1) : undefined;
+    const value = (): string | undefined => inlineValue ?? tokens[++index];
+
+    switch (flag) {
+      case '--base-url':
+      case '--url':
+        baseUrl = value();
+        if (!baseUrl) return { kind: 'unknown-command', name: LOGIN_USAGE };
+        break;
+      case '--host':
+        host = value();
+        if (!host) return { kind: 'unknown-command', name: LOGIN_USAGE };
+        break;
+      case '--port':
+        port = value();
+        if (!port) return { kind: 'unknown-command', name: LOGIN_USAGE };
+        break;
+      case '--provider':
+        provider = value();
+        if (!provider) return { kind: 'unknown-command', name: LOGIN_USAGE };
+        break;
+      case '':
+        if (token.startsWith('-')) {
+          return { kind: 'unknown-command', name: LOGIN_USAGE };
+        }
+        if (/^https?:\/\//i.test(token)) {
+          if (baseUrl) return { kind: 'unknown-command', name: LOGIN_USAGE };
+          baseUrl = token;
+        } else if (!provider) {
+          provider = token;
+        } else {
+          return { kind: 'unknown-command', name: LOGIN_USAGE };
+        }
+        break;
+      default:
+        return { kind: 'unknown-command', name: LOGIN_USAGE };
+    }
+  }
+
+  return { kind: 'login', provider, baseUrl, host, port };
 }
 
 /**
@@ -324,7 +401,7 @@ export function classifyReplInput(line: string): ReplInput {
       case 'stop':
         return arg ? { kind: 'stop', target: arg } : { kind: 'unknown-command', name: 'stop (usage: /stop <name>)' };
       case 'login':
-        return { kind: 'login' };
+        return parseLoginArgs(arg);
       default:
         return { kind: 'unknown-command', name };
     }
@@ -556,6 +633,12 @@ export interface ReplRuntime {
   reasoningMode: 'off' | 'summary' | 'full';
   /** Models this session can switch to, for the model picker. */
   modelResolver?: ModelResolver;
+  /**
+   * Catalog from an interactive /login session. The active backend's registry
+   * was created at startup, so it does not see credentials/models added by a
+   * separate login runtime until the next start.
+   */
+  modelPickerCatalog?: ModelCatalogEntry[];
   /** The backend, so a picker can change the reasoning level live. */
   llmBackend?: import('../types.js').LLMBackend;
   /** Set the reasoning level shown in the status bar. */
@@ -853,7 +936,7 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
 
   const runtime: ReplRuntime = {
     mode: purpose,
-    details: options.json ? options.events !== false : purpose !== 'work' && options.events !== false,
+    details: replDetailsDefault(options.events),
     askInput: async (prompt, choices) => currentInput?.(prompt, choices),
     harnesses: async () => {
       try { return (await readdir(path.resolve(workspace, config.repl.history.dir, 'harnesses'), { withFileTypes: true })).filter(entry => entry.isDirectory()).map(entry => entry.name).sort(); }
@@ -880,8 +963,9 @@ export async function createReplRuntime(options: ReplCliOptions): Promise<ReplRu
       runtime.resumedSession = counterpart;
       runtime.promptPrefix = mode === 'work' ? 'work> ' : config.repl.promptPrefix ?? 'dml> ';
       runtime.workSpec = spec;
-      runtime.details = mode !== 'work';
-      runtime.renderer.setDetails?.(runtime.details);
+      // Keep whatever the user chose with /details; the default is now the same
+      // for Develop and Work, so a mode switch no longer resets it.
+      runtime.renderer.setDetails?.(runtime.details ?? replDetailsDefault(options.events));
       statusTracker = new ReplStatusTracker({ model: { id: harnessModel, provider: String(harnessProvider), reasoning, thinkingLevel }, contextWindow });
       statusHolder.tracker = statusTracker;
       wireProcesses(next);
@@ -1166,9 +1250,16 @@ export async function dispatchReplInput(
       print(`stopped ${input.target}`);
       return true;
     }
-    case 'login':
-      print("sign in from the terminal: deepclause login (or /login in the TUI)");
+    case 'login': {
+      const flags = [
+        input.provider ? `--provider ${input.provider}` : '',
+        input.baseUrl ? `--base-url ${input.baseUrl}` : '',
+        input.host ? `--host ${input.host}` : '',
+        input.port ? `--port ${input.port}` : '',
+      ].filter(Boolean).join(' ');
+      print(`sign in from the terminal: deepclause login${flags ? ` ${flags}` : ''}`);
       return true;
+    }
     case 'unknown-command':
       print(`unknown command: /${input.name} — try /help.`);
       return true;
@@ -1371,7 +1462,7 @@ function helpText(mode?: SessionPurpose): string {
     '    /compact [notes]     compact the authoring memory',
     '    /export [file]       save the harness (use .zip to bundle linked files)',
     '    /model [provider/id] show / set the model',
-    '    /login               sign in to a provider (from the terminal or the TUI)',
+    '    /login [provider]    sign in; llama.cpp accepts --host, --port, --base-url',
     '    /freeze  /unfreeze   read-only lock',
     '    /params              show session parameters',
     '    /trace   /notrace    toggle verbose logging',
@@ -1805,7 +1896,9 @@ export async function runTui(
           ? label
           : label === ' ;'
             ? 'Enter/; more · a all · . stop'
-            : null;
+            : label === runtime.promptPrefix
+              ? null
+              : label;
         editor.setPrompt(hint);
         tui.setFocus(editor);
       }
@@ -2010,7 +2103,7 @@ export async function runTui(
   };
 
   const pickModel = async (): Promise<void> => {
-    const catalog = runtime.modelResolver?.catalog() ?? [];
+    const catalog = runtime.modelPickerCatalog ?? runtime.modelResolver?.catalog() ?? [];
     if (catalog.length === 0) {
       renderer.writeLine(`model: ${runtime.model} (no catalog to choose from; set one in config)`);
       return;
@@ -2036,7 +2129,12 @@ export async function runTui(
   };
 
   /** `/login`: sign in to a provider from inside the TUI. */
-  const runLogin = async (): Promise<void> => {
+  const runLogin = async (input: {
+    provider?: string;
+    baseUrl?: string;
+    host?: string;
+    port?: string;
+  }): Promise<void> => {
     let handle;
     try {
       handle = await openPiRuntime({});
@@ -2049,18 +2147,59 @@ export async function runTui(
       renderer.writeLine('no login providers available');
       return;
     }
-    const picked = await choose((done) => new ChoicePicker({
-      title: 'Sign in to a provider',
-      hint: 'Esc to cancel',
-      items: providers.map((provider: LoginProviderOption) => ({
-        value: provider.id,
-        label: `${provider.name} (${provider.id})`,
-        description: provider.configured ? '✓ configured' : provider.authType,
-      })),
-      onSelect: (item) => done(item.value),
-      onCancel: () => done(),
-    }));
-    if (!picked) return;
+    const explicitEndpoint = input.baseUrl !== undefined
+      || input.host !== undefined
+      || input.port !== undefined;
+    let picked = input.provider ?? (explicitEndpoint ? LLAMA_PROVIDER_ID : undefined);
+    if (picked && !providers.some((provider) => provider.id === picked)) {
+      renderer.writeLine(`unknown login provider: ${picked}`);
+      return;
+    }
+    if (!picked) {
+      picked = await choose((done) => new ChoicePicker({
+        title: 'Sign in to a provider',
+        hint: 'Esc to cancel',
+        items: providers.map((provider: LoginProviderOption) => ({
+          value: provider.id,
+          label: `${provider.name} (${provider.id})`,
+          description: provider.configured ? '✓ configured' : provider.authType,
+        })),
+        onSelect: (item) => done(item.value),
+        onCancel: () => done(),
+      }));
+      if (!picked) return;
+    }
+
+    // llama.cpp is the one provider whose endpoint is a local/remote server.
+    // Collect it as a base URL, a host:port, or a bare host + port instead of
+    // making the user type a full scheme in pi's generic URL prompt.
+    let baseUrl = input.baseUrl;
+    let host = input.host;
+    let port = input.port;
+    if (picked === LLAMA_PROVIDER_ID && !explicitEndpoint) {
+      const envUrl = process.env.LLAMA_BASE_URL?.trim();
+      const endpointAnswer = await ask(`llama.cpp host or base URL (${envUrl ?? '127.0.0.1'}) `);
+      if (endpointAnswer === null) return;
+      const endpoint = endpointAnswer.trim();
+      if (endpoint && /^https?:\/\//i.test(endpoint)) {
+        baseUrl = endpoint;
+      } else if (!endpoint && envUrl) {
+        baseUrl = envUrl;
+      } else {
+        host = endpoint || '127.0.0.1';
+        let hasPort = false;
+        try {
+          hasPort = Boolean(new URL(`http://${host}`).port);
+        } catch {
+          // resolveLlamaServerUrl reports a precise error after the prompts.
+        }
+        if (!hasPort) {
+          const portAnswer = await ask('llama.cpp port (8080) ');
+          if (portAnswer === null) return;
+          port = portAnswer.trim() || '8080';
+        }
+      }
+    }
 
     const interaction: PiAuthInteractionLike = {
       prompt: async (prompt) => {
@@ -2090,9 +2229,18 @@ export async function runTui(
     };
 
     try {
-      await loginToProvider(handle, picked, { interaction });
+      await loginToProvider(handle, picked, {
+        interaction,
+        baseUrl,
+        host,
+        port,
+      });
       await persistSetting({ backend: { kind: 'pi' } }, 'login');
-      renderer.writeLine(`signed in to ${picked} (run /model to pick one of its models)`);
+      // The active backend's registry predates this login. Use the login
+      // session's refreshed registry for /model so the new provider/models are
+      // visible immediately (the choice still applies on the next start).
+      runtime.modelPickerCatalog = new PiModelResolver(handle.registry).catalog();
+      renderer.writeLine(`signed in to ${picked} (use /model <provider/id> to set the default for the next start)`);
     } catch (error) {
       renderer.writeLine(`login failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -2287,7 +2435,7 @@ export async function runTui(
         continue;
       }
       if (input.kind === 'login') {
-        await runLogin();
+        await runLogin(input);
         continue;
       }
       if (input.kind === 'ps' && (input.watch || input.logs)) {

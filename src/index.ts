@@ -101,7 +101,17 @@ export type { HarnessExportOptions, HarnessExportResult } from './repl/export.js
 // L2 process worker body, for hosts that run it outside `worker_threads`.
 export { startProcessWorker } from './repl/process-worker.js';
 export type { ProcessWorkerPort } from './repl/process-worker.js';
-export { createPiBackend, createPiAdapter, createLimitedBackend, resolvePiPaths, selectPiModel } from './repl/backend.js';
+export {
+  DEFAULT_LLAMA_SERVER_URL,
+  LLAMA_PROVIDER_ID,
+  createPiBackend,
+  createPiAdapter,
+  createLimitedBackend,
+  resolveLlamaServerUrl,
+  resolvePiPaths,
+  selectPiModel,
+} from './repl/backend.js';
+export type { LlamaServerOptions } from './repl/backend.js';
 export { createReplToolset, buildToolCatalog } from './repl/toolset.js';
 export { pickFromList, filterItems, renderPick } from './repl/picker.js';
 export type { PickItem, PickOptions } from './repl/picker.js';

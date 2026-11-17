@@ -10,7 +10,12 @@
 import type { Command } from 'commander';
 
 import { updateConfig } from './config.js';
-import { openPiRuntime, type PiRuntimeHandle } from '../repl/backend.js';
+import {
+  LLAMA_PROVIDER_ID,
+  openPiRuntime,
+  type LlamaServerOptions,
+  type PiRuntimeHandle,
+} from '../repl/backend.js';
 import {
   createTerminalAuthInteraction,
   listLoginProviders,
@@ -20,7 +25,7 @@ import {
 import { pickFromList, type PickItem } from '../repl/picker.js';
 import { choosePiModel, chooseThinkingLevel, type SetBackendOptions } from './set-backend.js';
 
-export interface LoginCliOptions {
+export interface LoginCliOptions extends LlamaServerOptions {
   agentDir?: string;
   models?: string;
   auth?: string;
@@ -61,6 +66,12 @@ async function resolveProvider(
   options: LoginCliOptions,
 ): Promise<{ id: string; type: 'api_key' | 'oauth' } | null> {
   let providerId = options.provider;
+  if (
+    !providerId
+    && (options.baseUrl !== undefined || options.host !== undefined || options.port !== undefined)
+  ) {
+    providerId = LLAMA_PROVIDER_ID;
+  }
   if (!providerId) {
     const items = providerChoices(handle, Boolean(options.oauth));
     if (items.length === 0) {
@@ -98,7 +109,10 @@ export async function loginCommand(
   workspaceRoot: string,
   options: LoginCliOptions,
 ): Promise<{ provider: string; model?: string }> {
-  if (options.apiKey && !options.provider) {
+  const inferredLlamaEndpoint = options.baseUrl !== undefined
+    || options.host !== undefined
+    || options.port !== undefined;
+  if (options.apiKey && !options.provider && !inferredLlamaEndpoint) {
     throw new Error('--api-key requires --provider <id>');
   }
   const handle = await openHandle(options);
@@ -111,6 +125,9 @@ export async function loginCommand(
     interaction: createTerminalAuthInteraction(),
     type: choice.type,
     apiKey: options.apiKey,
+    baseUrl: options.baseUrl,
+    host: options.host,
+    port: options.port,
   });
   console.log(`\n✓ Signed in to ${choice.id}.`);
 
@@ -171,6 +188,9 @@ export function registerLoginCommands(program: Command): void {
     .command('login')
     .description("Sign in to a model provider using pi's credential store, then pick a default model")
     .option('--provider <id>', 'provider to sign in to (skips the picker)')
+    .option('--base-url <url>', 'llama.cpp server URL (overrides --host/--port)')
+    .option('--host <host>', 'llama.cpp server host (default 127.0.0.1)')
+    .option('--port <port>', 'llama.cpp server port (default 8080)')
     .option('--api-key <key>', 'store an API key for the provider (requires --provider)')
     .option('--oauth', 'use OAuth / subscription sign-in')
     .option('--model <provider/model>', 'set the default model without the picker')
