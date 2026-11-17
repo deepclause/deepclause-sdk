@@ -74,7 +74,6 @@
     repl_hs_register_imports/5,
     parse_harness_module_string/3,
     process_harness_term/3,
-    repl_harness_module_info/2,
     repl_harness_module_info_json/2,
     repl_edit_touched/2,
     repl_edit_touched_text/2,
@@ -149,6 +148,12 @@
 %% `process_engine_result/4`, which is intentional.
 :- discontiguous process_engine_result/4.
 :- discontiguous process_directive/2.
+%% `repl_register_tool/6` sits between the tool clauses of process_clause/2.
+:- discontiguous process_clause/2.
+%% Tool/workflow conversion helpers sit between the workflow_from/2 clauses.
+:- discontiguous workflow_from/2.
+%% Harness-local dispatch sits near mi_call/3; the fallbacks live much later.
+:- discontiguous mi_call_dispatch/3.
 
 %% Dynamic predicates for session state (engine management only, not memory!)
 :- dynamic session_engine/2.       % session_engine(SessionId, Engine) - legacy default engine handle
@@ -2583,10 +2588,6 @@ export_harness_output(SessionId, Header) :-
 export_directives(SessionId) :-
     findall(Directive, session_directive(SessionId, Directive), Directives0),
     sort(Directives0, Directives),
-    findall(Name/Arity-TargetModule,
-        session_harness_import(SessionId, Name/Arity, TargetModule, _),
-        Imports0),
-    sort(Imports0, Imports),
     forall(member(Directive, Directives), format(":- ~q.~n", [Directive])),
     (   Directives == []
     ->  true
@@ -3595,6 +3596,10 @@ repl_manifest(SessionId, Manifest) :-
     sort(Tools0, Tools),
     findall(Directive, session_directive(SessionId, Directive), Directives0),
     sort(Directives0, Directives),
+    findall(Name/Arity-TargetModule,
+        session_harness_import(SessionId, Name/Arity, TargetModule, _),
+        Imports0),
+    sort(Imports0, Imports),
     (   current_predicate(SessionId:module_doc/1),
         SessionId:module_doc(Summary0)
     ->  Summary = Summary0
@@ -9009,7 +9014,7 @@ mi_body_is_pure(SessionId, Body) :-
         ).
 
 %% A host/model predicate, or a user predicate that (transitively) needs one.
-mi_impure_goal(SessionId, Goal) :-
+mi_impure_goal(_SessionId, Goal) :-
     is_mi_special_predicate(Goal),
     \+ mi_control_construct(Goal).
 mi_impure_goal(SessionId, Goal) :-
