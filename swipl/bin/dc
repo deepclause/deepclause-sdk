@@ -1,0 +1,13 @@
+#!/bin/sh
+# Plain SWI-Prolog DeepClause entry point.
+set -e
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH= cd -- "$DIR/.." && pwd)
+if [ -f "$ROOT/prolog/dc_repl.qlf" ]; then
+  MODULE="$ROOT/prolog/dc_repl.qlf"
+else
+  MODULE="$ROOT/prolog/dc_repl.pl"
+fi
+exec swipl -q -O \
+  -g "use_module('$MODULE'),dc_repl:main" \
+  -t halt -- "$@"

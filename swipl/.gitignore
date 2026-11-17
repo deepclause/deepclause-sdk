@@ -1,0 +1,7 @@
+# Generated SWI-Prolog QLF files and caches
+prolog/*.qlf
+prolog/*.qlf.*
+prolog/.*.qlf.*
+prolog/providers/*.qlf
+prolog/providers/*.qlf.*
+prolog/providers/.*.qlf.*

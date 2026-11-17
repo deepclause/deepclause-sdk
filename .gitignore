@@ -2,3 +2,7 @@ node_modules
 .deepclause
 agent_messages_iteration_*.json
 dist
+
+# Generated SWI-Prolog QLF files and version-specific caches
+*.qlf
+*.qlf.*

@@ -214,4 +214,8 @@ real-worker test.
 - Other: `JUDGMENT_BACKENDS.md`, `JUDGE_EXAMPLES.md`, `DML_MEDIA.md`,
   `DML_MODEL_SWITCHING.md`, `DML_REPL_WORKER_EXECUTION.md` (worker plan; L2 now
   implemented in `worker-host.ts`), `DML_LIBS_PROPOSAL.md`, `REFACTOR_CLEANUP.md`,
+  `OUTER_AGENT_DML_SESSION.md` (outer-agent / KB / execution design draft),
+  `DML_EFFECTS_AND_THEOREMS.md` (effects, obligations, and theorem design draft),
+  `SWIPL_RUNTIME.md` (plain SWI-Prolog runtime design; code in `swipl/`),
+  `LEAN_SUBSTRATE_ANALYSIS.md` (substrate analysis draft),
   this file.
