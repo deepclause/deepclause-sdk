@@ -71,14 +71,15 @@ export class DmlToolPane implements Component {
     this.invalidateCache();
   }
 
-  setResult(result: unknown, success: boolean, elapsedMs?: number): void {
+  setResult(result: unknown, success: boolean, elapsedMs?: number, failure?: string): void {
     this.result = result;
     this.state = success ? 'ok' : 'failed';
     this.elapsedMs = elapsedMs;
     if (!success) {
-      this.failure = typeof result === 'string'
-        ? result
-        : String((result as { error?: unknown })?.error ?? 'failed');
+      this.failure = failure
+        ?? (typeof result === 'string'
+          ? result
+          : String((result as { error?: unknown })?.error ?? 'failed'));
     }
     this.invalidateCache();
   }
@@ -159,7 +160,7 @@ export class DmlToolPane implements Component {
           })
           .join('\n'));
       }
-    } else if (typeof this.result === 'string' && this.result.trim()) {
+    } else if (typeof this.result === 'string' && this.result.trim() && this.result !== this.failure) {
       out.push(...this.result.trimEnd().split('\n'));
     }
     return out;
@@ -200,7 +201,13 @@ export class DmlToolPane implements Component {
     // hint is noise, and it made every pane look like it had more to show.
     const body = this.bodyLines();
     const result = this.resultLines();
-    const hidden = Math.max(0, body.length - COLLAPSED_BODY_LINES)
+    // A failed call must show the whole call, not a four-line sample: the command
+    // that failed is the thing the user needs to inspect. The result stays
+    // bounded, with ctrl+o for its full output.
+    const bodyBudget = this.expanded || this.state === 'failed'
+      ? body.length
+      : Math.min(body.length, COLLAPSED_BODY_LINES);
+    const hidden = Math.max(0, body.length - bodyBudget)
       + Math.max(0, result.length - COLLAPSED_BODY_LINES);
     const meta: string[] = [];
     if (this.elapsedMs !== undefined) meta.push(`${this.elapsedMs}ms`);
@@ -210,7 +217,6 @@ export class DmlToolPane implements Component {
     const out: string[] = [truncateToWidth(`${prefix}${headerIndent}${header}`, width, '…')];
 
     // Body: the call itself.
-    const bodyBudget = this.expanded ? body.length : Math.min(body.length, COLLAPSED_BODY_LINES);
     for (const line of body.slice(0, bodyBudget)) {
       for (const wrapped of this.wrap(line, contentWidth, body.length > 1 ? '  ' : '')) {
         out.push(`${gutter}${truncateToWidth(wrapped, contentWidth, '…')}`);

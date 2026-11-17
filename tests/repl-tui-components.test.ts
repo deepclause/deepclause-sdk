@@ -105,6 +105,18 @@ describe('DmlToolPane', () => {
     expect(rendered).toContain('unknown procedure');
   });
 
+  it('shows the whole call body when it fails', () => {
+    // A failure has to show the command/goal that failed, not the four-line
+    // sample a collapsed pane uses for successful calls.
+    const goal = Array.from({ length: 12 }, (_, index) => `step_${index}`).join('\n');
+    const pane = new DmlToolPane({ toolName: 'execute', args: { goal } });
+    pane.setResult({ error: 'step_7 failed' }, false);
+    const rendered = text(pane.render(60));
+    for (let index = 0; index < 12; index += 1) {
+      expect(rendered).toContain(`step_${index}`);
+    }
+  });
+
   it('collapses a long body and reveals it when expanded', () => {
     const lines = Array.from({ length: 20 }, (_, index) => `line ${index}`).join('\n');
     const pane = new DmlToolPane({ toolName: 'bash', args: { command: 'x' } });
@@ -228,6 +240,21 @@ describe('TuiRenderer', () => {
     expect(working.at(-1)).toBeNull();
   });
 
+  it('renders model reasoning in the transcript', () => {
+    const { document, renderer } = build();
+    renderer.render({ type: 'reasoning', content: 'considering the options', frameKind: 'run', depth: 0 } as never);
+    expect(text(document.render(60))).toContain('considering the options');
+  });
+
+  it('keeps reasoning visible even when activity detail is off', () => {
+    // Reasoning is model output, not a technical activity event: `/details off`
+    // may hide tool panes and task activity, but it must not silence thinking.
+    const document = new TranscriptDocument();
+    const renderer = new TuiRenderer({ document, events: false });
+    renderer.render({ type: 'reasoning', content: 'still thinking', frameKind: 'run', depth: 0 } as never);
+    expect(text(document.render(60))).toContain('still thinking');
+  });
+
   it('accumulates streamed text into one markdown block', () => {
     const { document, renderer } = build();
     renderer.render({ type: 'stream', content: '# Title\n\n' });
@@ -249,6 +276,22 @@ describe('TuiRenderer', () => {
   it('reports nothing to toggle when there are no tool calls', () => {
     const { renderer } = build();
     expect(renderer.toggleLastPane()).toBe(false);
+  });
+
+  it('shows a failed call even when activity detail is off', () => {
+    const document = new TranscriptDocument();
+    const renderer = new TuiRenderer({ document, events: false });
+    renderer.render({ type: 'tool_call', toolName: 'bash', toolState: 'starting', toolArgs: { command: 'true' } } as never);
+    renderer.render({ type: 'tool_call', toolName: 'bash', toolState: 'completed', toolResult: { stdout: 'ok' } } as never);
+    expect(text(document.render(60))).not.toContain('bash');
+
+    const command = 'this-command-does-not-exist --with-a-long-argument-to-inspect';
+    renderer.render({ type: 'tool_call', toolName: 'bash', toolState: 'starting', toolArgs: { command } } as never);
+    renderer.render({ type: 'tool_call', toolName: 'bash', toolState: 'failed', toolArgs: { command }, toolError: 'command not found' } as never);
+    const rendered = text(document.render(90));
+    expect(rendered).toContain('bash');
+    expect(rendered).toContain(command);
+    expect(rendered).toContain('command not found');
   });
 
   it('keeps a multi-line argument on one indented line', () => {

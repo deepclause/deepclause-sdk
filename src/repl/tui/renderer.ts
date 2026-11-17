@@ -153,10 +153,18 @@ export class TuiRenderer {
     // `usage`/`model_call` stream, most of which the TUI never draws.
     this.onEvent?.(event);
     switch (event.type) {
-      case 'tool_call':
-        if (!this.showEvents) { this.onWorking?.(['starting', 'running'].includes(event.toolState ?? '') ? `${event.toolName ?? 'tool'}…` : null); return; }
+      case 'tool_call': {
+        // A failure is evidence, not noise: show it even when `/details off`
+        // suppresses successful tool calls. Without this a failed `bash` call
+        // disappeared entirely with the setting off, including its command.
+        const failed = event.toolState === 'failed' || (!event.toolState && event.toolError !== undefined);
+        if (!this.showEvents && !failed) {
+          this.onWorking?.(['starting', 'running'].includes(event.toolState ?? '') ? `${event.toolName ?? 'tool'}…` : null);
+          return;
+        }
         this.renderToolCall(event);
         return;
+      }
       case 'model_call':
         this.onWorking?.(event.modelCallState === 'started' ? 'working…' : null);
         return;
@@ -197,7 +205,9 @@ export class TuiRenderer {
 
   private renderToolCall(event: DMLEvent): void {
     const name = event.toolName ?? 'tool';
-    const state = event.toolState ?? 'running';
+    // Older/leaner failure events may omit `toolState`; `toolError` still makes
+    // the call a failure, not a permanently running pane.
+    const state = event.toolState ?? (event.toolError !== undefined ? 'failed' : 'running');
     const prefix = framePrefix(event, this.showEvents);
 
     if (state === 'starting' || !this.currentPane) {
@@ -218,6 +228,10 @@ export class TuiRenderer {
         event.toolResult ?? event.toolSummary ?? '',
         state === 'completed',
         event.toolDurationMs,
+        // A failure event may carry only `toolError`/`toolSummary` (the runner
+        // does this for argument/policy errors), so do not drop it just because
+        // there is no `toolResult`.
+        event.toolError ?? event.toolSummary,
       );
       this.onWorking?.(null);
       this.currentPane = undefined;

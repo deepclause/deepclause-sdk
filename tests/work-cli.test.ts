@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { classifyReplInput, formatTurnInput } from '../src/cli/repl.js';
+import { classifyReplInput, formatTurnInput, replDetailsDefault } from '../src/cli/repl.js';
 import { parseWorkflowCommand, runDeclaredWorkflow } from '../src/cli/work.js';
 import { WorkView } from '../src/repl/tui/work-view.js';
 import type { HarnessRepl } from '../src/repl/index.js';
 
 describe('terminal Work adapter', () => {
+  it('shows execution detail in Work by default, with --no-events as the opt-out', () => {
+    expect(replDetailsDefault()).toBe(true);
+    expect(replDetailsDefault(true)).toBe(true);
+    expect(replDetailsDefault(false)).toBe(false);
+  });
+
   it('parses modes, details and named workflows without treating inputs as DML', () => {
     expect(classifyReplInput('/mode work support')).toEqual({ kind: 'mode', mode: 'work', harness: 'support' });
     expect(classifyReplInput('/mode other').kind).toBe('unknown-command');
