@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.6.0 - 2026-11-17
+
+### Added
+
+- **llama.cpp in the `pi` backend.** DeepClause registers pi's bundled
+  llama.cpp provider, so `deepclause login --provider llama.cpp`, the REPL
+  `/login`, and `LLAMA_BASE_URL` work without a `models.json` entry.
+  `--base-url`, `--host`, and `--port` select the endpoint; the REPL prompts for
+  a base URL, `host:port`, or host and port when llama.cpp is selected.
+- **Single-model llama.cpp support.** When `/models` is not in router shape,
+  DeepClause probes `/v1/models` and registers the reported model id, falling
+  back to the `/props` model path or the placeholder `local-model`. The context
+  window is read from `/props`.
+- **Plain SWI-Prolog runtime (`swipl/`).** A Node-free runtime with a REPL,
+  frame/session driver, agent loop, streaming OpenAI/Anthropic/Gemini adapters,
+  OpenAI-compatible providers, host tools, unit and integration tests, and an
+  AgentVM image template. Design notes are in `docs/SWIPL_RUNTIME.md`.
+- **Work/Develop documentation.** The README now explains the mode split, the
+  `shell/1` contract (`kind: agent` versus `kind: workflow`), typed workflow
+  inputs/outputs, and how to enter Work from the TUI and CLI.
+- Design drafts for effects/theorems, outer-agent sessions, and substrate
+  analysis under `docs/`.
+
+### Changed
+
+- `/login` shows endpoint and API-key questions in the editor border and does
+  not echo answers (including keys) into the transcript.
+- `/model` uses the post-login catalog, so models discovered by
+  `/login llama.cpp` appear immediately.
+- Failed tool calls are visible even with `/details off`, include the full call
+  body, and show the actual `toolError`. Model reasoning stays visible.
+- Work shows execution detail by default; `--no-events` remains the opt-out.
+
+### Fixed
+
+- **llama.cpp stopped after one token.** pi-ai's `streamSimple()` reserves 4096
+  context tokens as a safety margin; on a 4096-token llama.cpp window this
+  collapsed `max_tokens` to 1. DeepClause cancels that margin for llama.cpp
+  requests so the server receives the real remaining context.
+- Removed meta-interpreter load warnings by declaring intentionally
+  discontiguous predicates, using the manifest imports, and clearing unused
+  variables.
+- Removed stale generated QLF/QLF-cache files from the working tree and ignore
+  them so only portable Prolog sources are published.
+
 ## 0.5.0 - 2026-10-29
 
 ### Added
